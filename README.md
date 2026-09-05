@@ -3,7 +3,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-greatmoko%2FWOKBEE__1-blue?logo=github)](https://github.com/greatmoko/WOKBEE_1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.1**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
+**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.2**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
 在同一套界面中集成四类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**、**消息网关（多 IM 手机遥控本地 Agent）**，统一对接 OpenAI 兼容 API。
 
 ### 设计思想
@@ -32,6 +32,13 @@
 - **AutoBee**：定时任务调度（文本 / 脚本 / WokBee 项目），自然语言生成 Cron，企业微信推送。
 - **AIConfig**：AI 角色库、厂商设置、TokBee / WokBee 设置、Skills、MCP。
 - 基础 UI 与系统样式、本地数据管理等。
+
+### v0.2.2 —— AI 错误统一分类重试 + Agent 直接创建 AutoBee 定时任务
+- **统一 AI API 错误分类**：把 OpenAI SDK / httpx / 供应商返回体等不同来源的异常归一到 `AIErrorKind`，瞬时可重试（限速 429、5xx、超时、连接中断）自动退避重试，不可重试（鉴权失败 / 额度耗尽 / 上下文超长）立即终止并向用户给出定位与中文处置建议。
+- **Agent 可直接创建 AutoBee 定时任务**：在对话 / 项目里用自然语言描述（如「每天下午 6 点半执行」），Agent 解析后调用 `autobee` 工具创建并注册到调度器；信息不确定时用 interrupt 向桌面 / 手机确认后继续。
+- **Skills 目录解析与去重改进**：多目录解析、路径规范化去重、增删管理更稳健。
+- **消息网关支持手机端澄清提问**：Agent 需要确认时把问题发到绑定手机并等待答复，双向交互不再只能无人值守自动选择。
+- **工作区 / 操作栏 / Skills 界面优化**：新增交付物等展示与交互细节打磨。
 
 ### v0.2.1 —— 执行超时 / 暂停 / 去掉自动续跑
 - **execute 超时真正生效**：Windows 上 `playwright-cli open` 等会拉起孙进程的命令，不再把 `subprocess.run(timeout=)` 卡死；用墙钟轮询 + 进程树 / Job Object 超时后杀掉并返回失败（默认仍可用设置里的单工具超时，AI 也可传 `timeout` / `timeout_seconds`）。
@@ -148,7 +155,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python main.py
 ```
 
-启动成功后，窗口标题显示 **WokBee v0.2.1**。
+启动成功后，窗口标题显示 **WokBee v0.2.2**。
 
 ---
 
@@ -331,7 +338,7 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 
 ## 版本
 
-当前版本：**0.2.1**
+当前版本：**0.2.2**
 
 ---
 

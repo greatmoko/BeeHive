@@ -18,7 +18,11 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme, COLORS
-from tokbee.ui.styles.system import make_context_menu, exec_text_edit_context_menu
+from tokbee.ui.styles.system import (
+    make_context_menu,
+    exec_text_edit_context_menu,
+    rounded_spin_qss,
+)
 from tokbee.ui.viewmodels.chat_viewmodel import ChatViewModel
 from tokbee.ui.widgets.context_ring import ContextUsageRing
 from tokbee.core.chat_manager import ChatManager, ChatSession
@@ -1924,13 +1928,7 @@ class _ChatWorkspace(QWidget):
         hist_box.setSingleStep(2)
         hist_box.setValue(params.max_context_message_count)
         hist_box.setFixedWidth(200)
-        hist_box.setStyleSheet(f"""
-            QSpinBox {{
-                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
-                border-radius: 6px; padding: 4px 8px; color: {c["text"]}; font-size: 13px;
-            }}
-            QSpinBox:focus {{ border-color: {c["input_focus_border"]}; }}
-        """)
+        hist_box.setStyleSheet(rounded_spin_qss(self.theme.colors))
         layout.addWidget(hist_box, alignment=Qt.AlignmentFlag.AlignLeft)
 
         layout.addStretch()

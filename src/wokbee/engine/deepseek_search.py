@@ -102,6 +102,18 @@ def build_deepseek_search_tool(provider_store: Any):
                 payload = resp.json()
         except httpx.HTTPStatusError as e:
             detail = _safe_detail(e.response)
+            from wokbee.engine.ai_errors import (
+                AIErrorKind,
+                display_message,
+                http_status_to_kind,
+            )
+
+            kind = http_status_to_kind(e.response.status_code)
+            if kind is not AIErrorKind.UNKNOWN:
+                return (
+                    f"[deepseek_web_search] 搜索失败："
+                    f"{display_message(kind, detail)}"
+                )
             return f"[deepseek_web_search] 搜索失败（HTTP {e.response.status_code}）：{detail}"
         except httpx.HTTPError as e:
             return f"[deepseek_web_search] 网络请求失败：{e}"

@@ -111,6 +111,9 @@ class GatewayManager(QObject):
         # 让分发器把每条落盘事件转交回 manager → UI 实时刷新时间线（Fake dispatcher 无此属性）
         if hasattr(self.dispatcher, "event_sink"):
             self.dispatcher.event_sink = self._on_event_written
+        # 手机端澄清提问：把问题发到用户手机上并等待答复（而不是无人值守自动选择）
+        if hasattr(self.dispatcher, "ask_sink"):
+            self.dispatcher.ask_sink = self._ask_user_sink
         # 允许外部注入 factory（冒烟测试用）；为空时按频道 key 从 _CHANNEL_FACTORIES 选。
         self._channel_factory = channel_factory
         self.notifier = GatewayNotifier()
@@ -123,6 +126,9 @@ class GatewayManager(QObject):
         self._locks_guard = threading.Lock()
         self._in_flight: set[str] = set()
         self._in_flight_guard = threading.Lock()
+        # 手机端澄清提问：conversation_key -> {"event": Event, "reply": str|None}
+        self._pending_asks: dict[str, dict] = {}
+        self._pending_asks_guard = threading.Lock()
 
     # ── 生命周期 ─────────────────────────────
     def _factory_for(self, key: str) -> Callable[[GatewayChannelConfig], Channel]:
@@ -252,6 +258,9 @@ class GatewayManager(QObject):
                 if mid in self._in_flight:
                     return
                 self._in_flight.add(mid)
+        # 该会话正等着澄清答复：直接在收线程解除阻塞（快），不再入队当新对话处理
+        if self._resolve_pending(msg):
+            return
         self._inbox.put(msg)
 
     def _dispatch_loop(self) -> None:
@@ -262,6 +271,9 @@ class GatewayManager(QObject):
             self._pool.submit(self._handle, msg)
 
     def _handle(self, msg: ChannelMessage) -> None:
+        # 若该会话正等着一个澄清提问的答复，优先消费这条消息作为答案，不当作新对话路由
+        if self._resolve_pending(msg):
+            return
         # 优先拦截 IM 管理指令（#new / #list / #run / #help），不路由到项目 Agent
         token, rest = MessageRouter.parse_route_prefix(msg.text or "")
         cmd = (token or "").lower()
@@ -324,7 +336,7 @@ class GatewayManager(QObject):
                 self._reply(msg, "项目不存在或已删除。")
                 return
             try:
-                result = self.dispatcher.run_chat(project, content)
+                result = self.dispatcher.run_chat(project, content, context=msg)
             except Exception:
                 logger.exception("网关分发失败")
                 result = SimpleNamespace(
@@ -354,6 +366,72 @@ class GatewayManager(QObject):
             ok, err = False, "发送异常"
         if not ok:
             self.notifier.log_line.emit(f"回执失败（{msg.channel}）：{err}")
+
+    # ── 手机端澄清提问：发到手机并等待答复 ────────────────
+    @staticmethod
+    def _ask_key(msg: ChannelMessage) -> str:
+        return f"{msg.channel}::{msg.conversation_id or msg.sender_id}"
+
+    def _wait_phone_answer(self, context: ChannelMessage, timeout: float) -> str | None:
+        """注册一个待答问题并阻塞等待手机回信；超时/无答复返回 None。"""
+        key = self._ask_key(context)
+        holder = {"event": threading.Event(), "reply": None, "key": key}
+        with self._pending_asks_guard:
+            self._pending_asks[key] = holder
+        try:
+            waited = holder["event"].wait(timeout)
+        finally:
+            with self._pending_asks_guard:
+                self._pending_asks.pop(key, None)
+        if not waited:
+            self._reply(context, "等待你的答复超时，本次操作已中止。")
+            return None
+        return holder["reply"]
+
+    def _resolve_pending(self, msg: ChannelMessage) -> bool:
+        """若该会话正等待澄清答复，则用 msg.text 作为答案并解除阻塞。返回是否已消费。"""
+        key = self._ask_key(msg)
+        with self._pending_asks_guard:
+            holder = self._pending_asks.get(key)
+            if holder is None:
+                return False
+            holder["reply"] = (msg.text or "").strip()
+        self.notifier.log_line.emit(f"[澄清] 收到 {msg.sender_id} 的答复：{(msg.text or '')[:60]}")
+        holder["event"].set()
+        return True
+
+    def _ask_user_sink(self, payload: dict, context: ChannelMessage) -> dict:
+        """把澄清问题逐题发到用户手机上，收集答复后返回 answers 字典。"""
+        questions = payload.get("questions") or []
+        if not questions:
+            return {"cancelled": True}
+        collected: list[dict] = []
+        for i, q in enumerate(questions, 1):
+            if not isinstance(q, dict):
+                continue
+            qid = str(q.get("id") or f"q{i}")
+            opts = q.get("options") or []
+            lines = [f"WokBee 需要你确认第 {i} 项：", f"{q.get('prompt') or ''}"]
+            if opts:
+                lines.append("可回复：" + "；".join(f"{j}. {o}" for j, o in enumerate(opts, 1)))
+            lines.append("直接回复内容或序号即可；回复「取消」可中止。")
+            self._reply(context, "\n".join(lines))
+
+            reply = self._wait_phone_answer(context, timeout=600.0)
+            if reply is None:
+                return {"cancelled": True}
+            if reply in ("取消", "cancel", "中止"):
+                return {"cancelled": True}
+
+            selected: list[str] = []
+            if reply.isdigit():
+                n = int(reply)
+                if 1 <= n <= len(opts):
+                    selected = [str(opts[n - 1])]
+            if not selected:
+                selected = [reply]
+            collected.append({"id": qid, "selected": selected, "custom": ""})
+        return {"answers": collected}
 
     # ── IM 管理指令（#new / #list / #run / #help） ────────────────────
     def _run_command(self, cmd: str, arg: str, msg: ChannelMessage) -> None:

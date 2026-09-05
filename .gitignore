@@ -43,3 +43,6 @@ reviews/
 .reasonix/
 reasonix.toml
 *.reasonix-tx-*.bak
+
+# Firecrawl 本地抓取工作目录（不入库）
+.firecrawl/

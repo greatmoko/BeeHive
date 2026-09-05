@@ -95,6 +95,7 @@ def build_approval_checkboxes(
         ("skip_write", "写免审", "写操作免审"),
         ("skip_routine", "常规操作免审", "常规操作免审"),
         ("skip_high_risk", "高危操作免审", "本机命令、挂载外目录、读取凭据密码"),
+        ("bypass_sandbox", "忽略沙箱限制", "解除全部人工审批，execute 可操作任意真实路径（含项目外目录）"),
     ]
     checks: dict[str, QCheckBox] = {}
     cb_qss = checkbox_qss(c)
@@ -113,6 +114,7 @@ def apply_flags_to_checks(checks: dict[str, QCheckBox], flags: ApprovalFlags) ->
     checks["skip_write"].setChecked(flags.skip_write)
     checks["skip_routine"].setChecked(flags.skip_routine)
     checks["skip_high_risk"].setChecked(flags.skip_high_risk)
+    checks["bypass_sandbox"].setChecked(flags.bypass_sandbox)
 
 
 def flags_from_checks(checks: dict[str, QCheckBox]) -> ApprovalFlags:
@@ -121,6 +123,7 @@ def flags_from_checks(checks: dict[str, QCheckBox]) -> ApprovalFlags:
         skip_write=checks["skip_write"].isChecked(),
         skip_routine=checks["skip_routine"].isChecked(),
         skip_high_risk=checks["skip_high_risk"].isChecked(),
+        bypass_sandbox=checks["bypass_sandbox"].isChecked(),
     )
 
 

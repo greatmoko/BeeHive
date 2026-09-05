@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -91,6 +92,7 @@ from wokbee.engine.agent_memory import (
 )
 from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.credential_tools import build_credential_tools
+from wokbee.engine.autobee_tools import build_autobee_tools
 from wokbee.engine.script_factory import (
     apply_ai_authored_scripts,
     apply_ai_pipeline_steps,
@@ -143,6 +145,8 @@ def _format_engine_error(exc: BaseException) -> str:
     """把厂商网关错误翻成可读说明，避免和本机 MCP 调用失败混在一起。"""
     text = str(exc)
     low = text.lower()
+
+    # 已有明确可读原始信息时优先（网关/MCP 特判），避免被分类覆盖。
     if (
         "do_request_failed" in low
         or "upstream error" in low
@@ -160,6 +164,22 @@ def _format_engine_error(exc: BaseException) -> str:
             "MCP 工具缺少同步入口。请确认已更新并重启应用后再试。"
             f"\n原始信息：{text}"
         )
+
+    # 统一分类兜底：命中已知类时给出针对性诊断/建议。
+    try:
+        from wokbee.engine.ai_errors import (
+            AIErrorKind,
+            classify_error,
+            display_message,
+        )
+
+        kind = classify_error(exc)
+        if kind is not AIErrorKind.UNKNOWN:
+            # 可自动重试类：deepagents / max_retries 已做底层重试，提示稍后重试；
+            # 不可重试类：给出定位与修正建议。
+            return display_message(kind, text)
+    except Exception:
+        pass
     return text
 
 
@@ -656,6 +676,9 @@ class AgentRunner:
         self._context_injected: bool = False
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
+        self.skill_target: Path | None = None
+        self.skill_name: str = ""
+        self.skill_description: str = ""
         self.on_ask_user_needed: Callable[[dict], None] | None = None
 
     def request_cancel(self) -> None:
@@ -815,28 +838,52 @@ class AgentRunner:
             skills_store.cleanup_project_copies(req.project_root)
             skills_paths = skills_store.global_skills_paths()
             enabled_skills = [s.name for s in skills_store.list_enabled()]
-            if skills_paths:
+            for prefix, skill_root in skills_store.skill_routes():
                 # 只读挂载：全局技能库不是本项目产物，只允许读/列/搜，禁止写/改/删
                 skills_inner = ReadOnlyBackend(
                     FilesystemBackend(
-                        root_dir=str(skills_store.root),
+                        root_dir=str(skill_root),
                         virtual_mode=True,
                     )
                 )
-                routes["/skills/"] = skills_inner
-                skills_extra_lines = [
-                    f"- 全局 Skills 目录（真实路径，execute 可用）：{skills_store.root}",
-                    "- 全局 Skills 虚拟路径：/skills/<技能名>/SKILL.md（只读，仅 read/ls/glob/grep）",
-                    f"- 已启用 Skills：{', '.join(enabled_skills) or '（无）'}",
-                ]
+                routes[prefix] = skills_inner
+                skills_extra_lines.append(
+                    f"- Skills 目录（真实路径，execute 可用）：{skill_root}",
+                )
+                skills_extra_lines.append(
+                    f"- 虚拟路径：{prefix}<技能名>/SKILL.md（只读，仅 read/ls/glob/grep）",
+                )
                 self._emit(
                     "info",
-                    f"已挂载全局 Skills（不复制到项目）：{skills_store.root}\n"
-                    f"启用：{', '.join(enabled_skills) or '（无）'}",
+                    f"已挂载 Skills 目录（不复制到项目）：{skill_root}",
+                )
+            if enabled_skills:
+                skills_extra_lines.append(
+                    f"- 已启用 Skills：{', '.join(enabled_skills)}"
                 )
         except Exception as e:
             logger.exception("加载 Skills 失败")
             self._emit("error", f"Skills 加载失败：{e}")
+
+        # ---- 一键生成 SKILLS：把目标 skills 目录以可写路由 /skillbuild/ 挂给 Agent ----
+        skillbuild_extra_lines: list[str] = []
+        if self.skill_target:
+            try:
+                target_root = Path(self.skill_target)
+                target_root.mkdir(parents=True, exist_ok=True)
+                routes["/skillbuild/"] = FilesystemBackend(
+                    root_dir=str(target_root), virtual_mode=True,
+                )
+                skillbuild_extra_lines.append(
+                    f"- Skills 生成目标（可写）：{target_root}（经 /skillbuild/ 写入）"
+                )
+                self._emit(
+                    "info",
+                    f"已为本轮挂载可写 Skills 生成目录：{target_root}（/skillbuild/）",
+                )
+            except Exception as e:
+                logger.exception("挂载 /skillbuild/ 失败")
+                self._emit("error", f"挂载 Skills 生成目录失败：{e}")
 
         # ---- 附加目录：预挂载全局白名单 + 供 request_access 动态挂载 ----
         access_registry = ApprovedDirRegistry()
@@ -859,11 +906,20 @@ class AgentRunner:
             self._emit(
                 "info", "已挂载附加目录：\n" + "\n".join(access_extra_lines)
             )
+        if req.approval.bypass_sandbox:
+            self._emit(
+                "info",
+                "已开启「忽略沙箱限制」：本会话所有工具免人工审批，"
+                "execute 可操作任意真实路径（含项目外目录）。请审慎使用。",
+            )
 
         # 始终用 CompositeBackend：即使初始无路由，request_access 也能往 routes 动态加 /ext/ 路由
         composite_backend = CompositeBackend(default=project_backend, routes=routes)
         backend = AccessCoerceBackend(
-            composite_backend, project_root=req.project_root, registry=access_registry
+            composite_backend,
+            project_root=req.project_root,
+            registry=access_registry,
+            allow_real_paths=bool(req.approval.bypass_sandbox),
         )
         attach_execute_watch(
             backend,
@@ -911,7 +967,7 @@ class AgentRunner:
             policy=req.approval.summary(),
             settings=self.settings,
         )
-        context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
+        context_extra: list[str] = list(skills_extra_lines) + skillbuild_extra_lines + access_extra_lines
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
 
@@ -999,6 +1055,11 @@ class AgentRunner:
                 emit=self._emit, project_root=req.project_root,
             )]
             + ([deepseek_search] if deepseek_search is not None else [])
+            + list(build_autobee_tools(
+                resolved=req.resolved,
+                provider_store=self.provider_store,
+                emit=self._emit,
+            ))
             + list(mcp_tools)
         )
         tools = wrap_tools_truncate_results(
@@ -1495,6 +1556,58 @@ class AgentRunner:
             err = _format_engine_error(e)
             self._emit("error", f"交互失败：{err}")
             return RunResult(ok=False, outcome="failed", error=err)
+
+    def run_skill(
+        self,
+        req: RunRequest,
+        *,
+        name: str = "",
+        description: str = "",
+    ) -> RunResult:
+        """一键生成 SKILLS：把本项目的完成经验固化为可复用/可分享的 Agent Skill。
+
+        依赖 build_agent 在 self.skill_target 非空时挂载的 /skillbuild/（可写）路由。
+        复用 run_chat 的完整能力（文件/联网/execute/Skills），Agent 在 /skillbuild/wokbee-<slug>/
+        下创建 SKILL.md（Claude 式 Agent Skills 规范）并携带完成任务所需材料。
+        """
+        if not self.skill_target:
+            return RunResult(ok=False, outcome="failed", error="未指定 Skills 生成目录。")
+        self.skill_name = (name or "").strip()
+        self.skill_description = (description or "").strip()
+
+        slug = re.sub(r"[^\w\-]+", "-", self.skill_name.strip()).strip("-").lower() or "wokbee-skill"
+        slug = slug[:40]
+        slug = f"wokbee-{slug}" if not slug.startswith("wokbee-") else slug
+
+        title = self.skill_name or slug
+        desc_line = f"技能描述：{self.skill_description}" if self.skill_description else "技能描述：由 Agent 依据本项目任务归纳。"
+        instruction = (
+            f"请把当前项目「{req.project.title}」本次已完成的（一次）任务，固化成一个可复用、可移植、可分享的 Agent Skill。\n"
+            f"{desc_line}\n\n"
+            "## 要生成的技能\n"
+            f"在 `/skillbuild/{slug}/` 下创建技能（这就是目标 skills 目录，可写）：\n"
+            f"1. `SKILL.md`：严格遵循 Claude 式 Agent Skills 规范——开头 YAML frontmatter（`name`、`description`、可选 `version`/`author`/`requires`），"
+            "正文为 Markdown，至少包含以下小节：\n"
+            "   - 目的 / 何时使用\n"
+            "   - 前置条件与依赖（环境、模型、第三方工具/库、是否需要联网）\n"
+            "   - 所需材料与输入（脚本、模板、配置、数据文件等，路径要写明）\n"
+            "   - 执行步骤（可操作、按顺序、可复现）\n"
+            "   - 输出位置与格式\n"
+            "   - 第三方下载说明（凡需要下载第三方材料，必须在这里明确写出来源 URL 与安装/使用方式）\n"
+            "2. 把完成任务**必需**的脚本/模板/参考材料复制进技能目录（如 `scripts/` 子目录）。\n"
+            "\n## 依据的材料\n"
+            "请用你的文件工具读取当前项目：`memory/experiences/`（经验）、`scripts/` 与 `scripts/pipeline.json`、"
+            "`references/`、`deliverables/` 与 `artifacts/`、`runs/events.jsonl`（时间线），以及【近期时间线摘录】。\n"
+            "\n## 硬性要求\n"
+            "- 技能要能在**新环境**独立复跑：材料齐全、步骤完整、依赖明确。\n"
+            "- 涉及第三方下载/安装必须写进「第三方下载说明」。\n"
+            "- **严禁**把任何凭据、密钥、登录信息、cookie、`uploads/`、`memory/`、`archives/` 的内容放进技能。\n"
+            "- 完成后用 `ls`/`glob` 检查 `/skillbuild/{slug}/` 结构完整（有 SKILL.md，材料在）。\n"
+            "- 最后用一句话总结技能名与位置。"
+        )
+        req.user_message = instruction
+        self._emit("agent", f"开始一键生成 SKILLS（目标目录：/skillbuild/）…", {"phase": "hint"})
+        return self.run_chat(req)
 
     def _maybe_record_chat_memory(
         self,

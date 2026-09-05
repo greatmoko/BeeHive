@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 from wokbee.core.models import ApprovalFlags, Project, ProjectEvent
 from wokbee.core.project_store import ProjectStore
 from wokbee.core.settings import WokBeeSettings
 from tokbee.core.provider_store import ProviderStore
+from wokbee.gateway.base import ChannelMessage
 
 logger = logging.getLogger("wokbee")
 
@@ -29,10 +31,16 @@ class GatewayDispatcher:
         self.project_store = project_store or ProjectStore()
         # 每条落盘事件回调（由 GatewayManager 注入）→ 转发给 UI 做实时时间线刷新。
         # 置为 ``None`` 时不转发（测试可用假 dispatcher 无此属性）。
-        self.event_sink = None
+        self.event_sink: Callable[[str, str, str, dict], None] | None = None
+        # 手机端「澄清提问」回调（由 GatewayManager 注入）：把问题发到手机并等待答复。
+        # 返回 answers 字典；为 None 时回落为自动选择第一项（无人值守兜底）。
+        self.ask_sink: Callable[[dict, "ChannelMessage"], dict] | None = None
 
-    def run_chat(self, project: Project, text: str):
-        """在后台线程跑一轮交互对话，返回 RunResult。"""
+    def run_chat(self, project: Project, text: str, context=None):
+        """在后台线程跑一轮交互对话，返回 RunResult。
+
+        context：来源消息（ChannelMessage），用于手机端澄清提问的会话定位。
+        """
         # 无人值守线程内按需加载引擎（deepagents 栈），避免拖慢启动
         from wokbee.engine import ensure_engine_warm
         from wokbee.engine.runner import AgentRunner, RunRequest, resolve_model_for_project
@@ -41,7 +49,7 @@ class GatewayDispatcher:
         resolved = resolve_model_for_project(project, self.settings, self.provider_store)
 
         runner = AgentRunner(self.settings, self.provider_store)
-        self._wire_callbacks(runner, project)
+        self._wire_callbacks(runner, project, context)
         req = RunRequest(
             project=project,
             project_root=self.project_store.path_for(project.id),
@@ -67,8 +75,11 @@ class GatewayDispatcher:
         err = (getattr(result, "error", "") or "").strip()
         return err or (getattr(result, "outcome", "failed") or "failed")
 
-    def _wire_callbacks(self, runner, project: Project) -> None:
-        """代理引擎事件 → 写入项目时间线；无人值守自动审批/自动澄清。"""
+    def _wire_callbacks(self, runner, project: Project, context=None) -> None:
+        """代理引擎事件 → 写入项目时间线；无人值守自动审批/自动澄清。
+
+        context 存在时，澄清提问交给 ask_sink 发到手机并等答复；否则自动选第一项。
+        """
 
         def _on_event(kind: str, content: str, meta: dict | None):
             if kind == "cache":
@@ -95,6 +106,15 @@ class GatewayDispatcher:
                 logger.exception("自动审批失败")
 
         def _on_ask_user(payload: dict):
+            # 手机端：优先把问题发到用户手机上并等答复
+            if context is not None and self.ask_sink is not None:
+                try:
+                    answers = self.ask_sink(payload, context)
+                    if isinstance(answers, dict) and answers:
+                        runner.resolve_ask_user(answers)
+                        return
+                except Exception:
+                    logger.exception("手机端澄清提问失败，回落自动选择")
             # 无人值守：自动选择第一项，避免无限等待
             questions = payload.get("questions") or []
             answers = [

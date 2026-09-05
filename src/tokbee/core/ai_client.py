@@ -133,10 +133,28 @@ class AIClient:
         error_body = e.read().decode("utf-8", errors="replace")
         try:
             error_data = json.loads(error_body)
-            msg = error_data.get("error", {}).get("message", error_body[:300])
+            err = error_data.get("error", {}) if isinstance(error_data, dict) else {}
+            if isinstance(err, dict):
+                msg = err.get("message") or error_body[:300]
+                code = err.get("code")
+            else:
+                msg = str(err)[:300]
+                code = None
         except (json.JSONDecodeError, AttributeError):
             msg = error_body[:300]
-        raise AIError(f"API 错误 (HTTP {e.code}): {msg}") from e
+            code = None
+        try:
+            from wokbee.engine.ai_errors import AIErrorKind, classify_text_or_status, attach_kind
+
+            kind = classify_text_or_status(f"{msg}", e.code)
+        except Exception:
+            kind = None
+        raise AIError(
+            f"API 错误 (HTTP {e.code}): {msg}",
+            kind=kind,
+            status_code=e.code,
+            code=str(code) if code is not None else None,
+        ) from e
 
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
@@ -237,11 +255,11 @@ class AIClient:
                     attempt += 1
                     continue
                 if isinstance(e, urllib.error.URLError):
-                    raise AIError(f"网络连接失败: {e.reason}") from e
+                    raise AIError(f"网络连接失败: {e.reason}", kind="transient") from e
                 if isinstance(e, TimeoutError):
-                    raise AIError("请求超时，请检查网络连接或 API 地址") from None
-                raise AIError(f"请求异常: {e}") from e
-        raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}") from last_exc
+                    raise AIError("请求超时，请检查网络连接或 API 地址", kind="transient") from None
+                raise AIError(f"请求异常: {e}", kind="unknown") from e
+        raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}", kind="transient") from last_exc
 
     def _build_body(
         self,
@@ -419,12 +437,12 @@ class AIClient:
                     attempt += 1
                     continue
                 if isinstance(e, urllib.error.URLError):
-                    raise AIError(f"网络连接失败: {e.reason}") from e
+                    raise AIError(f"网络连接失败: {e.reason}", kind="transient") from e
                 if isinstance(e, TimeoutError):
-                    raise AIError("请求超时，请检查网络连接或 API 地址") from None
-                raise AIError(f"请求异常: {e}") from e
+                    raise AIError("请求超时，请检查网络连接或 API 地址", kind="transient") from None
+                raise AIError(f"请求异常: {e}", kind="unknown") from e
         if resp is None:
-            raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}") from last_exc
+            raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}", kind="transient") from last_exc
 
         try:
             # 按字节缓冲，只对「完整行」解码：多字节 UTF-8 被切成两块时不再出现 �

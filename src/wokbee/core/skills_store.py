@@ -25,6 +25,7 @@ class SkillInfo:
     path: Path
     description: str = ""
     enabled: bool = True
+    root: Path = None  # type: ignore[assignment]
 
     def to_dict(self) -> dict:
         return {
@@ -32,6 +33,7 @@ class SkillInfo:
             "path": str(self.path),
             "description": self.description,
             "enabled": self.enabled,
+            "root": str(self.root) if self.root else "",
         }
 
 
@@ -69,8 +71,34 @@ class SkillsStore:
     def __init__(self, config: Config | None = None):
         self._config = config or Config()
         self._migrate_legacy_root()
+        self._migrate_legacy_custom_root()
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_example()
+
+    def _migrate_legacy_custom_root(self) -> None:
+        """旧的自定义根（wokbee.skills_root）不再是默认根：把它并入额外目录，避免技能丢失。"""
+        raw = self._config.get("wokbee.skills_root") or ""
+        if not str(raw).strip():
+            return
+        try:
+            custom = Path(str(raw)).expanduser().resolve()
+        except OSError:
+            return
+        default = default_skills_root().resolve()
+        if custom == default:
+            self._config.set("wokbee.skills_root", "")
+            self._config.save()
+            return
+        cur = self._config.get("wokbee.skills_dirs") or []
+        if isinstance(cur, str):
+            cur = [cur]
+        if not isinstance(cur, list):
+            cur = []
+        if str(custom) not in [str(x) for x in cur]:
+            cur.append(str(custom))
+            self._config.set("wokbee.skills_dirs", cur)
+        self._config.set("wokbee.skills_root", "")
+        self._config.save()
 
     def _migrate_legacy_root(self) -> None:
         """旧路径 …/wokbee/skills 或 ~/.tokbee/skills → ~/.wokbee/skills。"""
@@ -107,15 +135,40 @@ class SkillsStore:
 
     @property
     def root(self) -> Path:
-        raw = self._config.get("wokbee.skills_root") or ""
-        if str(raw).strip():
-            return Path(str(raw)).expanduser()
+        """全局默认 Skills 根目录（固定 ~/.wokbee/skills，不可修改）。"""
         return default_skills_root()
 
-    def set_root(self, path: str | Path) -> None:
-        self._config.set("wokbee.skills_root", str(path))
-        self._config.save()
-        Path(path).mkdir(parents=True, exist_ok=True)
+    def extra_roots(self) -> list[Path]:
+        """额外 Skills 加载目录（真实存在且为目录）。"""
+        raw = self._config.get("wokbee.skills_dirs") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        out: list[Path] = []
+        seen = {str(self.root.resolve())}
+        for item in raw:
+            path = str(item or "").strip()
+            if not path:
+                continue
+            try:
+                rp = Path(path).expanduser().resolve()
+            except OSError:
+                continue
+            key = str(rp)
+            if not rp.is_dir() or key in seen:
+                continue
+            seen.add(key)
+            out.append(rp)
+        return out
+
+    def all_roots(self) -> list[Path]:
+        """默认根 + 额外根（去重、去不存在）。"""
+        roots = [self.root]
+        for rp in self.extra_roots():
+            if str(rp) != str(self.root.resolve()):
+                roots.append(rp)
+        return roots
 
     def _enabled_map(self) -> dict[str, bool]:
         raw = self._config.get("wokbee.skills_enabled")
@@ -154,20 +207,21 @@ description: 联网调研并输出结构化简报的工作流技能
     def list_skills(self) -> list[SkillInfo]:
         enabled_map = self._enabled_map()
         items: list[SkillInfo] = []
-        if not self.root.exists():
-            return items
-        for child in sorted(self.root.iterdir(), key=lambda p: p.name.lower()):
-            if not child.is_dir() or child.name.startswith("."):
+        for root in self.all_roots():
+            if not root.exists():
                 continue
-            md = child / "SKILL.md"
-            if not md.exists():
-                continue
-            name, desc = _parse_skill_md(md)
-            folder = child.name
-            enabled = enabled_map.get(folder, True)
-            items.append(
-                SkillInfo(name=name, path=child, description=desc, enabled=enabled)
-            )
+            for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                if not child.is_dir() or child.name.startswith("."):
+                    continue
+                md = child / "SKILL.md"
+                if not md.exists():
+                    continue
+                name, desc = _parse_skill_md(md)
+                folder = child.name
+                enabled = enabled_map.get(folder, True)
+                items.append(
+                    SkillInfo(name=name, path=child, description=desc, enabled=enabled, root=root)
+                )
         return items
 
     def list_enabled(self) -> list[SkillInfo]:
@@ -213,11 +267,55 @@ description: {description or safe}
         self._save_enabled_map(data)
         return True
 
+    def delete_path(self, path: str | Path) -> bool:
+        """按绝对路径删除一个技能目录（跨额外目录）。"""
+        try:
+            rp = Path(str(path)).expanduser().resolve()
+        except OSError:
+            return False
+        if not rp.is_dir():
+            return False
+        in_root = False
+        for root in self.all_roots():
+            try:
+                rp.relative_to(root.resolve())
+                in_root = True
+                break
+            except ValueError:
+                continue
+        if not in_root:
+            return False
+        shutil.rmtree(rp, ignore_errors=True)
+        data = self._enabled_map()
+        data.pop(rp.name, None)
+        self._save_enabled_map(data)
+        return True
+
     def global_skills_paths(self) -> list[str]:
-        """供 create_deep_agent(skills=...)：通过 CompositeBackend 挂载全局目录。"""
-        if self.list_enabled():
-            return ["/skills/"]
-        return []
+        """供 create_deep_agent(skills=...)：返回各 Skills 根目录的虚拟挂载前缀。
+
+        默认根用 /skills/；额外目录用 /ext_skills/<i>/（按 all_roots 顺序）。
+        """
+        if not self.list_enabled():
+            return []
+        roots = self.all_roots()
+        if not roots:
+            return []
+        paths = ["/skills/"]
+        for i in range(1, len(roots)):
+            paths.append(f"/ext_skills/{i}/")
+        return paths
+
+    def skill_routes(self) -> list[tuple[str, Path]]:
+        """返回 [(虚拟前缀, 根目录)]，供 runner 逐个挂载（默认在前，额外在后）。"""
+        routes: list[tuple[str, Path]] = []
+        roots = self.all_roots()
+        if not roots:
+            return routes
+        routes.append(("/skills/", roots[0]))
+        for i in range(1, len(roots)):
+            routes.append((f"/ext_skills/{i}/", roots[i]))
+        return routes
 
     def cleanup_project_copies(self, project_root: Path) -> None:
         """清理历史上同步进项目的 /skills 副本（带同步标记的）。"""

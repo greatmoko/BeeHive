@@ -25,6 +25,23 @@ logger = logging.getLogger("autobee")
 # 失联宽限（秒）：电脑睡眠到点后仍能在宽限内补跑，避免默认 1s 静默丢弃
 _MISFIRE_GRACE = 3600
 
+# 进程内全局调度器引用：由 ServiceRegistry 启动时注册，供 Agent 能力（autobee_tools）
+# 在任意线程创建任务后，立即挂到运行中的调度器上，无需重启应用。
+_GLOBAL_SCHEDULER: "SchedulerService | None" = None
+_GLOBAL_LOCK = threading.Lock()
+
+
+def register_global_scheduler(scheduler: "SchedulerService | None") -> None:
+    """注册全局调度器引用（应用启动时调用一次）。"""
+    global _GLOBAL_SCHEDULER
+    with _GLOBAL_LOCK:
+        _GLOBAL_SCHEDULER = scheduler
+
+
+def get_global_scheduler() -> "SchedulerService | None":
+    with _GLOBAL_LOCK:
+        return _GLOBAL_SCHEDULER
+
 
 class SchedulerNotifier(QObject):
     """调度器 → UI 的 Qt 信号桥（跨线程自动 QueuedConnection）。"""

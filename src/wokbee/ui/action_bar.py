@@ -121,6 +121,7 @@ class _ActionBar(QFrame):
     model_changed = Signal(str, str)  # provider_id, model_id
     compress_clicked = Signal()
     draft_changed = Signal()
+    gen_skill_clicked = Signal()
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -219,6 +220,14 @@ class _ActionBar(QFrame):
             btn.setStyleSheet(self._icon_btn_qss())
             btn.clicked.connect(slot)
             row.addWidget(btn)
+
+        self._gen_skill_btn = QPushButton("🧩")
+        self._gen_skill_btn.setToolTip("生成SKILLS：把本次已完成任务固化为可复用/可分享的 Agent Skill")
+        self._gen_skill_btn.setFixedSize(34, 34)
+        self._gen_skill_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gen_skill_btn.setStyleSheet(self._icon_btn_qss())
+        self._gen_skill_btn.clicked.connect(self.gen_skill_clicked.emit)
+        row.addWidget(self._gen_skill_btn)
 
         row.addStretch()
 
@@ -323,6 +332,7 @@ class _ActionBar(QFrame):
     def set_running(self, running: bool):
         self._run_btn.set_spinning(running)
         self._model_combo.setEnabled(not running)
+        self._gen_skill_btn.setEnabled(not running)
 
     def show_approval(self, text: str):
         self._approval_label.setText(text)

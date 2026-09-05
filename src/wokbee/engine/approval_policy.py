@@ -20,6 +20,8 @@ ROUTINE_TOOLS = ("task", "web_search", "http_get", "http_request", "deepseek_web
 
 def build_interrupt_on(flags: ApprovalFlags) -> dict[str, bool]:
     """勾选免审 → 不中断；未勾选 → 工具调用前 interrupt。"""
+    if flags.bypass_sandbox:
+        return {}  # 忽略沙箱：全部工具免评审，无中断
     interrupt_on: dict[str, bool] = {}
     if not flags.skip_read:
         for name in READ_TOOLS:

@@ -73,10 +73,12 @@ class ServiceRegistry:
     @property
     def autobee_scheduler(self):
         if self._autobee_scheduler is None:
-            from autobee.engine.scheduler import SchedulerService
+            from autobee.engine.scheduler import SchedulerService, register_global_scheduler
             self._autobee_scheduler = SchedulerService(
                 store=self.autobee_store, executor=self.autobee_executor,
             )
+            # 让 Agent 能力（create_scheduled_task）能把新任务挂到运行中的调度器
+            register_global_scheduler(self._autobee_scheduler)
         return self._autobee_scheduler
 
     @property

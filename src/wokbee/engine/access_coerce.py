@@ -102,10 +102,18 @@ def _normalize_host(path: str) -> str:
 class AccessCoerceBackend(SandboxBackendProtocol):
     """CompositeBackend 外层：强制虚拟路径 + 已获批真实路径自动改写 + execute 透传。"""
 
-    def __init__(self, backend, *, project_root: str | Path | None = None, registry=None):
+    def __init__(
+        self,
+        backend,
+        *,
+        project_root: str | Path | None = None,
+        registry=None,
+        allow_real_paths: bool = False,
+    ):
         self._inner = backend
         self._project_root = str(Path(project_root).resolve()) if project_root else None
         self._registry = registry
+        self.allow_real_paths = bool(allow_real_paths)
 
     @property
     def id(self) -> str:
@@ -141,6 +149,8 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         p = str(path)
         if not _is_host_path(p):
             return None, p  # 非主机路径（虚拟/相对） → 透传
+        if self.allow_real_paths:
+            return None, p  # 忽略沙箱：真实路径原样透传，不改写、不教学式拦截
         coerced = self._coerce_real(p)
         if coerced is not None:
             return None, coerced  # 已获批 → 自动改写为 /ext/<slug>/…

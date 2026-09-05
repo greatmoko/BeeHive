@@ -29,6 +29,9 @@ class AgentWorker(QThread):
         parent=None,
         *,
         mode: str = "run",
+        skill_target=None,
+        skill_name: str = "",
+        skill_description: str = "",
     ):
         super().__init__(parent)
         self._settings = settings
@@ -37,7 +40,10 @@ class AgentWorker(QThread):
         self._user_message = user_message
         self._approval = approval
         self._max_steps = max_steps
-        self.mode = mode  # run | chat
+        self.mode = mode  # run | chat | skill
+        self.skill_target = skill_target
+        self.skill_name = skill_name
+        self.skill_description = skill_description
         self.runner = None  # 运行到线程内才构造；空闲为 None
         self.request = None
         self._last_pending_count = 0  # 最近一次审批待决数量（由 _on_approval 填充）
@@ -68,6 +74,9 @@ class AgentWorker(QThread):
             return
 
         self.runner = AgentRunner(self._settings)
+        self.runner.skill_target = self.skill_target
+        self.runner.skill_name = self.skill_name
+        self.runner.skill_description = self.skill_description
         self.request = RunRequest(
             project=self._project,
             project_root=self._project_root,
@@ -83,7 +92,13 @@ class AgentWorker(QThread):
             self.runner.request_cancel()
 
         try:
-            if self.mode == "chat":
+            if self.mode == "skill":
+                result = self.runner.run_skill(
+                    self.request,
+                    name=self.skill_name,
+                    description=self.skill_description,
+                )
+            elif self.mode == "chat":
                 result = self.runner.run_chat(self.request)
             else:
                 result = self.runner.run(self.request)

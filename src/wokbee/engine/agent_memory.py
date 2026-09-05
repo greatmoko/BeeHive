@@ -177,6 +177,7 @@ _TOOL_INDEX = (
     "文件：read_file / write_file / edit_file / ls / glob / grep / delete（虚拟路径）",
     "命令：execute（本机，pwsh 执行）",
     "项目元信息：get_project_info / update_project_title / update_project_goal",
+    "AutoBee 定时任务：create_scheduled_task / list_scheduled_tasks（创建/查看自动任务）",
     "凭据：list_credentials / get_credential",
     "意图澄清：ask_user",
     "外部目录授权：request_access",
