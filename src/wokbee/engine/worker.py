@@ -32,6 +32,7 @@ class AgentWorker(QThread):
         skill_target=None,
         skill_name: str = "",
         skill_description: str = "",
+        attachments: list[dict] | None = None,
     ):
         super().__init__(parent)
         self._settings = settings
@@ -44,7 +45,7 @@ class AgentWorker(QThread):
         self.skill_target = skill_target
         self.skill_name = skill_name
         self.skill_description = skill_description
-        self.runner = None  # 运行到线程内才构造；空闲为 None
+        self.attachments = list(attachments or [])
         self.request = None
         self._last_pending_count = 0  # 最近一次审批待决数量（由 _on_approval 填充）
         self._cancel_requested = threading.Event()
@@ -84,6 +85,7 @@ class AgentWorker(QThread):
             resolved=resolved,
             approval=self._approval,
             max_steps=self._max_steps,
+            attachments=self.attachments,
         )
         self.runner.on_event = self._on_event
         self.runner.on_approval_needed = self._on_approval

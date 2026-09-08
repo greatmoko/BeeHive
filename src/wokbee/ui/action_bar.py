@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import random
+import time
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QPainter
+from PySide6.QtCore import QBuffer, QEvent, QFileInfo, QIODevice, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileIconProvider,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -108,6 +111,102 @@ class _RunButton(QPushButton):
                     x, base_y - bar_h, _RUN_EQ_BAR_W, bar_h, 1, 1
                 )
 
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
+
+
+def _is_image_file(p: Path) -> bool:
+    return p.suffix.lower() in _IMAGE_EXTS
+
+
+def _sanitize_name(name: str) -> str:
+    """去掉路径/非法字符，返回安全的文件名。"""
+    import re as _re
+
+    n = _re.sub(r"[\\/:*?\"<>|]+", "_", (name or "attachment").strip())
+    return n or "attachment"
+
+
+class _AttachmentChip(QFrame):
+    """输入框上方的附件 chip：图片显示缩略图，文件显示图标+文件名。"""
+
+    remove_clicked = Signal(object)
+
+    def __init__(self, item: dict, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.item = item
+        c = theme.colors
+        self.setStyleSheet(f"""
+            _AttachmentChip {{
+                background: {c['input_bg']};
+                border: 1px solid {c['input_border']};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(4)
+
+        name = item.get("display_name") or "附件"
+        kind = item.get("kind") or "file"
+
+        if kind == "image":
+            thumb = QLabel()
+            pix = QPixmap()
+            pix.loadFromData(item.get("data") or b"")
+            if not pix.isNull():
+                thumb.setPixmap(
+                    pix.scaled(
+                        26, 26,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                thumb.setFixedSize(26, 26)
+                thumb.setScaledContents(False)
+            else:
+                thumb.setText("🖼")
+                thumb.setFixedSize(26, 26)
+            thumb.setStyleSheet("background: transparent; border: none;")
+            lay.addWidget(thumb)
+            elided = name if len(name) <= 18 else name[:8] + "…" + name[-6:]
+            name_label = QLabel(elided)
+            name_label.setToolTip(name)
+            name_label.setStyleSheet(
+                f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
+            )
+            lay.addWidget(name_label)
+        else:
+            try:
+                icon = QFileIconProvider().icon(QFileInfo(str(item.get("path") or "")))
+            except Exception:
+                icon = QFileIconProvider().icon(QFileIconProvider.IconType.File)
+            icon_label = QLabel()
+            icon_label.setPixmap(icon.pixmap(18, 18))
+            icon_label.setFixedSize(18, 18)
+            lay.addWidget(icon_label)
+            elided = name if len(name) <= 24 else name[:12] + "…" + name[-8:]
+            name_label = QLabel(elided)
+            name_label.setToolTip(name)
+            name_label.setStyleSheet(
+                f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
+            )
+            lay.addWidget(name_label)
+
+        rm = QPushButton("×")
+        rm.setFixedSize(18, 18)
+        rm.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm.setToolTip("移除附件")
+        rm.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {c['text_hint']};
+                border: none; border-radius: 9px; font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {c['btn_hover']}; color: {c['danger']}; }}
+        """)
+        rm.clicked.connect(lambda: self.remove_clicked.emit(self.item))
+        lay.addWidget(rm)
+
+
 class _ActionBar(QFrame):
     run_clicked = Signal()
     pause_clicked = Signal()
@@ -115,7 +214,7 @@ class _ActionBar(QFrame):
     archive_clicked = Signal()
     upload_clicked = Signal()
     open_deliverables_clicked = Signal()
-    send_clicked = Signal(str)
+    send_clicked = Signal(str, list)  # text, attachments
     approve_clicked = Signal()
     reject_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
@@ -127,6 +226,8 @@ class _ActionBar(QFrame):
         super().__init__(parent)
         self.theme = theme
         self._model_updating = False
+        self._attachments: list[dict] = []
+        self._uploads_root: Path | None = None
         self._build()
 
     def _build(self):
@@ -185,6 +286,15 @@ class _ActionBar(QFrame):
         ap_btns.addWidget(approve_btn)
         ap_lay.addLayout(ap_btns)
         layout.addWidget(self._approval_bar)
+
+        self._attach_bar = QFrame()
+        self._attach_bar.setVisible(False)
+        self._attach_bar.setStyleSheet("background: transparent; border: none;")
+        self._attach_lay = QHBoxLayout(self._attach_bar)
+        self._attach_lay.setContentsMargins(0, 0, 0, 0)
+        self._attach_lay.setSpacing(6)
+        self._attach_lay.addStretch()
+        layout.addWidget(self._attach_bar)
 
         self._input = QTextEdit()
         bind_text_edit_context_menu(self._input, c)
@@ -303,31 +413,174 @@ class _ActionBar(QFrame):
         """
 
     def eventFilter(self, obj, event):
-        if obj is self._input and event.type() == QEvent.Type.KeyPress:
-            key_event = event
-            if isinstance(key_event, QKeyEvent) and key_event.key() in (
-                Qt.Key.Key_Return,
-                Qt.Key.Key_Enter,
-            ):
-                if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    return False  # Shift+Enter 换行
-                self._on_send()
-                return True  # Enter 发送，拦截默认换行
+        if obj is self._input:
+            if event.type() == QEvent.Type.KeyPress:
+                key_event = event
+                if isinstance(key_event, QKeyEvent):
+                    if (
+                        key_event.key() == Qt.Key.Key_V
+                        and key_event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                    ):
+                        return self._handle_paste()
+                    if key_event.key() in (
+                        Qt.Key.Key_Return,
+                        Qt.Key.Key_Enter,
+                    ):
+                        if key_event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                            return False  # Shift+Enter 换行
+                        self._on_send()
+                        return True  # Enter 发送，拦截默认换行
+            elif event.type() == QEvent.Type.Clipboard:
+                # 某些平台会在粘贴前发送 Clipboard 事件；只有识别到附件时才拦截。
+                if self._handle_paste():
+                    return True
         return super().eventFilter(obj, event)
+
+    def _handle_paste(self):
+        from PySide6.QtWidgets import QApplication
+
+        cb = QApplication.clipboard()
+        mime = cb.mimeData()
+        got = False
+        # 文件粘贴优先使用本地 URL，保留原始文件名（包括复制的图片文件）。
+        if mime.hasUrls():
+            for url in mime.urls():
+                if not url.isLocalFile():
+                    continue
+                p = Path(url.toLocalFile())
+                if not p.exists() or not p.is_file():
+                    continue
+                self._add_attachment(
+                    {
+                        "kind": "image" if _is_image_file(p) else "file",
+                        "display_name": p.name,
+                        "data": None,
+                        "path": p,
+                    }
+                )
+            got = True
+        # 纯截图/剪贴板图片没有原始文件名，只能生成唯一名称。
+        elif mime.hasImage():
+            image = cb.image()
+            if not image.isNull():
+                img = image if isinstance(image, QImage) else image.toImage()
+                try:
+                    buf = QBuffer()
+                    buf.open(QIODevice.WriteOnly)
+                    suffix = "png"
+                    if not img.save(buf, "PNG"):
+                        img.save(buf, "JPG")
+                        suffix = "jpg"
+                    data = bytes(buf.data())
+                    self._add_attachment(
+                        {
+                            "kind": "image",
+                            "display_name": f"pasted_image_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000:06d}.png",
+                            "data": data,
+                            "path": None,
+                        }
+                    )
+                except Exception:
+                    pass
+                got = True
+        if got and not self._input.toPlainText().strip():
+            pass  # 保持输入框焦点即可
+        return got
+
+    def _add_attachment(self, item: dict):
+        # 唯一性：同源（路径）或同名不重复追加
+        for exists in self._attachments:
+            src = item.get("path")
+            # 只有同一个本地文件才去重；剪贴板图片没有源路径，允许连续粘贴多张。
+            if src and exists.get("path") == src:
+                return
+        self._persist_inline(item)
+        self._attachments.append(item)
+        self._refresh_attach_bar()
+
+    def _refresh_attach_bar(self):
+        # 清空除 stretch 外的子控件
+        while self._attach_lay.count() > 1:
+            w = self._attach_lay.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+        for item in self._attachments:
+            chip = _AttachmentChip(item, self.theme)
+            chip.remove_clicked.connect(
+                lambda it, c=chip: self._remove_attachment(it)
+            )
+            # 插到 stretch 之前
+            self._attach_lay.insertWidget(self._attach_lay.count() - 1, chip)
+        self._attach_bar.setVisible(bool(self._attachments))
+        self._attach_bar.adjustSize()
+
+    def _remove_attachment(self, item: dict):
+        for i, it in enumerate(self._attachments):
+            if it is item:
+                self._attachments.pop(i)
+                break
+        self._refresh_attach_bar()
+
+    def set_uploads_root(self, root: str | Path | None):
+        """由 workspace 在项目切换时注入，粘贴带文件时立即保存到 uploads/。"""
+        self._uploads_root = Path(root) if root else None
+
+    def _persist_inline(self, item: dict):
+        """图片/文件（无本地 path）写盘到 uploads/，返回 path；失败则原样。"""
+        data = item.get("data")
+        display = item.get("display_name") or "attachment"
+        root = self._uploads_root
+        name = _sanitize_name(display)
+        source = item.get("path")
+        if root is None:
+            return source
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            target = root / name
+            if target.exists():
+                target = root / f"{target.stem}_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1_000_000:06d}{target.suffix}"
+            if source is not None and Path(str(source)).exists():
+                import shutil
+                shutil.copy2(str(source), str(target))
+            elif data is not None:
+                target.write_bytes(data)
+            else:
+                return source
+            item["path"] = target
+            item["display_name"] = target.name
+            return target
+        except OSError:
+            return source
+
+    def _take_attachments(self) -> list[dict]:
+        """返回附件列表（供发送/运行取走），随后清空。"""
+        items = list(self._attachments)
+        for it in items:
+            self._persist_inline(it)
+        self._attachments.clear()
+        self._refresh_attach_bar()
+        return items
 
     def _on_send(self):
         text = self._input.toPlainText().strip()
-        if text:
-            self.send_clicked.emit(text)
+        if text or self._attachments:
+            self.send_clicked.emit(text, self._take_attachments())
             self._input.clear()
 
-    def take_input(self) -> str:
+    def take_input(self, with_attachments: bool = False):
         text = self._input.toPlainText().strip()
+        attachments = self._take_attachments() if with_attachments else []
         self._input.clear()
+        if with_attachments:
+            return text, attachments
         return text
 
     def set_draft(self, text: str):
         self._input.setPlainText(text or "")
+
+    def current_attachments(self) -> list[dict]:
+        """只读当前附件快照（供 settings 侧边栏等展示），不取出。"""
+        return list(self._attachments)
 
     def set_running(self, running: bool):
         self._run_btn.set_spinning(running)

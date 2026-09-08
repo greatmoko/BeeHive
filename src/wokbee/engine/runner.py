@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -119,6 +120,7 @@ class RunRequest:
     resolved: ResolvedModel
     approval: ApprovalFlags
     max_steps: int = 40
+    attachments: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -220,6 +222,57 @@ def _ensure_memory_files(project_root: Path, project: Project) -> None:
     from wokbee.engine.lessons import LessonStore
 
     LessonStore(project_root).rebuild_index()
+
+
+def _attachment_content(text: str, attachments: list[dict] | None) -> Any:
+    """将上传附件附加到用户消息；图片使用 OpenAI image_url，多媒体文件给出 uploads 路径。"""
+    attachments = attachments or []
+    images: list[dict] = []
+    files: list[dict] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        path = Path(str(item.get("path") or ""))
+        if not path.exists() or not path.is_file():
+            continue
+        if str(item.get("kind") or "") == "image":
+            images.append(item)
+        else:
+            files.append(item)
+
+    file_note = ""
+    if files:
+        names = []
+        for item in files:
+            path = Path(str(item.get("path") or ""))
+            names.append(f"uploads/{path.name}")
+        file_note = "\n\n[附加文件（已保存到项目 uploads/，可用文件工具读取）]\n" + "\n".join(
+            f"- {name}" for name in names
+        )
+
+    text = (text or "") + file_note
+    if not images:
+        return text
+
+    parts: list[dict] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for item in images:
+        path = Path(str(item.get("path") or ""))
+        try:
+            raw = path.read_bytes()
+            mime = str(item.get("mime") or "")
+            if not mime:
+                import mimetypes
+                mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded = base64.b64encode(raw).decode("ascii")
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{encoded}"},
+            })
+        except OSError:
+            parts.append({"type": "text", "text": f"[无法读取图片附件：{path.name}]"})
+    return parts or text
 
 
 def _message_text(content: Any) -> str:
@@ -1135,8 +1188,13 @@ class AgentRunner:
                 _AGENTS[req.project.id] = agent
         return agent
 
-    def _with_session_context(self, user_message: str) -> str:
-        return compose_user_with_context(user_message, self._session_context_block)
+    def _with_session_context(self, user_message: Any) -> Any:
+        context = (self._session_context_block or "").strip()
+        if isinstance(user_message, list):
+            if not context:
+                return user_message
+            return [{"type": "text", "text": context}, *user_message]
+        return compose_user_with_context(str(user_message or ""), context)
 
     def _context_already_in_state(self, agent, config: dict) -> bool:
         """读 graph 已持久化消息：历史首条 user 是否已注入【会话上下文】。
@@ -1192,7 +1250,7 @@ class AgentRunner:
                 and isinstance(m, dict)
                 and (m.get("role") or "") == "user"
             ):
-                content = str(m.get("content") or "")
+                content = m.get("content") or ""
                 out_msgs.append(
                     {**m, "content": self._with_session_context(content)}
                 )
@@ -1490,7 +1548,7 @@ class AgentRunner:
         seen_msg_ids: set[str] = set()
 
         question = (req.user_message or "").strip()
-        if not question:
+        if not question and not req.attachments:
             return RunResult(ok=False, outcome="failed", error="提问内容为空")
 
         try:
@@ -1517,6 +1575,7 @@ class AgentRunner:
                 "——\n【近期时间线摘录（供参考，回答不必复述全文）】\n"
                 f"{recent}"
             )
+        user_content = _attachment_content(user_content, req.attachments)
 
         try:
             early = self._run_agent_turn(
@@ -1723,6 +1782,7 @@ class AgentRunner:
             or req.project.goal
             or "请根据项目目标推进工作。"
         )
+        base_content = _attachment_content(base_message, req.attachments)
 
         try:
             # 非 resume 必须清空 checkpoint，否则会继承上次空 AIMessage / 半截计划而秒退
@@ -1797,7 +1857,7 @@ class AgentRunner:
                             req,
                             payload={
                                 "messages": [
-                                    {"role": "user", "content": base_message}
+                                    {"role": "user", "content": base_content}
                                 ]
                             },
                             first=True,

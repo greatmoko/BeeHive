@@ -782,6 +782,7 @@ class _ProjectWorkspace(QWidget):
         self._timeline.show_empty()
         self._actions.hide_approval()
         self._actions.set_running(False)
+        self._actions.set_uploads_root(None)
         self._actions.reload_models(
             fallback_provider=self.store.settings.default_provider,
             fallback_model=self.store.settings.default_model_id,
@@ -799,6 +800,7 @@ class _ProjectWorkspace(QWidget):
         same = self._project_id == project_id
         self._project_id = project_id
         root = self.store.path_for(project_id)
+        self._actions.set_uploads_root(root / "uploads")
         self._essentials.bind(project, project_root=root)
         # 切换项目：只加载最新一批，上翻时再按批前置，加快进入速度
         if not same:
@@ -1149,7 +1151,7 @@ class _ProjectWorkspace(QWidget):
             self.store.append_event(self._project_id, note)
             self._timeline.append_event(note)
 
-    def _on_send(self, text: str):
+    def _on_send(self, text: str, attachments: list | None = None):
         """非运行期：对话模式回复提问（可与目标无关），可改名称/目标。"""
         from wokbee.engine.worker import AgentWorker
 
@@ -1157,7 +1159,7 @@ class _ProjectWorkspace(QWidget):
             _tip(self, self.theme, "请先新建或选择一个项目。")
             return
         text = (text or "").strip()
-        if not text:
+        if not text and not attachments:
             return
         if self._worker and self._worker.isRunning():
             _tip(self, self.theme, "当前正在运行或对话中，请稍候或先点暂停。")
@@ -1176,7 +1178,20 @@ class _ProjectWorkspace(QWidget):
         if not project:
             return
 
-        uev = ProjectEvent(kind="user", content=text)
+        attachments = attachments or []
+
+        uev_content = text or "（发送了附件）"
+        if attachments:
+            if text:
+                uev_content = text + "\n\n[附件] " + ", ".join(
+                    (a.get("display_name") or a.get("path") and str(a.get("path")) or "附件")
+                    for a in attachments
+                )
+            else:
+                uev_content = "（发送了附件：" + ", ".join(
+                    (a.get("display_name") or str(a.get("path")) or "附件") for a in attachments
+                ) + "）"
+        uev = ProjectEvent(kind="user", content=uev_content)
         self.store.append_event(self._project_id, uev)
         self._timeline.append_event(uev)
 
@@ -1199,6 +1214,7 @@ class _ProjectWorkspace(QWidget):
             self.store.settings.max_steps,
             parent=self,
             mode="chat",
+            attachments=attachments,
         )
         self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
@@ -1230,7 +1246,7 @@ class _ProjectWorkspace(QWidget):
             _tip(self, self.theme, "正在更新项目信息，请稍候。")
             return
 
-        text = self._actions.take_input()
+        text, attachments = self._actions.take_input(with_attachments=True)
         project = self.store.get(self._project_id)
         if not project:
             if text:
@@ -1293,6 +1309,7 @@ class _ProjectWorkspace(QWidget):
             self.store.settings.max_steps,
             parent=self,
             mode="run",
+            attachments=attachments,
         )
         self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
