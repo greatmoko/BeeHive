@@ -247,6 +247,8 @@ body {
 <script>
 'use strict';
 
+document.addEventListener('contextmenu', (event) => event.preventDefault());
+
 /* ═══════════════ 工具：Markdown 渲染（无外部依赖，已先转义 HTML） ═══════════════ */
 function escapeHtml(s) {
   return String(s)

@@ -18,8 +18,10 @@ import json
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QFrame, QVBoxLayout
 
@@ -96,6 +98,13 @@ class _ChatBridge(QObject):
         self._host._on_load_older()
 
 
+class _NoContextPage(QWebEnginePage):
+    """禁用默认右键菜单（消除右键弹出的黑色弹窗）。"""
+
+    def contextMenuEvent(self, event: QContextMenuEvent):
+        event.accept()
+
+
 class _WebChat(QFrame):
     """现代化聊天窗口：内部承载 QWebEngineView，对外暴露与 _Timeline 兼容的接口。"""
 
@@ -116,6 +125,8 @@ class _WebChat(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self._view = QWebEngineView(self)
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._view.setPage(_NoContextPage(self._view))
         layout.addWidget(self._view)
         self._bridge = _ChatBridge(self)
         channel = QWebChannel(self._view.page())
