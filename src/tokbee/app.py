@@ -12,6 +12,14 @@ os.environ.setdefault(
     "qt.qpa.fonts.warning=false;qt.text.font.db.warning=false",
 )
 
+# 须在创建 QApplication 之前：Windows 上 Chromium 探测网络变化时，若系统
+# Network Location Awareness 服务不可用，会往 stderr 打印
+# "WSALookupServiceBegin failed with: 10108"（无害噪声）。Chromium 日志级别收紧到
+# FATAL（0=INFO/1=WARNING/2=ERROR/3=FATAL）以消除该干扰；QTWEBENGINE_CHROMIUM_FLAGS
+# 由 WebEngine 主/子进程共同读取，setdefault 不覆盖用户已显式设置的参数。
+if sys.platform == "win32":
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--log-level=3")
+
 # Windows：独立 AppUserModelID，任务栏才显示应用图标而非 python.exe 图标
 if sys.platform == "win32":
     try:

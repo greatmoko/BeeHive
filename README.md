@@ -30,7 +30,7 @@
 - **TokBee**：多会话 AI 对话，支持文件附件（图片 / PDF / Word / Excel / PPT）、模型与角色选择、上下文用量环形指示器、流式 Markdown 输出。
 - **WokBee**：项目级 AI Agent，独立工作区，支持文件读写、联网检索、本机命令执行、脚本固化、经验沉淀、Skills / MCP 挂载、人机协作审批。
 - **AutoBee**：定时任务调度（文本 / 脚本 / WokBee 项目），自然语言生成 Cron，企业微信推送。
-- **AIConfig**：AI 角色库、厂商设置、TokBee / WokBee 设置、Skills、MCP。
+- **AIConfig**：AI 角色库、厂商设置、TokBee / WokBee / DeziBee 设置、Skills、MCP。
 - 基础 UI 与系统样式、本地数据管理等。
 
 ### v0.2.2 —— AI 错误统一分类重试 + Agent 直接创建 AutoBee 定时任务
@@ -170,9 +170,10 @@ python main.py
 | 3 | 设置默认模型 | 在模型旁点击 **「默认」**，新建对话/项目会优先使用 |
 | 4 | **TokBee 设置** | 配置新建对话的默认参数（温度、角色等） |
 | 5 | **WokBee 设置** | 配置默认模型、执行步数上限、审批策略等 |
-| 6 | （可选）**Skills / MCP** | 挂载全局技能包或外挂 MCP 工具服务器 |
-| 7 | （可选）**AutoBee** | 需要定时任务时，新建任务并保存；可填企业微信 Webhook |
-| 8 | （可选）**消息网关** | 需要用手机遥控本机 Agent 时，进入 AIConfig → 消息网关扫码绑定 |
+| 6 | （可选）**DeziBee 设置** | 指定 DeziBee 需求工作文件夹（每个需求在其下建子目录） |
+| 7 | （可选）**Skills / MCP** | 挂载全局技能包或外挂 MCP 工具服务器 |
+| 8 | （可选）**AutoBee** | 需要定时任务时，新建任务并保存；可填企业微信 Webhook |
+| 9 | （可选）**消息网关** | 需要用手机遥控本机 Agent 时，进入 AIConfig → 消息网关扫码绑定 |
 
 内置支持的厂商类型包括 OpenAI、Google Gemini、DeepSeek、智谱 GLM、通义千问、Kimi 等 OpenAI 兼容接口；也支持自定义 Host 的中转服务。
 
@@ -274,6 +275,7 @@ python main.py
 | **厂商设置** | API Key、Host、模型列表、默认模型 |
 | **TokBee 设置** | 新建对话默认参数 |
 | **WokBee 设置** | 默认模型、步数上限、审批策略、节流、超时等 |
+| **DeziBee 设置** | DeziBee（AI 产品设计）需求工作文件夹 |
 | **Skills** | 全局技能包目录 |
 | **MCP** | 外挂 MCP 服务器 |
 | **消息网关** | 飞书 / 微信频道绑定、默认项目、允许列表、连接状态 |
@@ -288,6 +290,7 @@ python main.py
 | `~/.wokbee/autobee.json` | AutoBee 定时任务与运行日志 |
 | `~/.wokbee/wechat_cursor.txt` | 微信消息去重游标（重启不重放） |
 | `~/WokBeeWorkspace/` | WokBee 各项目目录 |
+| `~/WokBee/DeziBee/` | DeziBee 需求目录（每个需求一个子目录，可在 AIConfig → DeziBee 设置中修改） |
 
 ---
 

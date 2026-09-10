@@ -110,12 +110,31 @@ class DeziBeeView(QWidget):
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
         self.theme = theme
+        self._work_root = self._current_work_root()
         self._store = DeziBeeStore()
         self._reqs: list[Requirement] = []
         self._worker: DeziBeeWorker | None = None
         self._build()
         self._refresh()
         self.sidebar.select_first()
+
+    @staticmethod
+    def _current_work_root():
+        """当前配置的 DeziBee 工作文件夹（设置页可能随时修改）。"""
+        from wokbee.core.settings import WokBeeSettings
+
+        return WokBeeSettings().dezibee_work_root
+
+    def showEvent(self, event):
+        """切回本页时：工作文件夹若被改过，重建 store 并重新加载需求列表。"""
+        super().showEvent(event)
+        root = self._current_work_root()
+        if root != self._work_root:
+            self._work_root = root
+            self._store = DeziBeeStore(work_root=root)
+            self.workspace.set_req(None)
+            self._refresh()
+            self.sidebar.select_first()
 
     def _build(self):
         self.setStyleSheet(f"background: {self.theme.colors['content_bg']};")
@@ -231,12 +250,21 @@ class DeziBeeView(QWidget):
         if req is None:
             return
         conv = req.active_conversation()
+        meta = meta if isinstance(meta, dict) else {}
+        target = "reasoning" if str(meta.get("target") or "") == "reasoning" else "text"
         if kind == "agent_stream":
-            self.workspace.chat_log.append_stream(content)
+            self.workspace.chat_log.append_stream(content, target)
             return
         # 记录到当前对话（agent/user/error/info/tool）
         if kind in ("agent", "user", "error", "info", "tool"):
             self._append_conv_event(conv, kind, content)
+            phase = str(meta.get("phase") or "")
+            if kind == "agent" and phase in ("reasoning", "narration", "answer"):
+                # 完整事件到达：把流式气泡原地定稿，避免同一段内容渲染两遍
+                bubble_target = "reasoning" if phase == "reasoning" else "text"
+                if self.workspace.chat_log.finalize_stream(bubble_target, content):
+                    self._persist(req)
+                    return
             self.workspace.chat_log._render_event(
                 {"kind": kind, "content": content}
             )

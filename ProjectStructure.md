@@ -81,6 +81,7 @@
 | **tokbee/ui/widgets/** | 自定义UI组件 |
 | src/tokbee/ui/widgets/__init__.py | 组件初始化 |
 | src/tokbee/ui/widgets/context_ring.py | 上下文环组件 |
+| src/tokbee/ui/widgets/auto_height_md.py | 自适应高度 Markdown 浏览器（气泡正文共用）|
 | **tokbee/utils/** | 工具模块 |
 | src/tokbee/utils/logger.py | 日志工具类 |
 | **tokbee/resources/** | UI资源目录** (非Python文件，包含图标、图片等) |
@@ -114,6 +115,7 @@
 | src/wokbee/engine/ai_throttle.py | AI请求节流/限速 |
 | src/wokbee/engine/approval_policy.py | 审批策略管理 |
 | src/wokbee/engine/archive_guard.py | 归档/守护逻辑 |
+| src/wokbee/engine/backend_paths.py | 后端路径兼容（Windows \\?\ 扩展路径）|
 | src/wokbee/engine/ask_user.py | 用户交互询问模块 |
 | src/wokbee/engine/autobee_tools.py | autobee工具集成 |
 | src/wokbee/engine/cache_prefix.py | 缓存前缀管理 |

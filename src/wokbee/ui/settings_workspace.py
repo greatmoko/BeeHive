@@ -106,28 +106,6 @@ class WokBeeSettingsWorkspace(QWidget):
         hint.setWordWrap(True)
         hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(hint)
-        bl.addWidget(self._section_label("DeziBee 设置"))
-        dz_row = QHBoxLayout()
-        self._dz_edit = QLineEdit()
-        self._dz_edit.setFixedHeight(34)
-        self._dz_edit.setPlaceholderText("选择 DeziBee 工作文件夹…")
-        self._style_input(self._dz_edit)
-        dz_row.addWidget(self._dz_edit, stretch=1)
-        dz_browse = QPushButton("选择文件夹")
-        dz_browse.setFixedSize(92, 34)
-        dz_browse.setCursor(Qt.CursorShape.PointingHandCursor)
-        dz_browse.setStyleSheet(self._secondary_btn_qss())
-        dz_browse.clicked.connect(self._browse_dezibee)
-        dz_row.addWidget(dz_browse)
-        bl.addLayout(dz_row)
-        dz_hint = QLabel(
-            "DeziBee（AI 产品设计）工作文件夹：每个需求在其下创建「需求ID」子目录，"
-            "Demo / PRD / 素材全部存放在其中。路径不存在时自动创建。"
-        )
-        dz_hint.setWordWrap(True)
-        dz_hint.setStyleSheet(hint_label_qss(c))
-        bl.addWidget(dz_hint)
-
         bl.addWidget(self._section_label("已授权附加目录（项目外）"))
         ext_intro = QLabel(
             "列表中的目录已加入全局白名单，Agent 可经 /ext/<slug>/… 虚拟路径用文件工具访问。"
@@ -339,12 +317,6 @@ class WokBeeSettingsWorkspace(QWidget):
         btn_bar.addWidget(save_btn)
         root.addLayout(btn_bar)
 
-    def _browse_dezibee(self):
-        start = self._dz_edit.text().strip() or str(Path.home() / "WokBee" / "DeziBee")
-        path = QFileDialog.getExistingDirectory(self, "选择 DeziBee 工作文件夹", start)
-        if path:
-            self._dz_edit.setText(path)
-
     def _section_label(self, text: str) -> QLabel:
         c = self.theme.colors
         lbl = QLabel(text)
@@ -368,7 +340,6 @@ class WokBeeSettingsWorkspace(QWidget):
 
     def _load(self):
         self._ws_edit.setText(str(self.settings.workspace_root))
-        self._dz_edit.setText(str(self.settings.dezibee_work_root))
         apply_flags_to_checks(self._approval_checks, self.settings.approval)
         self._max_steps.setValue(self.settings.max_steps)
         self._max_parallel.setValue(self.settings.max_parallel_tools)
@@ -479,16 +450,6 @@ class WokBeeSettingsWorkspace(QWidget):
         except OSError as e:
             _tip(self, self.theme, f"无法创建工作区目录：{e}")
             return
-        dz = self._dz_edit.text().strip()
-        if not dz:
-            _tip(self, self.theme, "请设置 DeziBee 工作文件夹。")
-            return
-        try:
-            Path(dz).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            _tip(self, self.theme, f"无法创建 DeziBee 工作文件夹：{e}")
-            return
-        self.settings.dezibee_work_root = dz
         self.settings.workspace_root = root
         self.settings.approval = flags_from_checks(self._approval_checks)
         self.settings.max_steps = self._max_steps.value()

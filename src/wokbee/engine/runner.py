@@ -865,6 +865,11 @@ class AgentRunner:
         workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
         _ensure_memory_files(req.project_root, req.project)
 
+        # Windows：容忍 resolve() 偶发返回的 \\?\ 扩展路径，避免并发写文件时误判越界
+        from wokbee.engine.backend_paths import install_extended_path_tolerance
+
+        install_extended_path_tolerance()
+
         model = build_chat_model(
             req.resolved,
             timeout=self.settings.model_timeout_seconds,

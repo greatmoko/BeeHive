@@ -42,6 +42,17 @@ def _reasoning_of(raw: object) -> str:
     return str(raw or "").strip()
 
 
+def _reasoning_delta(raw: object) -> str:
+    """流式 reasoning 增量：**不能 strip**。
+
+    逐块 strip 会把 token 之间的空格吃掉（" wants" → "wants"），拼接后词与词粘连
+    （"The user wantsme to"）。整段文本在引擎侧 _reasoning_text 会自行 strip。
+    """
+    if isinstance(raw, list):
+        return "".join(str(x) for x in raw)
+    return str(raw or "")
+
+
 def _inject_reasoning() -> None:
     """幂等地给 langchain_openai 的转换函数打补丁，保留 reasoning_content。"""
     import langchain_openai.chat_models.base as _lb
@@ -62,7 +73,7 @@ def _inject_reasoning() -> None:
 
     def _patched_delta(_dict, default_class):
         chunk = orig_delta(_dict, default_class)
-        rc = _reasoning_of(_dict.get("reasoning_content")) if isinstance(_dict, dict) else ""
+        rc = _reasoning_delta(_dict.get("reasoning_content")) if isinstance(_dict, dict) else ""
         if rc and hasattr(chunk, "additional_kwargs") and not chunk.additional_kwargs.get(
             "reasoning_content"
         ):

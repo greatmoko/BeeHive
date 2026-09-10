@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QScrollArea,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.widgets.auto_height_md import AutoHeightMd
 
 from dezibee.core.models import Conversation
 
+# 工具气泡只展示首行摘要：write_file 等正文极长，避免撑爆交互记录
+TOOL_SUMMARY_CHARS = 120
+
+
+def _tool_summary(content: str) -> str:
+    """工具气泡正文：取首行（**call:** `name` / **callback:** `name`）作为摘要。"""
+    text = content or ""
+    if not text.strip():
+        return ""
+    return text.splitlines()[0][:TOOL_SUMMARY_CHARS]
+
 
 class _Bubble(QFrame):
-    """单条消息气泡：左侧角色标签 + 内容区。"""
+    """单条消息气泡：左侧角色标签 + 右侧内容卡片（Markdown、高度自适应）。"""
 
     def __init__(
         self,
@@ -64,34 +74,31 @@ class _Bubble(QFrame):
         )
         layout.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
 
-        if role == "tool":
-            # 工具消息：折叠展示摘要
-            head = content.splitlines()[0][:120] if content else ""
-            body = QLabel(head)
-            body.setWordWrap(True)
-            body.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            body.setStyleSheet(
-                f"font-size: 12px; color: {c['text_secondary']};"
-                f"background: {bg}; border-radius: 6px; padding: 6px 10px;"
-            )
-            layout.addWidget(body, 1)
-        else:
-            browser = QTextBrowser()
-            browser.setOpenExternalLinks(True)
-            browser.setStyleSheet(f"""
-                QTextBrowser {{
-                    background: {bg}; border: none; border-radius: 6px;
-                    padding: 8px 10px; font-size: 13px; color: {c['text']};
-                }}
-            """)
-            browser.setMarkdown(content or "")
-            browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            # 高度自适应（收紧上限避免整页撑爆）
-            doc_height = browser.document().size().height()
-            browser.setFixedHeight(min(int(doc_height) + 16, 600))
-            layout.addWidget(browser, 1)
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background: {bg}; border: none; border-radius: 6px; }}"
+        )
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(10, 6, 10, 6)
+        card_lay.setSpacing(0)
+        self._browser = AutoHeightMd(theme, danger=(role == "error"))
+        card_lay.addWidget(self._browser)
+        layout.addWidget(card, 1)
+
+        self._raw = ""
+        self.set_content(_tool_summary(content) if role == "tool" else content)
+
+    def set_content(self, content: str):
+        """整段设置气泡正文（Markdown）。"""
+        self._raw = content or ""
+        self._browser.set_markdown(self._raw)
+
+    def append_stream(self, delta: str):
+        """流式增量：累积后整段重渲染，Markdown 与高度随内容同步。"""
+        if not delta:
+            return
+        self._raw += delta
+        self._browser.set_markdown(self._raw)
 
 
 class ChatLogPanel(QWidget):
@@ -101,7 +108,7 @@ class ChatLogPanel(QWidget):
         super().__init__(parent)
         self.theme = theme
         self._conversation: Conversation | None = None
-        self._stream_target: _Bubble | None = None
+        self._stream_targets: dict[str, _Bubble] = {}
         self._build()
 
     def _build(self):
@@ -145,7 +152,7 @@ class ChatLogPanel(QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        self._stream_target = None
+        self._stream_targets.clear()
 
     # ── 事件渲染 ─────────────────────────────────────────
     def _render_event(self, ev: dict):
@@ -166,7 +173,7 @@ class ChatLogPanel(QWidget):
         else:
             self._append_bubble("info", content)
 
-    def _append_bubble(self, role: str, content: str):
+    def _append_bubble(self, role: str, content: str) -> _Bubble:
         bubble = _Bubble(role, content, self.theme)
         self._list_layout.addWidget(bubble)
         self._scroll_to_bottom()
@@ -181,30 +188,29 @@ class ChatLogPanel(QWidget):
         ))
 
     # ── 流式增量 ─────────────────────────────────────────
-    def begin_stream(self, role: str = "ai"):
-        """开启新的 AI 流式气泡。"""
-        bubble = _Bubble(role, "", self.theme)
-        self._list_layout.addWidget(bubble)
+    def append_stream(self, delta: str, target: str = "text"):
+        """向对应流式气泡追加增量（reasoning / text 各一条，互不串行）。"""
+        target = "reasoning" if target == "reasoning" else "text"
+        if not delta:
+            return
+        bubble = self._stream_targets.get(target)
+        if bubble is None:
+            bubble = self._append_bubble("ai", "")
+            self._stream_targets[target] = bubble
+        bubble.append_stream(delta)
         self._scroll_to_bottom()
-        self._stream_target = bubble
 
-    def append_stream(self, delta: str):
-        """向当前流式气泡追加内容（整段重设，供简单 UI 使用）。"""
-        if self._stream_target is None:
-            self.begin_stream("ai")
-        target = self._stream_target
-        # 往现有气泡内容追加：直接重建气泡文本（简单方案，避免频繁重算高度）
-        try:
-            browser = target.findChild(QTextBrowser)
-            if browser is not None:
-                cursor = browser.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.End)
-                cursor.insertText(delta)
-                browser.setTextCursor(cursor)
-                browser.ensureCursorVisible()
-                self._scroll_to_bottom()
-        except Exception:
-            pass
+    def finalize_stream(self, target: str, content: str) -> bool:
+        """完整 agent 事件到达：把对应流式气泡原地落为最终内容并停止更新。
+
+        返回 False 表示该 target 没有进行中的流式气泡（调用方按新增气泡处理）。
+        """
+        target = "reasoning" if target == "reasoning" else "text"
+        bubble = self._stream_targets.pop(target, None)
+        if bubble is None:
+            return False
+        bubble.set_content(content)
+        return True
 
     def end_stream(self):
-        self._stream_target = None
+        self._stream_targets.clear()

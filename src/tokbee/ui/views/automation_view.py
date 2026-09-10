@@ -65,6 +65,7 @@ class _SubNav(QFrame):
         ("ai_roles", "🤖", "AI 角色"),
         ("session_defaults", "⚙", "TokBee 设置"),
         ("wokbee_settings", "🐝", "WokBee 设置"),
+        ("dezibee_settings", "🎨", "DeziBee 设置"),
         ("skills", "📚", "Skills"),
         ("credentials", "🔑", "凭据库"),
         ("mcp", "🔌", "MCP"),
@@ -763,6 +764,11 @@ class AutomationView(QWidget):
         ab_page = WokBeeSettingsWorkspace(self.theme, ab_settings)
         self._pages["wokbee_settings"] = ab_page
         self._stack.addWidget(ab_page)
+
+        from dezibee.ui.settings_workspace import DeziBeeSettingsWorkspace
+        dz_page = DeziBeeSettingsWorkspace(self.theme, ab_settings)
+        self._pages["dezibee_settings"] = dz_page
+        self._stack.addWidget(dz_page)
 
         from wokbee.ui.skills_workspace import SkillsWorkspace
         from wokbee.core.skills_store import SkillsStore
