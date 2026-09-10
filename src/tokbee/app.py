@@ -105,7 +105,13 @@ class Application:
         QApplication.setAttribute(
             Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True
         )
-        self.qt_app = QApplication.instance() or QApplication(sys.argv)
+        # QCoreApplication.instance() 的静态返回类型是 QCoreApplication | None，
+        # 直接 `or` 会让 qt_app 推断成 QCoreApplication，后续 QApplication 专有
+        # API（setStyle / setFont / setWindowIcon）在类型检查里全部报错。
+        existing = QApplication.instance()
+        self.qt_app: QApplication = (
+            existing if isinstance(existing, QApplication) else QApplication(sys.argv)
+        )
         self.qt_app.setStyle(_pick_qt_style())
         self.qt_app.setApplicationName("WokBee")
         self.qt_app.setFont(_pick_ui_font())
