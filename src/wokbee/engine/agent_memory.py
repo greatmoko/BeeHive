@@ -1,9 +1,10 @@
 """跨项目 Agent 记忆：记忆概述 + 单一记忆库（SQLite）。
 
 - 记忆概述：全局单个 MD（`~/.wokbee/agent_memory/overview.md`，≤40000 字），
-  含「用户记忆」与「Agent 记忆（能力/坑/环境/工具/需管理内容）」。运行前注入，一般不改，
-  仅当 AI 判断有必要时更新。
-- 记忆库：单个 SQLite 表 `memory`，按关键字跨项目查询后按需注入。
+  含「用户记忆」与「Agent 记忆（能力/坑/环境/工具/需管理内容）」。每次运行都会自动注入
+  （作为【记忆概述】），一般不改，仅当 AI 判断有必要时更新。
+- 记忆库：单个 SQLite 表 `memory`，按关键字跨项目查询后**仅首次运行自动注入**；
+  非首次运行不自动查询，由 AI 按需用 search_memory 等主动查询。
   - kind='agent'：每项目一条 ≤2000 字（5W1H）项目 Agent 记忆，key=project_id。
   - kind='user'：用户要求记忆的内容，key=f"{project_id}-user"。
   均含 keywords 与 refs（原始文件绝对路径数组）。
@@ -111,7 +112,9 @@ def build_default_overview(*, settings=None) -> str:
     sections = [
         "# WokBee Agent 记忆概述",
         "",
-        "> 本文件是 Agent 的跨项目记忆：**运行前注入**。由系统提示词、运行环境与工具清单提炼的"
+        "> 本文件是 Agent 的跨项目记忆：**每次运行都会自动注入**（作为【记忆概述】），"
+        "与项目经验一并注入上下文。"
+        "由系统提示词、运行环境与工具清单提炼的"
         "第一版；一般情况下不更新，仅当 AI 判断有必要时补充或处理。总字数 ≤40000。",
         "",
         "## 用户记忆",
@@ -145,10 +148,10 @@ def build_default_overview(*, settings=None) -> str:
         "- **查找优先记忆**：当用户让你「找 / 查 / 搜索 / 寻找」某个东西时，优先用 "
         "`search_memory`（跨项目记忆库）与 `load_conversation_memory`（对话记忆）检索记忆相关"
         "内容，再考虑联网或文件检索；命中后把出处（记忆原文/原始文件地址）告知用户。",
-        "- 目录约定：workspace/ 沙箱、deliverables/ 交付物、uploads/ 用户上传（归档保留）、"
+        "- 目录约定：workspace/ 沙箱、deliverables/ 交付物、uploads/ 用户上传与参考材料（uploads/references/，归档保留）、"
         "memory/experiences/ 经验、memory/chat_memory.md 对话记忆、scripts/ 管线脚本、"
-        "references/ 参考材料（归档保留）、archives/ 归档（**禁止访问**）。",
-        "- 使用外部软件/服务/登录/环境参数时，把可复用代码/配置/密钥存到 references/ 并在 "
+        "archives/ 归档（**禁止访问**）。",
+        "- 使用外部软件/服务/登录/环境参数时，把可复用代码/配置/密钥存到 uploads/references/ 并在 "
         "MANIFEST.md 登记，确保稳定复跑；敏感信息仅供本机。",
         "- 凭据：list_credentials / get_credential 只给环境变量名；execute 时密码已注入进程环境，"
         "严禁在回复、命令或文件中写出账号密码。",
@@ -558,7 +561,7 @@ _AI_PROJECT_MEMORY_SYSTEM = """你是 WokBee 的「项目 Agent 记忆」助手�
      "refs": ["原始文件绝对路径1", ...]           // 仅保存地址；可含经验文件、对话记忆、脚本、参考材料
    }
 2. summary 不超过 2000 字；简洁、方法向，只记录「怎么做」，少写结果正文。
-3. 关键踩坑、可复用脚本/命令、环境依赖、references/ 材料要尽量提炼进 summary 与 keywords。
+3. 关键踩坑、可复用脚本/命令、环境依赖、uploads/references/ 材料要尽量提炼进 summary 与 keywords。
 """
 
 

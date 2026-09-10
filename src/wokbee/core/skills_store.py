@@ -199,7 +199,7 @@ description: 联网调研并输出结构化简报的工作流技能
 
 1. 用 `web_search` 检索关键词
 2. 用 `http_get` 打开权威来源核对
-3. 把结论与链接写入 `artifacts/` 下的 Markdown
+3. 把结论与链接写入 `deliverables/` 下的 Markdown
 4. 明确区分「已核实事实」与「推断」
 """,
         )

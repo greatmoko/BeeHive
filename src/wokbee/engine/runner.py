@@ -31,6 +31,8 @@ from wokbee.core.credential_store import redact_obj, redact_text
 from wokbee.core.paths import (
     ensure_project_layout,
     memory_dir,
+    references_dir,
+    scripts_dir,
     workspace_sandbox,
 )
 from wokbee.core.settings import WokBeeSettings
@@ -53,6 +55,7 @@ from wokbee.engine.lessons import (
     collect_events_log,
     collect_scripts_context,
     judge_should_update_experience,
+    slice_latest_round,
     summarize_lesson_with_ai,
 )
 from wokbee.engine.runtime_env import build_runtime_env_block
@@ -101,6 +104,7 @@ from wokbee.engine.script_factory import (
 )
 from wokbee.engine.script_runner import (
     build_user_message_for_ai_phase,
+    peek_pipeline,
     run_pipeline_until_ai_or_end,
 )
 from wokbee.core.skills_store import SkillsStore
@@ -1003,14 +1007,31 @@ class AgentRunner:
             self._emit("error", f"MCP 加载失败：{e}")
 
         lesson_store = LessonStore(req.project_root)
+
+        # 记忆/经验注入策略：
+        # - 项目经验（memory/experiences/ 最新一份）与【记忆概述】：首次与非首次运行都自动注入；
+        # - 跨项目相关记忆（search_memory 召回）：仅「首次运行」（执行管线为空）自动查询并注入；
+        #   非首次运行不自动查询，由 AI 按需主动用 search_memory 查询。
+        pipe_probe = peek_pipeline(req.project_root)
+        first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
+
         experience_digest = lesson_store.prompt_digest()
         if not lesson_store.is_empty():
             latest = lesson_store.latest_path()
-            self._emit(
-                "info",
-                f"已注入最新项目经验：{latest.name if latest else 'experiences/'}"
-                f"（历史经验不注入；禁止使用 archives/）",
-            )
+            if first_run:
+                self._emit(
+                    "info",
+                    f"首次运行（执行管线为空），已注入最新项目经验："
+                    f"{latest.name if latest else 'experiences/'}"
+                    f"（历史经验不注入；禁止使用 archives/）",
+                )
+            else:
+                self._emit(
+                    "info",
+                    f"非首次运行（已有执行管线），仍自动注入项目经验："
+                    f"{latest.name if latest else 'experiences/'}"
+                    f"；跨项目相关记忆不自动查询注入，AI 需要时可主动用 search_memory 查询。",
+                )
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
         system_prompt = static_system_prompt(mode=mode)
@@ -1023,30 +1044,38 @@ class AgentRunner:
         context_extra: list[str] = list(skills_extra_lines) + skillbuild_extra_lines + access_extra_lines
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
+        if mode == "run" and not first_run:
+            # 非首次运行：项目经验/记忆概述已注入；仅不自动查询跨项目相关记忆
+            context_extra.append(
+                "【本轮回溯说明】非首次运行（已有执行管线）：项目经验与【记忆概述】已注入；"
+                "未自动查询注入跨项目相关记忆，如需更多历史/跨项目记忆，请主动用 search_memory "
+                "/ load_conversation_memory 或读取 memory/experiences/ 查询。"
+            )
 
         # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级。
-        # 召回动作本身也落一条时间线提示，让用户在对话记录里能看到「先调记忆再执行」。
+        # 仅首次运行自动查询注入；非首次运行不自动查询（由 AI 按需 search_memory）。
         intent_text = (req.user_message or "").strip() or (req.project.goal or "").strip()
         memory_recall_block = ""
-        recall_failed = False
-        if intent_text:
-            try:
-                memory_recall_block = recall_memories(intent_text, model=model, k=3)
-            except Exception:
-                recall_failed = True
-                logger.debug("记忆召回失败，按无召回处理", exc_info=True)
-            if recall_failed:
-                self._emit("info", "记忆召回失败，已跳过（不影响执行）。")
-            elif memory_recall_block.strip():
-                summary = recall_block_summary(memory_recall_block)
-                self._emit(
-                    "info",
-                    "已从记忆库召回相关记忆（已注入本轮上下文）：\n" + summary,
-                )
+        if first_run:
+            recall_failed = False
+            if intent_text:
+                try:
+                    memory_recall_block = recall_memories(intent_text, model=model, k=3)
+                except Exception:
+                    recall_failed = True
+                    logger.debug("记忆召回失败，按无召回处理", exc_info=True)
+                if recall_failed:
+                    self._emit("info", "记忆召回失败，已跳过（不影响执行）。")
+                elif memory_recall_block.strip():
+                    summary = recall_block_summary(memory_recall_block)
+                    self._emit(
+                        "info",
+                        "已从记忆库召回相关记忆（已注入本轮上下文）：\n" + summary,
+                    )
+                else:
+                    self._emit("info", "已检索记忆库，但未找到相关记忆（无注入）。")
             else:
-                self._emit("info", "已检索记忆库，但未找到相关记忆（无注入）。")
-        else:
-            self._emit("info", "无用户意图与目标，跳过记忆召回。")
+                self._emit("info", "无用户意图与目标，跳过记忆召回。")
 
         self._session_context_block = build_session_context_block(
             title=req.project.title,
@@ -1615,6 +1644,12 @@ class AgentRunner:
             err = _format_engine_error(e)
             self._emit("error", f"交互失败：{err}")
             return RunResult(ok=False, outcome="failed", error=err)
+        finally:
+            # 对话结束标记：经验/记忆总结时据此只取最新一轮日志
+            try:
+                self._emit("info", "— 本轮对话结束 —", {"session_end": True})
+            except Exception:
+                pass
 
     def run_skill(
         self,
@@ -1656,7 +1691,7 @@ class AgentRunner:
             "2. 把完成任务**必需**的脚本/模板/参考材料复制进技能目录（如 `scripts/` 子目录）。\n"
             "\n## 依据的材料\n"
             "请用你的文件工具读取当前项目：`memory/experiences/`（经验）、`scripts/` 与 `scripts/pipeline.json`、"
-            "`references/`、`deliverables/` 与 `artifacts/`、`runs/events.jsonl`（时间线），以及【近期时间线摘录】。\n"
+            "`uploads/references/`、`deliverables/`、`runs/events.jsonl`（时间线），以及【近期时间线摘录】。\n"
             "\n## 硬性要求\n"
             "- 技能要能在**新环境**独立复跑：材料齐全、步骤完整、依赖明确。\n"
             "- 涉及第三方下载/安装必须写进「第三方下载说明」。\n"
@@ -1743,6 +1778,8 @@ class AgentRunner:
                         events.append(ProjectEvent.from_dict(json.loads(line)))
                     except (json.JSONDecodeError, TypeError, KeyError):
                         continue
+            # 只取最新一轮，避免旧轮日志灌进上下文
+            events = slice_latest_round(events)
             messages = events_as_messages(events)
             state = load_context_state(project_root)
             summary, active, _ = ctxman.slice_after_compaction(
@@ -1799,8 +1836,9 @@ class AgentRunner:
             f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
             f"策略：{req.approval.summary()}；目录：{req.project_root}\n"
             "可用：web_search / http_get / http_request / 文件工具 / execute\n"
-            "执行策略：读取经验「执行顺序」与 `scripts/pipeline.json` 的 steps，"
-            "按顺序一路推进（本地脚本步骤不耗 Token；遇到 AI 步骤再唤模型）。",
+            "执行策略：已有 pipeline.json 时按 steps 顺序一路执行——"
+            "script 步骤自动执行（不耗 Token）；ai 步骤执行已确定的业务任务（按需调 LLM，"
+            "不重新规划）；仅当脚本报错 / 数据异常 / 输出不符预期时才异常接管。",
             {"phase": "hint"},
         )
 
@@ -1835,7 +1873,8 @@ class AgentRunner:
 
                 self._emit(
                     "info",
-                    "按经验执行顺序推进（最新 experiences/exp_*.md + pipeline.json steps；"
+                    "按 scripts/pipeline.json 的 steps 顺序推进"
+                    "（script 自动执行不耗 Token；ai 步骤执行固定业务任务；"
                     f"阶段上限 {max_phases}）…",
                 )
 
@@ -1881,6 +1920,7 @@ class AgentRunner:
                     context_parts = list(pipe.context_parts or [])
 
                     if pipe.ok and not pipe.need_ai:
+                        # 全部为 script 步骤且成功：0 Token 完成（无 ai 步骤的纯脚本管线）
                         art_dir = Path(req.project_root) / "deliverables"
                         art_dir.mkdir(parents=True, exist_ok=True)
                         out_file = art_dir / "script_result.md"
@@ -1892,30 +1932,15 @@ class AgentRunner:
                         out_file.write_text(body, encoding="utf-8")
                         self._emit(
                             "agent",
-                            "有序管线均为脚本且已成功，跳过模型以节省 Token。\n"
+                            "有序管线均为脚本且已成功，0 Token 完成。\n"
                             f"结果已写入 `deliverables/{out_file.name}`。",
                         )
-                        lesson = self._maybe_auto_write_lesson(
-                            req,
-                            "success",
-                            (pipe.combined_output or "脚本执行成功")[:800],
-                            "",
-                            success_path="\n".join(
-                                f"{i+1}. 本地脚本 `{it.path}`"
-                                for i, it in enumerate(pipe.items)
-                            ),
-                            notes=(
-                                "- 本轮按执行顺序由本地脚本完成，未调用模型。\n"
-                                "- scripts/ 不参与归档。"
-                            ),
-                            artifacts=f"- `deliverables/{out_file.name}`",
-                        )
-                        self._emit("info", "运行结束：成功（纯脚本有序管线）")
+                        self._emit("info", "运行结束：成功（纯脚本有序管线，未调用 LLM）")
                         return RunResult(
                             ok=True,
                             outcome="success",
                             final_text=(pipe.combined_output or "")[:2000],
-                            lesson_id=lesson.id if lesson else "",
+                            lesson_id="",
                         )
 
                     user_message = build_user_message_for_ai_phase(
@@ -2021,6 +2046,34 @@ class AgentRunner:
                 error=err,
                 lesson_id=lesson.id if lesson else "",
             )
+        finally:
+            # 本轮运行/对话结束标记：经验总结时据此只取最新一轮日志
+            try:
+                self._emit("info", "— 本轮运行/对话结束 —", {"session_end": True})
+            except Exception:
+                pass
+
+    def _run_had_exception(self) -> bool:
+        """本轮是否出现脚本失败 / 工具报错 / 数据异常等。
+
+        只有出现异常（并由 AI 接管处理）的运行，才在结束前做「是否需要更新
+        Pipeline / 经验」的判断；稳定复跑的干净执行不做判断（省一次 LLM 调用）。
+        """
+        for ev in self._snapshot_run_events():
+            kind = (getattr(ev, "kind", "") or "").strip()
+            content = (getattr(ev, "content", None) or "").strip()
+            if kind == "error":
+                return True
+            if kind == "tool":
+                meta = getattr(ev, "meta", None) or {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                status = str(meta.get("status") or "").strip().lower()
+                if status and status not in ("ok", "success", "succeeded", "done"):
+                    return True
+                if "脚本执行失败" in content or content.startswith("脚本执行失败"):
+                    return True
+        return False
 
     def _maybe_auto_write_lesson(
         self,
@@ -2033,7 +2086,11 @@ class AgentRunner:
         notes: str = "",
         artifacts: str = "",
     ) -> Lesson | None:
-        """首次运行自动总结并提取脚本；已有经验时由 AI 自行判断是否需要更新。"""
+        """首次运行自动总结并生成 Pipeline；已有经验时仅当本轮出现异常才由 AI 判断是否更新。
+
+        稳定复跑（无异常）不做更新判断，也不覆盖已有 Pipeline——script 步骤 0 Token 自动执行，
+        ai 步骤按固定业务任务消耗必要 Token，正常路径不重新规划。
+        """
         store = LessonStore(req.project_root)
         if store.is_empty():
             # 首次运行：自动总结并固化脚本
@@ -2049,16 +2106,22 @@ class AgentRunner:
                 notes=notes,
             )
 
-        # 已有经验：由 AI 判断本次是否值得更新（脚本报错/环节报错/新优化方法）
+        # 已有经验：仅本轮出现异常（AI 接管处理过）时才判断是否需要更新
         if outcome == "cancelled":
             self._emit("info", "已取消；未更新经验。")
+            return None
+        if not self._run_had_exception():
+            self._emit(
+                "info",
+                "本轮为稳定执行且无异常，跳过经验 / Pipeline 更新判断（不覆盖已有 Pipeline）。",
+            )
             return None
         should, reason = self._judge_update_experience(req, store, outcome)
         if not should:
             self._emit(
                 "info",
                 "AI 判断本次无需更新经验："
-                f"{reason or '无新错误 / 无更优方法 / 执行顺序未变'}",
+                f"{reason or '无新错误 / 无更优方法 / 成功路径未变'}",
             )
             return None
         self._emit(
@@ -2229,7 +2292,7 @@ class AgentRunner:
         refs: list[str] = []
         for p in (
             chat_memory_path(root),
-            root / "references" / "MANIFEST.md",
+            references_dir(root) / "MANIFEST.md",
         ):
             if p.exists() and p.is_file():
                 refs.append(str(p))
@@ -2314,7 +2377,8 @@ class AgentRunner:
                                     loaded.append(ProjectEvent.from_dict(json.loads(line)))
                                 except (json.JSONDecodeError, TypeError, KeyError):
                                     continue
-                    events = loaded[-400:] if loaded else []
+                    # 只取最新一轮（上一个「会话结束」标记之后），旧日志不上传占用 token
+                    events = slice_latest_round(loaded)[-400:] if loaded else []
                 except Exception:
                     logger.exception("读取运行日志失败，AI 总结将缺少日志上下文")
                     events = []
@@ -2382,17 +2446,9 @@ class AgentRunner:
                             preview_parts.append(
                                 f"**摘要**\n{ai_fields['summary'][:800]}"
                             )
-                        if ai_fields.get("order_section"):
+                        if ai_fields.get("success_path"):
                             preview_parts.append(
-                                f"**执行顺序**\n{ai_fields['order_section'][:1200]}"
-                            )
-                        if ai_fields.get("script_section"):
-                            preview_parts.append(
-                                f"**脚本步骤**\n{ai_fields['script_section'][:800]}"
-                            )
-                        if ai_fields.get("ai_section"):
-                            preview_parts.append(
-                                f"**需 AI 的步骤**\n{ai_fields['ai_section'][:600]}"
+                                f"**成功实现路径**\n{ai_fields['success_path'][:1200]}"
                             )
                         if ai_fields.get("notes"):
                             preview_parts.append(
@@ -2424,20 +2480,15 @@ class AgentRunner:
             # 合并：AI 优先，否则用调用方/规则回退；绝不写入产物
             summary_f = (ai_fields.get("summary") or summary or "").strip()
             path_f = (ai_fields.get("success_path") or success_path or "").strip()
-            order_f = (ai_fields.get("order_section") or "").strip()
-            script_sec = (ai_fields.get("script_section") or "").strip()
-            ai_sec = (ai_fields.get("ai_section") or "").strip()
-            env_f = (ai_fields.get("environment") or env).strip()
             notes_f = (ai_fields.get("notes") or notes or "").strip()
 
             if not path_f:
                 if outcome == "success":
                     path_f = (
-                        "1. 明确目标与约束\n"
-                        "2. 使用联网工具或读取 uploads/ 获取真实数据（禁止用 archives/；"
-                        "同名或相近文件以最新修改时间为准）\n"
-                        "3. 在 workspace/ 起草，最终写入 deliverables/\n"
-                        "4. 用中文说明过程与数据来源（经验中不记录结果正文）"
+                        "1. AI:\"{提示词: 明确目标与约束，制定执行方案}\";[AI 环节：理解任务并规划]\n"
+                        "2. 工具调用:\"{cmd: 联网获取或读取 uploads/ 获取真实数据}\";[获取真实数据，禁止用 archives/；同名或相近文件以最新修改时间为准]\n"
+                        "3. 工具调用:\"{cmd: 在 workspace/ 起草，最终写入 deliverables/}\";[在沙箱起草并交付]\n"
+                        "4. AI:\"{提示词: 用中文说明过程与数据来源}\";[AI 环节：交代过程与数据来源（经验中不记录结果正文）]"
                     )
                 else:
                     path_f = (
@@ -2450,14 +2501,16 @@ class AgentRunner:
             if not notes_f:
                 notes_parts = []
                 if errors:
-                    notes_parts.append(f"- 错误线索：{errors[:500]}")
-                notes_parts.append("- 需要实时数据时必须联网，禁止凭记忆编造。")
-                notes_parts.append("- 禁止访问 archives/ 归档数据。")
-                notes_parts.append("- 高危 execute / 写文件是否免审取决于项目审核策略。")
-                notes_parts.append("- 确定性拉取步骤尽量固化到 scripts/；scripts 不参与归档。")
+                    notes_parts.append(
+                        f"- **本次运行报错**：复跑前先核对环境与脚本——{errors[:300]}；"
+                        "可固化步骤已写入 scripts/ 与 pipeline.json，脚本报错时 AI 介入补救。"
+                    )
                 notes_parts.append(
-                    "- 脚本 callback 必须写入 workspace/script_callback_*.md，"
-                    "后续 AI 步骤优先读取，禁止编造。"
+                    "- **需要实时数据**：必须联网获取，禁止凭记忆编造；禁止访问 archives/ 归档数据。"
+                )
+                notes_parts.append(
+                    "- **脚本 callback 需留痕**：脚本执行后把 callback 写入 workspace/script_callback_*.md，"
+                    "AI 环节先读再写，禁止编造。"
                 )
                 notes_f = "\n".join(notes_parts)
 
@@ -2470,14 +2523,10 @@ class AgentRunner:
                 outcome=outcome,
                 summary=summary_f,
                 success_path=path_f,
-                environment=env_f,
                 notes=notes_f,
                 errors=errors,
                 model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
                 policy=req.approval.summary(),
-                order_section=order_f,
-                script_section=script_sec,
-                ai_section=ai_sec,
             )
 
             # 固化本地脚本：用原始工具轨迹 + 事件，勿只用 AI 改写后的散文路径
@@ -2502,8 +2551,15 @@ class AgentRunner:
                 ai_written = apply_ai_authored_scripts(
                     req.project_root,
                     lesson_id=lesson.id,
+                    project_id=req.project.id,
                     script_files=ai_script_files,
                 )
+                # AI 手写脚本已按规范重命名：{原始名 → 新文件名}，供 pipeline 路径对上新文件
+                rename_map: dict[str, str] = {}
+                for _st in ai_written:
+                    _src = str((_st.args or {}).get("_src") or "").strip()
+                    if _src:
+                        rename_map[_src] = Path(_st.rel_path).name
                 ai_pipeline = []
                 if isinstance(ai_fields, dict):
                     raw_pipe = ai_fields.get("pipeline_steps")
@@ -2514,34 +2570,10 @@ class AgentRunner:
                     lesson_id=lesson.id,
                     goal=lesson.goal,
                     pipeline_steps=ai_pipeline,
+                    rename_map=rename_map or None,
                 )
                 # AI 未给出清单时用固化结果补全；有脚本时以固化章节为准（更准确）
-                if solid.script_steps or ai_written:
-                    lesson.script_section = solid.script_section_md or lesson.script_section
-                    if ai_written:
-                        extra = "\n".join(
-                            f"- `{s.rel_path}` — {s.description}（AI 手写）"
-                            for s in ai_written
-                        )
-                        if lesson.script_section and "无可固化" not in lesson.script_section:
-                            lesson.script_section = (
-                                lesson.script_section.rstrip() + "\n" + extra
-                            )
-                        else:
-                            lesson.script_section = (
-                                extra
-                                + "\n\n约定：脚本输出写入 workspace/script_callback_*.md。"
-                            )
-                    lesson.order_section = solid.order_section_md or lesson.order_section
-                    if solid.ai_section_md:
-                        lesson.ai_section = solid.ai_section_md
-                else:
-                    if not lesson.script_section:
-                        lesson.script_section = solid.script_section_md
-                    if not lesson.ai_section:
-                        lesson.ai_section = solid.ai_section_md
-                    if not lesson.order_section:
-                        lesson.order_section = solid.order_section_md
+                # 执行顺序统一由 pipeline.json 的 steps 表达（只含脚本步骤）
                 lesson.scripts = [s.rel_path for s in solid.script_steps] + [
                     s.rel_path for s in ai_written
                 ]
@@ -2555,18 +2587,20 @@ class AgentRunner:
                 lesson.scripts = uniq_scripts
                 lesson.pipeline = solid.pipeline_rel
                 total_scripts = len(lesson.scripts)
-                if total_scripts or solid.ai_steps or applied_order:
+                if total_scripts or applied_order:
                     order_note = (
-                        "（已采用 AI 给出的 pipeline_steps 顺序）"
+                        "（已采用 AI 给出的 pipeline_steps：script+ai 混合）"
                         if applied_order
-                        else "（自动固化默认顺序：脚本…→AI…→收尾脚本）"
+                        else "（自动固化真实执行顺序：确定性脚本步骤）"
                     )
                     self._emit(
                         "info",
-                        f"已写入有序执行步骤到 scripts/pipeline.json"
-                        f"（脚本 {total_scripts} + AI {len(solid.ai_steps)}），"
-                        f"其中 AI 手写脚本 {len(ai_written)} 个{order_note}；"
-                        f"下次按 steps 一路执行；scripts/ 不参与归档",
+                        f"已按成功路径写入有序步骤到 scripts/pipeline.json"
+                        f"（脚本 {total_scripts} 个{order_note}；"
+                        f"其中 AI 手写脚本 {len(ai_written)} 个）；"
+                        f"下次按 steps 一路执行（script 自动跑 0 Token；"
+                        f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
+                        f"scripts/ 不参与归档",
                         {"scripts": lesson.scripts},
                     )
                 elif not total_scripts:
@@ -2579,7 +2613,7 @@ class AgentRunner:
             except Exception:
                 logger.exception("固化脚本失败（经验仍会写入）")
 
-            # 保存本次用到的 Skills 快照与参考材料到 references/（归档不清理）
+            # 保存本次用到的 Skills 快照与参考材料到 uploads/references/（归档不清理）
             try:
                 from wokbee.core.references import (
                     snapshot_used_skills,
@@ -2610,7 +2644,7 @@ class AgentRunner:
                     materials=mats,
                     goal=lesson.goal or "",
                 )
-                snap_msg = f"已保存 {len(written)} 个 Skill 快照到 references/skills/"
+                snap_msg = f"已保存 {len(written)} 个 Skill 快照到 uploads/references/skills/"
                 if manifest_path:
                     try:
                         mrel = manifest_path.relative_to(req.project_root).as_posix()
@@ -2618,63 +2652,11 @@ class AgentRunner:
                         mrel = str(manifest_path)
                     snap_msg += f"，并登记 {mrel}"
                 if written or manifest_path:
-                    self._emit("info", snap_msg + "（references/ 不会被归档）")
+                    self._emit("info", snap_msg + "（uploads/references/ 不会被归档）")
             except Exception:
-                logger.exception("保存 references/ 材料失败（经验仍会写入）")
+                logger.exception("保存参考材料失败（经验仍会写入）")
 
-            # 清理过期脚本与 Skill 快照：丢到 archives/（可逆，不进入下次运行/上下文）
-            try:
-                from wokbee.engine.script_factory import quarantine_obsolete_scripts
-                from wokbee.engine.script_runner import load_pipeline
-                from wokbee.core.references import quarantine_obsolete_skill_snapshots
-
-                used_skills_cur: list[str] = []
-                if isinstance(ai_fields, dict):
-                    raw_skills = ai_fields.get("used_skills")
-                    if isinstance(raw_skills, list):
-                        used_skills_cur = [
-                            str(s) for s in raw_skills if str(s).strip()
-                        ]
-
-                # kept = 当前 pipeline 引用的脚本 ∪ 本轮 lesson.scripts（保守超集，宁可多留）
-                kept_paths: list[str] = []
-                pipe = load_pipeline(req.project_root) or {}
-                steps = pipe.get("steps") if isinstance(pipe.get("steps"), list) else []
-                for s in steps:
-                    if isinstance(s, dict) and s.get("type") == "script":
-                        p = str(s.get("path") or "").strip()
-                        if p:
-                            kept_paths.append(p)
-                for sp in lesson.scripts:
-                    rel = sp if str(sp).startswith("scripts/") else f"scripts/{Path(sp).name}"
-                    kept_paths.append(rel)
-
-                moved_scripts, script_dest = quarantine_obsolete_scripts(
-                    req.project_root,
-                    kept_paths=kept_paths,
-                    lesson_id=lesson.id,
-                )
-                if moved_scripts:
-                    self._emit(
-                        "info",
-                        f"已将 {len(moved_scripts)} 个过期脚本移入 {script_dest}，"
-                        "下次运行不再读取，避免浪费 token；可回收。",
-                        {"moved_scripts": moved_scripts},
-                    )
-
-                moved_skills, skill_dest = quarantine_obsolete_skill_snapshots(
-                    req.project_root,
-                    used_skills=used_skills_cur,
-                )
-                if moved_skills:
-                    self._emit(
-                        "info",
-                        f"已将 {len(moved_skills)} 个过期 Skill 快照移入 {skill_dest}，"
-                        "仅清理不再用到的快照，未动导入的材料文件。",
-                        {"moved_skills": moved_skills},
-                    )
-            except Exception:
-                logger.exception("清理过期脚本/Skill 快照失败（经验仍会写入）")
+            # 注意：总结时不清理、不删除任何已有脚本（scripts/ 全部保留）
 
             path = store.save(lesson)
             try:

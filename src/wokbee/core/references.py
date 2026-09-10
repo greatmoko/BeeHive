@@ -1,8 +1,8 @@
-"""参考材料 references/：保存可复用的外部材料，归档不清理。
+"""参考材料（已并入 uploads/references/）：保存可复用的外部材料，归档不清理。
 
 用途：
 - 第三方代码/脚本、登录与密钥配置、环境参数。
-- 「本次用到的全局 Skills」快照（照原样复制到 references/skills/<name>/）。
+- 「本次用到的全局 Skills」快照（照原样复制到 uploads/references/skills/<name>/）。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def snapshot_used_skills(
     *,
     skills_store: Any = None,
 ) -> list[Path]:
-    """把用到的全局 Skills 整目录复制进 references/skills/<folder>/。
+    """把用到的全局 Skills 整目录复制进 uploads/references/skills/<folder>/。
 
     skill_names 既接受 frontmatter 的 name，也接受 skills 根下的文件夹名。
     返回成功写入的目标路径列表；幂等，重复调用直接覆盖合并。
@@ -102,7 +102,7 @@ def write_reference_manifest(
     materials: list[dict[str, Any]] | None = None,
     goal: str = "",
 ) -> Path | None:
-    """重建 references/MANIFEST.md，登记用到的 Skills 与参考材料。
+    """重建 uploads/references/MANIFEST.md，登记用到的 Skills 与参考材料。
 
     仅当有内容（skills 或 materials 任一）时写入，避免每次总结都清空用户手动登记。
     返回写入的路径；无内容返回 None。
@@ -118,16 +118,16 @@ def write_reference_manifest(
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
-        "# references/ 参考材料清单",
+        "# uploads/references/ 参考材料清单",
         "",
-        f"> 由经验总结自动生成 · {now} · 供下次稳定复跑使用。归档时本目录不会被清理。",
+        f"> 由经验总结自动生成 · {now} · 供下次稳定复跑使用。位于 uploads/ 下，归档时不会被清理。",
         "",
     ]
     if goal:
         lines.append(f"- 项目目标：{(goal or '').strip()[:200]}")
         lines.append("")
     if skills:
-        lines.append("## 本次使用的全局 Skills（快照见 `references/skills/`）")
+        lines.append("## 本次使用的全局 Skills（快照见 `uploads/references/skills/`）")
         for s in skills:
             lines.append(f"- `{s}`")
         lines.append("")
@@ -146,7 +146,7 @@ def write_reference_manifest(
     lines.extend(
         [
             "## 复跑提示",
-            "1. 先读本清单，确认 references/ 下材料齐全。",
+            "1. 先读本清单，确认 uploads/references/ 下材料齐全。",
             "2. 敏感信息（登录/密钥）仅供本机使用，切勿外发。",
             "3. 需要时把第三方代码/配置直接复用，避免重新摸索。",
         ]
@@ -164,9 +164,9 @@ def quarantine_obsolete_skill_snapshots(
     used_skills: list[str],
     lesson_id: str = "",
 ) -> tuple[list[str], Path]:
-    """把 references/skills/ 下不在 used_skills 里的快照目录移入 archives/discard_<ts>/skills/。
+    """把 uploads/references/skills/ 下不在 used_skills 里的快照目录移入 archives/discard_<ts>/skills/。
 
-    只动 references/skills/ 下的目录；references/ 根下的材料文件、MANIFEST.md、README.txt 一律不动。
+    只动 uploads/references/skills/ 下的目录；参考材料文件、MANIFEST.md、README.txt 一律不动。
     返回 (已移走目录名列表, 目标目录)。可逆：不删除，只是搬到归档下。
     """
     keep = {str(s).strip() for s in (used_skills or []) if str(s).strip()}
@@ -193,7 +193,7 @@ def quarantine_obsolete_skill_snapshots(
 
 
 def count_reference_files(project_root: Path, limit: int = 8) -> list[str]:
-    """references/ 下的材料文件名（忽略 README / MANIFEST。）。"""
+    """uploads/references/ 下的材料文件名（忽略 README / MANIFEST。）。"""
     folder = references_dir(project_root)
     if not folder.exists():
         return []

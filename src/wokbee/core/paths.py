@@ -2,25 +2,22 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 # 每个项目目录下的标准子目录
 # deliverables：项目交付物（归档时一并归档并清空）
-# uploads：用户上传文件（Agent 可读取；归档时保留，不随会话清空）
+# uploads：用户上传文件 + 参考材料（uploads/references/，Agent 可读取；归档时保留，不随会话清空）
 # archives：归档快照（自身不再被归档）
 # scripts：可本地复用脚本（不参与归档）
-# references：可复用外部材料（第三方代码/登录/环境参数/用到的 Skills 快照；不参与归档）
 PROJECT_SUBDIRS = (
     "memory",
-    "artifacts",  # 兼容旧路径；新交付请写入 deliverables/
     "deliverables",
     "uploads",
-    "lessons",
     "runs",
     "workspace",
     "archives",
     "scripts",
-    "references",
 )
 
 PROJECT_META = "project.json"
@@ -29,13 +26,13 @@ ARCHIVES_DIR = "archives"
 SCRIPTS_DIR = "scripts"
 DELIVERABLES_DIR = "deliverables"
 UPLOADS_DIR = "uploads"
-REFERENCES_DIR = "references"
+# 参考材料逻辑已合并进 uploads/（uploads/references/）
+REFERENCES_DIR = "uploads/references"
 
-# 归档时复制后清空（不含 archives / memory / scripts / references / uploads）
+# 归档时复制后清空（不含 archives / memory / scripts / uploads）
 ARCHIVABLE_DIRS = (
     "runs",
     "workspace",
-    "artifacts",
     "deliverables",
 )
 
@@ -74,17 +71,30 @@ def ensure_project_layout(root: Path) -> None:
         except OSError:
             pass
     references = root / REFERENCES_DIR
+    try:
+        references.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     rreadme = references / "README.txt"
     if not rreadme.exists():
         try:
             rreadme.write_text(
-                "本目录保存可复用的参考材料：第三方代码/脚本、登录与密钥配置、环境参数、"
+                "本目录（uploads/references/）保存可复用的参考材料：第三方代码/脚本、登录与密钥配置、环境参数、"
                 "以及本次用到的全局 Skills 快照。\n"
-                "用于保证复杂任务下次能稳定复跑。\n"
-                "归档时**不会**归档本目录，会长期保留。\n"
+                "用于保证复杂任务下次能稳定复跑；位于 uploads/ 下，随上传资料长期保留。\n"
                 "注意：登录/密钥等敏感信息仅供本机复跑，切勿外发。\n",
                 encoding="utf-8",
             )
+        except OSError:
+            pass
+    # 兼容迁移：旧根级 references/ 内容并入 uploads/references/
+    old_ref = root / "references"
+    if old_ref.exists() and old_ref.is_dir():
+        try:
+            new_ref = references_dir(root)
+            if not new_ref.exists() or not any(new_ref.iterdir()):
+                new_ref.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_ref), str(new_ref))
         except OSError:
             pass
 
@@ -98,7 +108,7 @@ def events_path(project_root: Path) -> Path:
 
 
 def artifacts_dir(project_root: Path) -> Path:
-    """兼容旧名；新代码请优先用 deliverables_dir。"""
+    """兼容旧名（历史遗留，已不新建）；新代码请用 deliverables_dir。"""
     return project_root / "artifacts"
 
 
@@ -127,6 +137,7 @@ def scripts_dir(project_root: Path) -> Path:
 
 
 def references_dir(project_root: Path) -> Path:
+    """参考材料目录（已并入 uploads/，不再有根级 references/）。"""
     return project_root / REFERENCES_DIR
 
 

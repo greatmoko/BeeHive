@@ -25,7 +25,12 @@ def static_system_prompt(*, mode: str) -> str:
         "**严禁**读取、列举、搜索或通过 shell 访问 `archives/`。\n"
         "文件工具只用虚拟路径（workspace/、deliverables/、uploads/、/ext/…）；"
         "仅 execute 接受真实主机路径。\n"
-        "主机按 pipeline.json 的 steps 顺序推进，仅在 type=ai 的步骤唤你。\n"
+        "主机按 pipeline.json 的 steps 顺序推进：script 步骤自动执行（不耗 Token）；"
+        "ai 步骤执行已确定的 AI 业务任务（按 description/prompt_hint 完成，不要重新规划"
+        "整个 Pipeline）；仅当脚本报错 / 数据异常 / 输出不符预期时才异常接管。\n"
+        "交付约定：用户目标要求交付文件时，把最终交付文件复制/移动到项目的 deliverables/"
+        "（保留原始文件与文件名，不要只生成合并文档 final.md 代替产物）；"
+        "不要额外生成总结文档；用户明确要求不校验/不检查内容时，不要校验或检查。\n"
         "凭据：list_credentials / get_credential 只给环境变量名，严禁在回复、命令或文件中写出账号密码。\n"
         "记忆是**主动参考**的：每轮被唤时先看【会话上下文】的【相关记忆】块，已覆盖当前步骤就参考；"
         "不足则**主动**用 search_memory（跨项目记忆）继续调取补充，不必等用户明说「找/查」。\n"
@@ -65,7 +70,7 @@ def build_session_context_block(
         lines.append(experience_digest.strip())
     if memory_overview_digest.strip():
         lines.append("")
-        lines.append("【记忆概述】（跨项目 Agent 记忆，运行前注入；一般无需改写）")
+        lines.append("【记忆概述】（跨项目 Agent 记忆，自动注入；一般无需改写）")
         lines.append(memory_overview_digest.strip())
     if memory_recall_block.strip():
         lines.append("")

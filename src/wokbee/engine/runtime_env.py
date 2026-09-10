@@ -440,7 +440,7 @@ def format_runtime_env_block(
         "  · uploads/…  用户上传",
         "  · memory/…  经验（experiences/）",
         "  · scripts/…  管线脚本",
-        "  · references/…  参考材料",
+        "  · uploads/references/…  参考材料（含 Skills 快照）",
         "  · /skills/…  全局 Skills（只读）",
         "  · /ext/<slug>/…  已授权附加目录（项目外；先 request_access 申请→人工高危审批→用返回的 /ext/<slug>/…）",
         "  · 示例：workspace/wttr_shenzhen.json（勿写完整 Windows 路径）",

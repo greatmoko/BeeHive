@@ -45,7 +45,7 @@ class PhaseResult:
 
 @dataclass
 class PipelineRunResult:
-    """整条有序管线的状态（可能只跑到第一个 AI 阶段前）。"""
+    """整条有序管线的状态（可能只跑到第一个脚本失败处）。"""
 
     ran: bool = False
     ok: bool = False
@@ -76,8 +76,14 @@ def load_pipeline(project_root: Path) -> dict | None:
         return None
 
 
-def normalize_steps(data: dict) -> list[dict]:
-    """统一为有序 steps；兼容旧版 scripts + ai_steps。"""
+def normalize_steps(data: dict, *, keep_ai: bool = True) -> list[dict]:
+    """统一为可运行的有序 steps（script 与 ai 均可）。
+
+    兼容旧版 scripts + ai_steps。新策略：pipeline 固化首次成功后的完整执行路径——
+    `type:script` 确定性机械步骤直接执行（不耗 Token）；`type:ai` 是**已经确定的业务任务**
+    （理解/分析/整理/创意/写作等），后续运行照样调用 LLM 执行该固定任务，但禁止重新规划。
+    keep_ai=False 时过滤 ai 步骤（仅用于展示/统计）。
+    """
     raw = data.get("steps")
     if isinstance(raw, list) and raw:
         out: list[dict] = []
@@ -87,6 +93,8 @@ def normalize_steps(data: dict) -> list[dict]:
             t = str(s.get("type") or "").lower().strip()
             if t not in ("script", "ai"):
                 continue
+            if t == "ai" and not keep_ai:
+                continue
             step = dict(s)
             step["type"] = t
             step.setdefault("id", f"{t}_{i+1}")
@@ -94,7 +102,7 @@ def normalize_steps(data: dict) -> list[dict]:
         if out:
             return out
 
-    # 兼容：先全部脚本，再全部 AI
+    # 兼容：先全部脚本，再全部 AI（同样过滤 ai）
     steps: list[dict] = []
     for i, entry in enumerate(data.get("scripts") or []):
         if not isinstance(entry, dict):
@@ -109,6 +117,8 @@ def normalize_steps(data: dict) -> list[dict]:
                 "args": entry.get("args") or {},
             }
         )
+    if not keep_ai:
+        return steps
     for i, entry in enumerate(data.get("ai_steps") or []):
         if isinstance(entry, dict):
             steps.append(
@@ -357,7 +367,11 @@ def run_script_phase(
 
 
 def peek_pipeline(project_root: Path) -> PipelineRunResult:
-    """读取并规范化管线，不执行。"""
+    """读取并规范化管线，不执行。
+
+    steps 可同时含 `script` 与 `ai`：script 直接执行，ai 是已确定的业务任务（仍调 LLM，
+    但不重新规划）。不生成任何 final_ai。
+    """
     root = Path(project_root)
     pipe_path = scripts_dir(root) / "pipeline.json"
     data = load_pipeline(root)
@@ -366,6 +380,7 @@ def peek_pipeline(project_root: Path) -> PipelineRunResult:
         result.reason = "无 pipeline.json，走完整 AI 流程"
         result.need_ai = True
         return result
+
     steps = normalize_steps(data)
     result.steps = steps
     result.phases = group_phases(steps)
@@ -426,7 +441,7 @@ def run_pipeline_until_ai_or_end(
                 result.next_phase_index = i
                 result.ai_steps = []  # 本阶段失败，交给 AI 补救本步
                 result.reason = (
-                    f"执行顺序第 {i+1} 阶段（脚本）失败，暂停；"
+                    f"管线第 {i+1} 阶段（脚本）失败，暂停；"
                     "请 AI 补救后再继续后续步骤"
                 )
                 return result
@@ -446,10 +461,10 @@ def run_pipeline_until_ai_or_end(
         tail = ""
         if remaining:
             tail = "；本阶段完成后主机将继续执行后续脚本/AI 阶段，请勿越权执行后续脚本步骤"
-        result.reason = f"按执行顺序进入第 {i+1} 阶段（AI）{tail}"
+        result.reason = f"按管线进入第 {i+1} 阶段（AI）{tail}"
         return result
 
-    # 全部阶段完成且无 AI
+    # 全部阶段完成（script/ai 均已完成）
     result.items = all_items
     result.ok = True
     result.combined_output = "\n\n".join(context)
@@ -457,7 +472,7 @@ def run_pipeline_until_ai_or_end(
     result.next_phase_index = len(result.phases)
     result.need_ai = False
     result.ai_steps = []
-    result.reason = "有序管线全部为脚本且已成功，跳过模型"
+    result.reason = "有序管线全部阶段执行完毕，结束"
     return result
 
 
@@ -467,35 +482,32 @@ def build_user_message_for_ai_phase(
     pipeline: PipelineRunResult,
     phase_index: int | None = None,
 ) -> str:
-    """构造当前 AI 阶段的用户消息（含先前脚本上下文与本阶段任务）。"""
+    """构造 AI 步骤/异常接管时的用户消息（含先前脚本上下文与本阶段任务）。
+
+    - ai 步骤：pipeline 固化好的**明确业务任务**（description + prompt_hint），
+      后续运行直接执行该固定任务，不重新规划整个 Pipeline；
+    - 脚本/步骤失败：AI 接管处理当前异常并完成剩余目标。
+    """
     idx = phase_index if phase_index is not None else pipeline.next_phase_index
-    parts = [
-        original_message.strip() or "请根据项目目标推进工作。",
-        "",
-        "【有序执行管线 — 当前为 AI 阶段】",
-        f"说明：{pipeline.reason}",
-        "请严格只完成本阶段列出的 AI 任务；不要重复已成功的脚本拉取；"
-        "不要擅自执行后续应由本地脚本完成的步骤。",
-    ]
-    if pipeline.context_parts or pipeline.combined_output:
-        parts.extend(
-            [
-                "",
-                "## 此前阶段已产出的上下文（脚本结果等）",
-                (pipeline.combined_output or "\n\n".join(pipeline.context_parts))[:8000],
-            ]
-        )
-    if not pipeline.ok and pipeline.error_summary:
-        parts.extend(
-            [
-                "",
-                "## 脚本失败（请先补救）",
-                pipeline.error_summary,
-                "补救后把关键结果写入 workspace/script_callback_*.md，主机将按经验顺序继续后续步骤。",
-            ]
-        )
-    elif pipeline.ai_steps:
-        parts.extend(["", f"## 本阶段 AI 任务（阶段 {idx+1}）"])
+    if pipeline.ok and pipeline.ai_steps:
+        # 正常的 ai 步骤（已确定的业务任务，非自由规划）
+        parts = [
+            original_message.strip() or "请根据项目目标推进工作。",
+            "",
+            "【有序执行管线 — AI 步骤】",
+            f"说明：{pipeline.reason}",
+            "请**只执行下面列出的 AI 业务任务**：不要重新规划整个 Pipeline，"
+            "不要重复执行已成功的脚本步骤，不要自行添加目标里没有的任务。",
+        ]
+        if pipeline.context_parts or pipeline.combined_output:
+            parts.extend(
+                [
+                    "",
+                    "## 此前脚本阶段已产出的上下文（callback 等）",
+                    (pipeline.combined_output or "\n\n".join(pipeline.context_parts))[:8000],
+                ]
+            )
+        parts.extend(["", f"## 本阶段 AI 任务（步骤 {idx+1}）"])
         for n, step in enumerate(pipeline.ai_steps, 1):
             if isinstance(step, dict):
                 parts.append(f"{n}. {step.get('description') or step}")
@@ -505,10 +517,37 @@ def build_user_message_for_ai_phase(
             else:
                 parts.append(f"{n}. {step}")
         parts.append(
-            "请先读取 workspace/script_callback_*.md 中的脚本 callback；"
+            "请先读取 workspace/script_callback_*.md 中的脚本 callback（若有）；"
             "完成后把中间结果写入 workspace/（或最终交付写入 deliverables/）；"
             "用户上传文件在 uploads/；同名或相近文件以最新修改时间为准。"
         )
+    else:
+        # 异常接管：脚本/步骤失败
+        parts = [
+            original_message.strip() or "请根据项目目标推进工作。",
+            "",
+            "【有序执行管线 — 异常接管】",
+            f"说明：{pipeline.reason}",
+            "请只处理当前异常并完成剩余目标；不要重新规划已确定的流程，"
+            "不要重复执行已成功的脚本步骤。",
+        ]
+        if pipeline.context_parts or pipeline.combined_output:
+            parts.extend(
+                [
+                    "",
+                    "## 此前阶段已产出的上下文（脚本结果等）",
+                    (pipeline.combined_output or "\n\n".join(pipeline.context_parts))[:8000],
+                ]
+            )
+        if pipeline.error_summary:
+            parts.extend(
+                [
+                    "",
+                    "## 脚本失败（请先补救）",
+                    pipeline.error_summary,
+                    "补救后把关键结果写入 workspace/script_callback_*.md，主机将按经验顺序继续后续步骤。",
+                ]
+            )
 
     # 预告后续阶段，避免 AI 包办
     remaining = []
@@ -529,12 +568,12 @@ def build_user_message_for_ai_phase(
 
 
 def format_order_markdown(steps: list[dict]) -> str:
-    """写入经验文档的「执行顺序」章节。"""
+    """生成 pipeline.json 的 order_markdown 字段（执行顺序说明）。"""
     if not steps:
         return "（暂无有序步骤；下次运行将走完整 AI。）"
     lines = [
-        "下次运行将**严格按下列顺序一路执行**"
-        "（可连续多个脚本或连续多个 AI；不强制 script/AI 交替）：",
+        "下次运行将**严格按下列顺序一路执行**：",
+        "（script 步骤自动执行、不耗 Token；ai 步骤执行已确定的 AI 业务任务）",
         "",
     ]
     for i, s in enumerate(steps, 1):

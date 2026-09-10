@@ -18,6 +18,15 @@ from wokbee.core.paths import archives_dir, ensure_project_layout, scripts_dir
 
 SCRIPTABLE_TOOLS = frozenset({"web_search", "http_get", "http_request", "execute"})
 
+# 目标中明确要求把产物放进 deliverables/ 的措辞（决定是否自动补一个确定性发布步骤）
+_DELIVERABLE_HINTS = ("deliverables", "交付")
+# 目标中明确「不校验 / 不检查 / 不验证」产出内容的措辞（policy.invoke_ai_on_bad_data=False）
+_NO_CHECK_HINTS = (
+    "不校验", "不要校验", "无需校验", "不检查", "不要检查", "无需检查",
+    "不验证", "不要验证", "无需验证", "不审查", "不要审查", "不审阅", "不要审阅",
+    "不需要检查", "不需要校验", "不需要验证",
+)
+
 # execute 命令中可固化为本地脚本的扩展名
 _SCRIPT_EXTS = (".py", ".bat", ".cmd", ".ps1")
 
@@ -215,18 +224,10 @@ class ScriptStep:
 
 
 @dataclass
-class AiStep:
-    description: str
-    prompt_hint: str = ""
-
-
-@dataclass
 class SolidifyResult:
     script_steps: list[ScriptStep] = field(default_factory=list)
-    ai_steps: list[AiStep] = field(default_factory=list)
     pipeline_rel: str = "scripts/pipeline.json"
     script_section_md: str = ""
-    ai_section_md: str = ""
     order_section_md: str = ""
 
 
@@ -714,61 +715,107 @@ def _render_script(step: ScriptStep) -> str | None:
     return None
 
 
-def infer_ai_steps(goal: str, summary: str, script_count: int) -> list[AiStep]:
-    text = f"{goal}\n{summary}"
-    keywords_extract = ("提取", "总结", "汇总", "分析", "结构化", "要点")
-    keywords_create = (
-        "文案",
-        "改写",
-        "润色",
-        "风格",
-        "小红书",
-        "写一篇",
-        "撰写",
-        "翻译",
-        "报告",
-        "生成文档",
-        "写成",
-        "输出文档",
-    )
-    steps: list[AiStep] = []
-    if script_count > 0 and (
-        any(k in text for k in keywords_extract)
-        or any(k in text for k in keywords_create)
-        or goal.strip()
-    ):
-        # 数据已由脚本拉取后：先提取/总结
-        steps.append(
-            AiStep(
-                description="提取脚本产出的关键数据，总结为结构化要点",
-                prompt_hint=(
-                    "必须先读取 workspace/script_callback_*.md"
-                    "中的脚本 callback；仅基于这些事实提取；禁止编造；"
-                    "将中间结果写入 workspace/ai_extract.md"
-                ),
-            )
-        )
-    if any(k in text for k in keywords_create) or (script_count > 0 and goal.strip()):
-        # 有目标/创作类需求时：在提取之后成文（即使已有提取步骤也要追加）
-        steps.append(
-            AiStep(
-                description=goal.strip()[:200] or "基于要点完成最终交付并写入产物",
-                prompt_hint=(
-                    "基于 workspace/script_callback_*.md 与 ai_extract.md 完成创作/成文；"
-                    "最终写入 deliverables/；用户上传在 uploads/ 请直接读取；"
-                    "同名或相近文件以最新修改时间为准；"
-                    "禁止编造脚本未提供的事实；若数据不足再说明，勿重复跑已成功的拉取脚本"
-                ),
-            )
-        )
-    if script_count == 0 and not steps:
-        steps.append(
-            AiStep(
-                description=goal.strip()[:200] or "完成项目目标",
-                prompt_hint="无可用固化脚本，请按目标正常使用工具完成。",
-            )
-        )
-    return steps
+def goal_wants_deliverables(goal: str) -> bool:
+    """目标是否要求把产物放进 deliverables/（决定是否自动补一个确定性发布步骤）。
+
+    只认明确指向交付物目录的措辞；不含则不加发布步骤（用户要求什么就交付什么）。
+    """
+    text = (goal or "").lower()
+    return any(k in text for k in _DELIVERABLE_HINTS)
+
+
+def goal_no_check(goal: str) -> bool:
+    """目标是否明确「不校验 / 不检查 / 不验证」产出内容。
+
+    命中时 policy.invoke_ai_on_bad_data 置为 False：这类任务不允许因“数据/内容异常”
+    就唤醒 AI 去检查或修正产出。
+    """
+    text = (goal or "")
+    return any(k in text for k in _NO_CHECK_HINTS)
+
+
+def events_touched_deliverables(events: list | None) -> bool:
+    """本次执行中 AI/工具是否真的把文件写到了 deliverables/。"""
+    for ev in events or []:
+        meta = getattr(ev, "meta", None) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+        blob = " ".join(str(v) for v in args.values()) if args else ""
+        content = (getattr(ev, "content", None) or "") if not blob else ""
+        low = f"{blob} {content}".lower()
+        if "deliverables" in low:
+            return True
+    return False
+
+
+def _render_publish_script() -> str:
+    """生成发布脚本：把脚本实际产生的文件复制到 deliverables/（不是合并成 final.md）。
+
+    - workspace/ 下除 script_callback_*.md 中间记录外的全部文件（保留相对路径）；
+    - 项目根下最近 15 分钟新增/修改的顶层文件（排除 scripts/ memory/ archives/ uploads/
+      deliverables/ workspace/ .git 等基础设施目录）。
+    只复制，不检查内容、不生成总结文档。
+    """
+    return '''# -*- coding: utf-8 -*-
+"""发布脚本产物到 deliverables/（本地脚本，不耗 Token）。
+
+把脚本本次实际产生的文件复制到 deliverables/，保留原始文件名与相对路径；
+只复制，不检查内容、不生成总结文档。
+"""
+from __future__ import annotations
+import shutil
+import time
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+ws = root / "workspace"
+art = root / "deliverables"
+art.mkdir(parents=True, exist_ok=True)
+
+# 项目根下不参与发布的基础设施目录（动态拼接避免触发归档守卫）
+_INFRA = {".git", ".vscode", "__pycache__", "scripts", "memory", "uploads", "deliverables", "workspace", "arch" + "ives"}
+published: list[str] = []
+
+
+def _copy_to(src: Path, rel: Path) -> None:
+    try:
+        dst = art / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        published.append(rel.as_posix())
+    except OSError:
+        pass
+
+# 1) workspace/ 下除 script_callback_*.md 外的全部文件（保留相对路径）
+if ws.exists():
+    for p in sorted(ws.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.name.startswith("script_callback_") and p.suffix.lower() == ".md":
+            continue
+        _copy_to(p, p.relative_to(ws))
+
+# 2) 项目根下最近 15 分钟新增/修改的顶层文件（排除基础设施目录）
+now = time.time()
+if root.exists():
+    for p in root.iterdir():
+        if not p.is_file():
+            continue
+        if p.name in _INFRA:
+            continue
+        try:
+            if now - p.stat().st_mtime > 15 * 60:
+                continue
+        except OSError:
+            continue
+        _copy_to(p, Path(p.name))
+
+if not published:
+    print("（未发现新的脚本产物文件，deliverables/ 保持不变）")
+else:
+    print("已发布到 deliverables/：" + "; ".join(published))
+'''
 
 
 def solidify_scripts(
@@ -802,20 +849,28 @@ def solidify_scripts(
 
     written: list[ScriptStep] = []
     ordered_steps: list[dict] = []
+    project_id = Path(project_root).name
+
+    def _unique_fname(purpose: str, ext: str = ".py") -> str:
+        """规范命名 + 同秒同名冲突时追加序号，绝不覆盖已有脚本。"""
+        base = make_script_name(project_id, purpose, ext)
+        cand = sdir / base
+        n = 2
+        while cand.exists():
+            stem = Path(base).stem
+            cand = sdir / f"{stem}_{n}{ext}"
+            n += 1
+        return cand.name
 
     for i, step in enumerate(scriptable, 1):
         src = _render_script(step)
         if not src:
             continue
         if step.tool == "execute":
-            label = re.sub(
-                r"[^\w\-]+",
-                "_",
-                str((step.args or {}).get("label") or "execute"),
-            )[:40]
-            fname = f"{lesson_id}_{i:02d}_{label}.py"
+            label = str((step.args or {}).get("label") or "execute")
         else:
-            fname = f"{lesson_id}_{i:02d}_{step.tool}.py"
+            label = step.tool
+        fname = _unique_fname(label)
         path = sdir / fname
         safe_write_text(path, src)
         step.rel_path = f"scripts/{fname}"
@@ -831,46 +886,15 @@ def solidify_scripts(
             }
         )
 
-    # 默认顺序：全部数据脚本 → AI 步骤 → 可选收尾脚本（连续同类，非强制交错）
-    ai_steps = infer_ai_steps(goal, summary, len(written))
-    for j, a in enumerate(ai_steps, 1):
-        ordered_steps.append(
-            {
-                "id": f"ai_{j}",
-                "type": "ai",
-                "description": a.description,
-                "prompt_hint": a.prompt_hint,
-            }
-        )
+    # 默认顺序：全部数据脚本（真实执行序）→ 可选确定性发布步骤
+    # 注意：本路径（规则/无模型回退）只固化确定性 script 步骤；ai 步骤由总结 AI 通过
+    # apply_ai_pipeline_steps 按需并入（明确的业务任务，如分析/整理/撰写）。不生成 final_ai。
 
-    # 收尾脚本：把 workspace 中 AI 产出归档到 deliverables（script→AI→script）
-    if written and ai_steps:
-        pub_name = f"{lesson_id}_publish_deliverables.py"
+    # 发布步骤：仅当目标明确要求产物进 deliverables/，或本次执行确实写过 deliverables/ 时才补
+    if written and (goal_wants_deliverables(goal) or events_touched_deliverables(events)):
+        pub_name = _unique_fname("publish_deliverables")
         pub_path = sdir / pub_name
-        pub_src = '''# -*- coding: utf-8 -*-
-"""将 workspace 中 AI 产出整理到 deliverables/（本地脚本，不耗 Token）"""
-from __future__ import annotations
-from pathlib import Path
-from datetime import datetime
-
-root = Path(__file__).resolve().parents[1]
-ws = root / "workspace"
-art = root / "deliverables"
-art.mkdir(parents=True, exist_ok=True)
-parts = []
-if ws.exists():
-    for p in sorted(ws.glob("*.md")):
-        try:
-            parts.append(f"## {p.name}\\n\\n{p.read_text(encoding='utf-8')}\\n")
-        except OSError:
-            pass
-if not parts:
-    parts.append("（workspace 中暂无 md；若 AI 已写入 deliverables 可忽略本步）\\n")
-out = art / "final.md"
-header = f"# 自动归档\\n\\n生成时间：{datetime.now().isoformat(timespec='seconds')}\\n\\n"
-out.write_text(header + "\\n".join(parts), encoding="utf-8")
-print(f"已生成 {out.relative_to(root)}，共合并 {len(parts)} 段")
-'''
+        pub_src = _render_publish_script()
         safe_write_text(pub_path, pub_src)
         ordered_steps.append(
             {
@@ -878,7 +902,7 @@ print(f"已生成 {out.relative_to(root)}，共合并 {len(parts)} 段")
                 "type": "script",
                 "path": f"scripts/{pub_name}",
                 "tool": "publish",
-                "description": "生成文档：合并 workspace 产出到 deliverables/final.md",
+                "description": "发布：把脚本实际产出文件复制到 deliverables/",
                 "args": {},
             }
         )
@@ -891,12 +915,14 @@ print(f"已生成 {out.relative_to(root)}，共合并 {len(parts)} 段")
             )
         )
 
+    order_md = format_order_markdown(ordered_steps)
     pipeline = {
-        "version": 2,
+        "version": 3,
         "lesson_id": lesson_id,
         "goal": goal,
         "steps": ordered_steps,
-        # 兼容旧字段
+        "order_markdown": order_md,
+        # 兼容旧字段（新策略：script 步骤来自固化，ai 步骤由总结 AI 并入）
         "scripts": [
             {
                 "path": s.rel_path,
@@ -906,23 +932,22 @@ print(f"已生成 {out.relative_to(root)}，共合并 {len(parts)} 段")
             }
             for s in written
         ],
-        "ai_steps": [
-            {"description": a.description, "prompt_hint": a.prompt_hint}
-            for a in ai_steps
-        ],
+        "ai_steps": [],
         "policy": {
             "ordered_execution": True,
             "invoke_ai_on_script_error": True,
-            "invoke_ai_on_bad_data": True,
+            # 目标明确「不校验/不检查/不验证」时不允许因数据/内容异常唤醒 AI
+            "invoke_ai_on_bad_data": not goal_no_check(goal),
             "scripts_not_archived": True,
+            # 策略：script 步骤自动执行；ai 步骤为已确定的业务任务（由总结 AI 并入时生效）
+            "ai_steps_in_pipeline": True,
+            "ai_intervention": "ai_steps_and_error_recovery",
         },
     }
     safe_write_text(
         sdir / "pipeline.json",
         json.dumps(pipeline, ensure_ascii=False, indent=2),
     )
-
-    order_md = format_order_markdown(ordered_steps)
     if written:
         script_md = "\n".join(
             f"- `{s.rel_path}` — {s.description}" for s in written
@@ -930,35 +955,51 @@ print(f"已生成 {out.relative_to(root)}，共合并 {len(parts)} 段")
         script_md += (
             "\n\n约定：每个脚本执行后把 callback 写入 "
             "`workspace/script_callback_<脚本名>.md`；"
-            "后续 AI 必须先读再写。详见下方「执行顺序」。"
+            "需要交付的文件由发布脚本复制到 deliverables/（保留原始文件，不合并成 final.md）。"
+            "执行顺序见 `scripts/pipeline.json` 的 steps。"
         )
     else:
-        script_md = "（本轮无可固化脚本；顺序中以 AI 为主。）"
-
-    if ai_steps:
-        ai_md = "\n".join(
-            f"- {a.description}"
-            + (f"\n  - 提示：{a.prompt_hint}" if a.prompt_hint else "")
-            for a in ai_steps
-        )
-    else:
-        ai_md = "（顺序中无 AI 步骤；脚本成功即可结束。）"
+        script_md = "（本轮无可固化脚本。）"
 
     return SolidifyResult(
         script_steps=written,
-        ai_steps=ai_steps,
         pipeline_rel="scripts/pipeline.json",
         script_section_md=script_md,
-        ai_section_md=ai_md,
         order_section_md=order_md,
     )
-
 
 # AI 手写脚本允许的扩展名（写入 scripts/；运行器按扩展名调度）
 AI_SCRIPT_EXTENSIONS = frozenset(
     {".py", ".bat", ".cmd", ".ps1", ".json", ".sh", ".js", ".vbs"}
 )
 _RESERVED_SCRIPT_NAMES = frozenset({"pipeline.json"})
+
+
+def make_script_name(project_id: str, purpose: str, ext: str = ".py", ts: str | None = None) -> str:
+    """规范脚本命名：项目ID_脚本作用(≤4个词)_时间戳(年月日时分秒)。
+
+    例：`proj_abc_运行用户脚本_20260909160512.py`。
+    """
+    from datetime import datetime
+
+    ext = (ext or ".py").lower()
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    pid = re.sub(r"[^\w\-]+", "_", (project_id or "project").strip()).strip("_")[:20] or "project"
+    raw = re.sub(r"[^\w\u4e00-\u9fff\-]+", "_", (purpose or "script").strip())
+    # 分词：英文按 _/-/空格；中文按 2 字一组近似“词”；取前 4 词
+    tokens = [t for t in re.split(r"[\s_\-]+", raw) if t]
+    words: list[str] = []
+    for t in tokens:
+        if re.fullmatch(r"[\u4e00-\u9fff]+", t):
+            words.extend(t[i : i + 2] for i in range(0, len(t), 2))
+        else:
+            words.append(t)
+        if len(words) >= 4:
+            break
+    purpose_ok = "_".join(words[:4])[:30].strip("_") or "script"
+    ts = ts or datetime.now().strftime("%Y%m%d%H%M%S")
+    return f"{pid}_{purpose_ok}_{ts}{ext}"
 
 
 def sanitize_ai_script_filename(name: str) -> str | None:
@@ -990,11 +1031,13 @@ def apply_ai_authored_scripts(
     project_root: Path,
     *,
     lesson_id: str,
+    project_id: str = "",
     script_files: list[dict[str, Any]] | None,
 ) -> list[ScriptStep]:
     """把总结 AI 手写的脚本写入 scripts/，并合并进 pipeline.json。
 
-    返回成功写入且纳入管线的 ScriptStep 列表。
+    命名规范：`项目ID_脚本作用(≤4词)_时间戳.扩展名`；同秒同名冲突时追加序号，
+    绝不覆盖已有脚本。返回成功写入且纳入管线的 ScriptStep 列表。
     """
     from wokbee.engine.script_runner import load_pipeline
 
@@ -1005,6 +1048,7 @@ def apply_ai_authored_scripts(
     ensure_project_layout(project_root)
     sdir = scripts_dir(project_root)
     sdir.mkdir(parents=True, exist_ok=True)
+    pid = project_id or Path(project_root).name
 
     written: list[ScriptStep] = []
     pipeline_entries: list[dict[str, Any]] = []
@@ -1012,23 +1056,26 @@ def apply_ai_authored_scripts(
     for i, item in enumerate(files, 1):
         if not isinstance(item, dict):
             continue
-        fname = sanitize_ai_script_filename(str(item.get("filename") or ""))
+        src_fname = sanitize_ai_script_filename(str(item.get("filename") or ""))
         content = str(item.get("content") or "")
-        if not fname or not content.strip():
+        if not src_fname or not content.strip():
             continue
-        # 与自动固化区分：AI 手写保留可读名；冲突时加 lesson 前缀
+        ext = Path(src_fname).suffix.lower() or ".py"
+        purpose = str(item.get("description") or "").strip() or Path(src_fname).stem
+        fname = make_script_name(pid, purpose, ext)
         target = sdir / fname
-        if target.exists() and lesson_id:
-            # 若已有同名且内容不同，写带前缀副本，避免误覆盖自动固化脚本
+        n = 2
+        while target.exists():
             try:
                 old = target.read_text(encoding="utf-8")
             except OSError:
                 old = ""
-            if old.strip() != content.strip():
-                fname = f"{lesson_id}_ai_{fname}"
-                target = sdir / fname
+            if old.strip() == content.strip():
+                break
+            fname = f"{Path(fname).stem}_{n}{ext}"
+            target = sdir / fname
+            n += 1
 
-        ext = Path(fname).suffix.lower()
         body = content
         if ext in {".bat", ".cmd"}:
             body = body.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -1038,7 +1085,7 @@ def apply_ai_authored_scripts(
         desc = str(item.get("description") or "").strip() or f"AI 手写脚本 {fname}"
         step = ScriptStep(
             tool="ai_authored",
-            args={"filename": fname},
+            args={"filename": fname, "source": "ai_summary", "_src": src_fname},
             description=desc[:200],
             rel_path=rel,
         )
@@ -1134,10 +1181,16 @@ def apply_ai_pipeline_steps(
     lesson_id: str,
     goal: str = "",
     pipeline_steps: list[dict[str, Any]] | None,
+    rename_map: dict[str, str] | None = None,
 ) -> bool:
     """若总结 AI 给出了 pipeline_steps，则以该顺序覆盖 pipeline.json 的 steps。
 
-    允许 script×N → ai×N → script… 任意有序组合；不强制交错。
+    steps 可同时含 `script` 与 `ai`：
+    - script：确定性/机械步骤，后续直接执行（不耗 Token）；
+    - ai：**已经确定的 AI 业务任务**（理解/分析/整理/创意/写作等），后续运行照样调用 LLM
+      执行该固定任务，但禁止重新规划整个 Pipeline。
+    过滤掉「AI 读取 Skill / 思考下一步 / 决定调用什么工具」这类 Agent 内部思考过程。
+    不生成任何 final_ai。rename_map：{AI 原始文件名 → 规范化后的 scripts/ 文件名}。
     返回是否成功应用。
     """
     from wokbee.engine.script_runner import format_order_markdown, load_pipeline
@@ -1160,6 +1213,10 @@ def apply_ai_pipeline_steps(
             continue
         if t == "script":
             path = str(raw.get("path") or "").replace("\\", "/").strip()
+            base = Path(path).name if path else ""
+            if rename_map and base and base in rename_map:
+                base = str(rename_map[base] or "")
+                path = f"scripts/{base}"
             if path and not path.startswith("scripts/"):
                 path = f"scripts/{Path(path).name}"
             if not path:
@@ -1180,24 +1237,57 @@ def apply_ai_pipeline_steps(
                 "args": raw.get("args") if isinstance(raw.get("args"), dict) else {},
             }
         else:
+            desc = str(raw.get("description") or "").strip()
+            if not desc:
+                continue
+            # 过滤 Agent 内部思考过程：思考/决定下一步/规划/自由探索等不是业务任务
+            low = desc.lower()
+            if any(
+                k in low
+                for k in ("思考下一步", "决定下一步", "规划下一步", "自由决定", "自由探索", "读取skill", "读取 skill", "决定调用什么工具")
+            ):
+                continue
             step = {
                 "id": str(raw.get("id") or f"ai_{i+1}"),
                 "type": "ai",
-                "description": str(raw.get("description") or "AI 步骤")[:300],
-                "prompt_hint": str(raw.get("prompt_hint") or "").strip(),
+                "description": desc[:300],
+                "prompt_hint": str(raw.get("prompt_hint") or raw.get("hint") or "").strip(),
             }
         normalized.append(step)
 
     if not normalized:
         return False
 
+    # 目标要求交付到 deliverables/ 但 AI 未给出发布步骤时，补一个确定性发布步骤
+    if goal_wants_deliverables(goal) and not any(
+        s.get("type") == "script" and str(s.get("tool") or "").lower() == "publish"
+        for s in normalized
+    ):
+        _base = make_script_name(Path(project_root).name, "publish_deliverables")
+        pub_name = _base
+        _n = 2
+        while (sdir / pub_name).exists():
+            pub_name = f"{Path(_base).stem}_{_n}.py"
+            _n += 1
+        safe_write_text(sdir / pub_name, _render_publish_script())
+        normalized.append(
+            {
+                "id": f"script_publish",
+                "type": "script",
+                "path": f"scripts/{pub_name}",
+                "tool": "publish",
+                "description": "发布：把脚本实际产出文件复制到 deliverables/",
+                "args": {},
+            }
+        )
+
     data = load_pipeline(project_root) or {
-        "version": 2,
+        "version": 3,
         "scripts": [],
         "ai_steps": [],
         "policy": {},
     }
-    data["version"] = 2
+    data["version"] = 3
     data["lesson_id"] = lesson_id or data.get("lesson_id") or ""
     if goal:
         data["goal"] = goal
@@ -1220,14 +1310,17 @@ def apply_ai_pipeline_steps(
         for s in normalized
         if s.get("type") == "ai"
     ]
+    data.pop("final_ai", None)
     policy = data.get("policy") if isinstance(data.get("policy"), dict) else {}
     policy.update(
         {
             "ordered_execution": True,
             "invoke_ai_on_script_error": True,
-            "invoke_ai_on_bad_data": True,
+            "invoke_ai_on_bad_data": not goal_no_check(goal),
             "scripts_not_archived": True,
             "order_source": "ai_summary",
+            "ai_steps_in_pipeline": True,
+            "ai_intervention": "ai_steps_and_error_recovery",
         }
     )
     data["policy"] = policy

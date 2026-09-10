@@ -42,7 +42,7 @@ def _suppress_child_consoles() -> None:
 
     no_window = int(getattr(_sp, "CREATE_NO_WINDOW", 0) or 0)
     if not no_window:
-        return
+        return 
     _orig = _sp.Popen.__init__
 
     def _patched(self, *args, **kwargs):

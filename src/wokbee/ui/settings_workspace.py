@@ -196,8 +196,10 @@ class WokBeeSettingsWorkspace(QWidget):
         limits.addStretch()
         bl.addLayout(limits)
         phase_hint = QLabel(
-            "管线阶段按总结写入的执行顺序一路推进（可为 脚本×N → AI×N → 脚本…），"
-            "不是强制「脚本、AI」一一交错。"
+            "管线按 scripts/pipeline.json 的 steps 顺序一路执行："
+            "script 步骤自动跑（不耗 Token）；ai 步骤执行已确定的 AI 业务任务（按需调 LLM，"
+            "不重新规划整个 Pipeline）；仅当脚本报错/数据异常/输出不符预期时才异常接管；"
+            "运行结束后由 AI 判断是否需要更新 Pipeline。"
         )
         phase_hint.setWordWrap(True)
         phase_hint.setStyleSheet(hint_label_qss(c))

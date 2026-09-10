@@ -1,7 +1,7 @@
 """经验总结：每次总结生成带时间戳的新文档；运行时只加载最新一份。
 
-经验只记录：实现步骤 / 脚本执行顺序 / 运行环境 / 注意事项。
-不记录结果、产物或交付内容。
+经验只记录：摘要 / 成功实现路径 / 注意事项。
+不记录结果、产物或交付内容；运行环境由系统每次自动注入。
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def render_lesson_md(lesson: Lesson) -> str:
             "",
             f"> 流程记录 · {lesson.outcome} · {lesson.created_at}",
             "",
-            "> 本文件只记录**怎么做**（步骤/顺序/环境/注意），不记录运行结果或交付产物。",
+            "> 本文件只记录**怎么做**（步骤/注意），不记录运行结果或交付产物；运行环境由系统每次自动注入。",
             "",
             "## 摘要（方法，非结果）",
             "",
@@ -106,46 +106,22 @@ def render_lesson_md(lesson: Lesson) -> str:
             "",
             "## 成功实现路径",
             "",
-            "> 本节只记录**成功**的有序步骤；每步注明「做什么操作 × 达成什么目的」。"
-            "失败/试错/被弃用的尝试不写入。",
+            "> 只保留**成功且必要**的有序步骤，后续运行将**严格照此执行**；"
+            "每步按固定格式：`序号. 执行角色:\"{执行内容}\";[步骤说明]`——"
+            "执行角色为 AI / 工具调用 / 脚本执行 / 系统执行；`{}` 内写明详细命令/脚本地址/提示词，"
+            "`[]` 内为解释性说明；一律用虚拟路径，禁止 Windows 绝对路径。失败/试错/被弃用的尝试不写入。",
             "",
             (
                 lesson.success_path.strip()
                 or "（未记录具体步骤；请在下次运行中补充工具调用与关键决策。）"
             ),
             "",
-            "## 执行顺序（脚本 ↔ AI，必须按序）",
-            "",
-            (
-                lesson.order_section.strip()
-                or "（暂无；总结经验后会写入有序步骤。）"
-            ),
-            "",
-            "## 可本地脚本步骤（清单）",
-            "",
-            lesson.script_section.strip() or "（无；详见执行顺序。）",
-            "",
-            "## 需 AI 完成的步骤（清单）",
-            "",
-            lesson.ai_section.strip() or "（无；详见执行顺序。）",
-            "",
-            "## 运行环境",
-            "",
-            lesson.environment.strip() or "（未记录）",
-            "",
             "## 注意事项",
             "",
+            "> 采用**无序列表**；每条 = **加粗的问题** + 解决办法（含具体规避做法/正确写法），"
+            "后续运行遇到同类问题时照此处理。",
+            "",
             lesson.notes.strip() or "（无特殊注意点）",
-            "",
-            "## 复用建议",
-            "",
-            "- 再次运行：只加载**最新一份**经验；按「执行顺序」与 `scripts/pipeline.json` 的 steps **有序**执行。",
-            "- 顺序在总结时确定，例如：脚本1→脚本2→脚本3→AI1→AI2→脚本4…（不强制 script/AI 一一交错）。",
-            "- 可复用脚本落在 `scripts/`；运行输出（callback）落在 `workspace/script_callback_*.md`。",
-            "- 后续 AI 必须先读 workspace callback 再写 deliverables；禁止编造。",
-            "- 禁止把 archives/ 归档数据当作本轮数据来源。",
-            "- `scripts/` 与 `references/` 均不参与归档；经验可多份并存，以最新为准。",
-            "- 复跑前先读 `references/MANIFEST.md` 确认第三方代码/登录/环境参数齐全；敏感信息仅供本机使用。",
             "",
         ]
     )
@@ -200,19 +176,49 @@ def collect_scripts_context(project_root: Path, *, max_chars: int = 12000) -> st
     return text
 
 
+def slice_latest_round(events: list | None) -> list:
+    """只保留最新一轮日志：最后一个「会话结束」标记与其前一个标记之间的事件。
+
+    结束标记（info 事件 + meta.session_end）在每轮运行/对话结束时写入，
+    因此最新一轮 = 最后两个标记之间（仅一个标记时取其之前）。
+    供总结经验/对话记忆时过滤旧轮日志，避免把历史轮次塞给 AI 占用 token。
+    无标记时返回原列表（首轮或旧格式数据）。
+    """
+    if not events:
+        return list(events or [])
+
+    def _is_marker(ev) -> bool:
+        meta = getattr(ev, "meta", None) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        return getattr(ev, "kind", "") == "info" and meta.get("session_end")
+
+    markers = [i for i, ev in enumerate(events) if _is_marker(ev)]
+    if not markers:
+        return list(events)
+    if len(markers) >= 2:
+        start = markers[-2] + 1
+        end = markers[-1]
+    else:
+        start = 0
+        end = markers[-1]
+    return list(events[start:end])
+
+
 def collect_events_log(events: list | None, *, max_chars: int = 20000) -> str:
-    """把时间线事件压成日志文本（原文拼接，供 refine 等轻量场景）。"""
+    """把时间线事件压成日志文本（原文拼接，供 refine 等轻量场景）。
+
+    消息 ID / 时间戳一律改为序数编号（1. 2. 3. …），便于 AI 引用。
+    """
     lines: list[str] = []
     for ev in events or []:
         kind = getattr(ev, "kind", "") or ""
         content = (getattr(ev, "content", None) or "").strip()
-        ts = getattr(ev, "ts", None) or getattr(ev, "created_at", "") or ""
         if not content:
             continue
         if kind in ("tool", "agent", "error", "user", "info", "approval", "lesson"):
             chunk = content if len(content) <= 1200 else content[:1200] + "…"
-            prefix = f"[{ts}] " if ts else ""
-            lines.append(f"{prefix}{kind}: {chunk}")
+            lines.append(f"{len(lines) + 1}. {kind}: {chunk}")
     text = "\n".join(lines) if lines else "（无运行日志）"
     if len(text) > max_chars:
         text = "…(日志前部截断)\n" + text[-max_chars:]
@@ -381,7 +387,7 @@ def _collect_success_hints(
         if name in ("write_file", "edit_file") and path:
             if any(
                 path.replace("\\", "/").startswith(p)
-                for p in ("scripts/", "deliverables/", "workspace/", "references/")
+                for p in ("scripts/", "deliverables/", "workspace/", "uploads/", "references/")
             ):
                 hints.append(f"写入 {path}")
         if name == "execute" and cmd:
@@ -400,7 +406,7 @@ def _collect_success_hints(
 
     # callback：从正文抠路径/URL（补充 meta 缺失时）
     for p in _PATH_RE.findall(body or ""):
-        if p.lower().startswith(("scripts/", "deliverables/", "references/")):
+        if p.lower().startswith(("scripts/", "deliverables/", "uploads/", "references/")):
             hints.append(f"产物/脚本 {p}")
     if name in ("http_get", "http_request", "web_search", "deepseek_web_search"):
         for u in _URL_RE.findall(str(args.get("url") or ""))[:1]:
@@ -421,7 +427,7 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
 
     - 工具 call/result 压成短行；agent 截短；error 尽量保留
     - 连续相同 tool+参数+结果去重为 ×N
-    - 时间序「压缩轨迹」在前；无序「关键线索」在后，避免干扰 success_path 顺序
+    - 时间序「压缩轨迹」在前（消息以序数 1. 2. 3. … 编号）；无序「关键线索」在后，避免干扰 success_path 顺序
     """
     hint_ordered: list[str] = []
     hint_seen: set[str] = set()
@@ -467,7 +473,6 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
     for ev in events or []:
         kind = (getattr(ev, "kind", "") or "").strip()
         content = (getattr(ev, "content", None) or "").strip()
-        ts = getattr(ev, "ts", None) or getattr(ev, "created_at", "") or ""
         meta = getattr(ev, "meta", None) or {}
         if not isinstance(meta, dict):
             meta = {}
@@ -475,8 +480,6 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
             continue
         if kind not in ("tool", "agent", "error", "user", "info", "approval", "lesson"):
             continue
-
-        prefix = f"[{ts}] " if ts else ""
 
         if kind == "tool":
             phase = str(meta.get("phase") or "").lower()
@@ -500,7 +503,7 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
                 if not args_s:
                     _, parsed_args = _parse_tool_call_content(content)
                     args_s = _args_digest(parsed_args)
-                line = f"{prefix}call {tool}" + (f" | {args_s}" if args_s else "")
+                line = f"call {tool}" + (f" | {args_s}" if args_s else "")
                 fp = _fingerprint_line("tool", tool, "call", args_s, "")
                 _append_traj(line, fp)
                 _add_hint(
@@ -516,7 +519,7 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
                 else:
                     _, body = _parse_tool_callback_content(content)
                 dig = _result_digest(body, status=status)
-                line = f"{prefix}result {tool} | {dig}"
+                line = f"result {tool} | {dig}"
                 fp = _fingerprint_line("tool", tool, "callback", "", dig)
                 _append_traj(line, fp)
                 if "【循环检测】" in body or "循环检测" in body:
@@ -535,13 +538,13 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
             if not chunk:
                 continue
             tag = f"agent/{phase}" if phase else "agent"
-            line = f"{prefix}{tag}: {chunk}"
+            line = f"{tag}: {chunk}"
             _append_traj(line, _fingerprint_line("agent", phase, "", chunk, ""))
             continue
 
         if kind == "error":
             chunk = _clip(content, _ERROR_DIGEST_CHARS)
-            line = f"{prefix}error: {chunk}"
+            line = f"error: {chunk}"
             _append_traj(line, _fingerprint_line("error", "", "", chunk, ""))
             if "循环" in content:
                 _add_caution(_clip(_collapse_ws(content), 120))
@@ -556,7 +559,7 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
             x in chunk for x in ("准备经验总结", "正在调用 AI 总结", "cache ")
         ):
             continue
-        line = f"{prefix}{kind}: {chunk}"
+        line = f"{kind}: {chunk}"
         _append_traj(line, _fingerprint_line(kind, "", "", chunk, ""))
 
     _flush_repeat()
@@ -564,7 +567,9 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
     if not traj and not hint_ordered and not caution_ordered:
         return "（无运行日志）"
 
-    traj_body = "\n".join(traj) if traj else "（无工具/过程事件）"
+    traj_body = "\n".join(
+        f"{i + 1}. {line}" for i, line in enumerate(traj)
+    ) if traj else "（无工具/过程事件）"
     hint_sec = ""
     if hint_ordered:
         bullets = "\n".join(f"- {h}" for h in hint_ordered[:80])
@@ -635,53 +640,92 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
 _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上一份经验 + 本次运行日志 + 现有脚本」总结可复用的流程经验。
 「本次运行日志」可能是结构化压缩轨迹：以时间序「压缩轨迹」为主；文末「关键线索」无序且勿当执行顺序。勿假设含网页全文。
 
+⚠️ 首要提醒（最重要）：你总结的**经验文档 / pipeline.json 步骤 / 脚本**，在后续项目运行时会被**严格照章执行**——
+错误、含糊、不严谨的路径（脚本地址、命令、数据源）将直接导致后续运行失败，代价远高于本次修正。因此必须：
+- 只总结**真实验证过、有效、可复用**的内容，且**尽量简短**；剔除一切失败、试错、被弃用或重复的尝试。
+- 每条路径、脚本名、命令都必须来自本次运行日志，**禁止编造**；脚本路径须与 scripts/ 下真实文件一致。
+- 一律使用虚拟路径（scripts/、workspace/、deliverables/、uploads/、memory/…），**禁止 Windows 绝对路径**（如 C:\\Users\\…）。
+
 硬性要求：
-1. 只写「怎么做」：实现步骤、脚本↔AI 执行顺序、运行环境要点、注意事项。
-2. 禁止写入：最终结果数值、交付产物内容、报告正文、截图描述、成功产出的具体文案。
+1. 经验只含四部分：**摘要**（概要介绍经验的主要作用）/ **成功实现路径**（有序步骤，执行顺序直接体现其中）/ **注意事项**（问题与处理）/ pipeline.json（脚本与命令地址）。
+2. 禁止写入：最终结果数值、交付产物内容、报告正文、截图描述、成功产出的具体文案；不记录运行环境（系统每次自动注入）。
 3. 不要引用或依赖 archives/ 归档数据。
-4. **success_path（成功实现路径）只保留真正成功且有序的步骤**：
+4. **success_path（成功实现路径）只保留真正成功且必要的有序步骤，步骤尽量精简**：
    - 以时间序「压缩轨迹」为基准；文末无序线索仅作检索辅助。
-   - 但若后续步骤依赖前置结果（需要前置数据/确认才能选对输入），应按**逻辑依赖**顺序排，勿把历史里「先取数、后补前置确认」的脏顺序原样固化。例如「先用 Get-Date 确认当前日期，再选取对应日期的数据」「先读配置，再跑脚本」。
-   - 剔除所有失败调用、试错、被弃用/重复的尝试、未采用的方案。
-   - 每步编号并写明「**做什么操作 × 达成什么目的**」，例如：
-     「用 web_search 查深圳今日天气，以获取实时数据源」「用 execute 跑 .py 清洗数据，以得到干净表格」。
-   - order_section / script_section / ai_section 同样按「操作 + 目的」描述，强调有序而非强制交错。
+   - 执行顺序直接体现在编号中（脚本步骤 ↔ AI 环节按真实顺序排），不再单列「执行顺序/可本地脚本步骤/需 AI 完成的步骤」章节。
+   - 若后续步骤依赖前置结果（需要前置数据/确认才能选对输入），应按**逻辑依赖**顺序排，勿把历史里「先取数、后补前置确认」的脏顺序原样固化。例如「先用 Get-Date 确认当前日期，再选取对应日期的数据」「先读配置，再跑脚本」。
+   - 剔除所有失败调用、试错、被弃用/重复的尝试、未采用的方案，合并同类步骤。
+   - 每步必须按**固定格式**书写：
+     `序号. 执行角色:"{执行内容}";[步骤说明]`
+     - **序号**：从 1 开始递增。
+     - **执行角色**：AI / 工具调用 / 脚本执行 / 系统执行 等——AI 判断加工标 `AI`，文件/联网等工具标 `工具调用`，本地脚本步骤标 `脚本执行`（自动执行，AI 不介入），系统自动过程标 `系统执行`。
+     - **执行内容**：用 `{}` 包起来，写明**详细且明确**的执行命令 / 提示词 / 脚本名称与路径（脚本步骤必须给出 `scripts/` 下真实脚本地址或完整命令）。
+     - **步骤说明**：用 `[]` 包起来，是对执行内容的解释性描述（做什么 × 达成什么目的）。
+     - 示例：
+       `1. 工具调用:"{cmd: 读取 workspace/script_callback_*.md}";[查看上一步脚本回调，确认产物完整]`
+       `2. 脚本执行:"{cmd: execute scripts/query_weather.bat}";[运行天气查询脚本（自动执行），原始数据落 workspace/]`
+       `3. AI:"{提示词: 依据 callback 数据提炼要点并成文，写入 deliverables/}";[AI 环节：成文交付]`
 5. 自动化脚本与管线约定（重要）：
    - 可复用本地命令落到项目 `scripts/`；运行输出落到 `workspace/script_callback_*.md`。
-   - 你可在 script_files 中手写完整脚本（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
-   - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾一路执行。
-     允许连续多个 script，也允许连续多个 ai，例如：
-     script → script → script → ai → ai → script
-     不要理解为必须「脚本、AI」交替。
-   - pipeline_steps 里 script 的 path 须指向 scripts/ 下真实文件（与 script_files.filename 或已有脚本一致）。
-   - 禁止用 script_files 覆盖 pipeline.json（由系统根据 pipeline_steps 维护）。
-6. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
+   - **只在本次运行日志中确实出现过、且尚未固化的可复用命令才写 script_files**（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
+     禁止凭空发明「预检/校验/回读」等日志里没有的脚本；禁止把同一脚本重复写进多个步骤。
+   - **pipeline_steps 必须基于本次运行日志中实际执行过的步骤，保持简洁**；每一步判定类型：
+     - `script`：能够确定性、机械、重复执行的工作（API 请求、文件处理、数据转换、发布复制等）→
+       固化为 scripts/ 脚本，后续直接执行、不耗 Token；
+     - `ai`：必须依赖 AI 的理解/分析/整理/创意/写作/判断的工作（如“根据收集的材料撰写报告”）→
+       固化为**明确的业务任务**（description + prompt_hint），后续运行仍调用 LLM 执行该固定任务，
+       但**禁止重新规划整个 Pipeline**；
+     **禁止保存 Agent 内部思考过程**（读取 Skill、思考下一步、决定调用什么工具、自由探索等）——
+     那不是业务任务；ai 步骤必须是一句明确的业务任务，例如“根据前面收集的数据生成报告”。
+     **禁止凭空新增日志中没有的步骤/脚本**；**禁止根据 AI 自己的理解增加目标里没有的任务**
+     （如目标只要求「运行脚本并把产物放到 deliverables」，就不要再加检查/总结/校验步骤）。
+     简单任务（如：执行用户脚本 → 发布产物到 deliverables）通常只需 2~3 步；
+     复杂任务按实际执行可以有更多步骤。
+   - **交付约定**：若目标要求把产物放到 deliverables/，pipeline_steps 必须包含一个
+     「发布」脚本步骤——把脚本**实际产出文件**复制/移动到 deliverables/（保留原始文件与
+     文件名，**不要合并成 final.md 代替原始产物**）；脚本步骤 path 指向 scripts/ 下真实文件。
+   - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾一路执行——script 步骤自动跑
+     （不耗 Token）；ai 步骤调用 LLM 执行已确定的业务任务（按需消耗 Token）。
+     **不生成 final_ai**，也不在管线结尾强制再唤一次 AI；如果“总结/写报告/生成内容”本身就是
+     用户 Goal 的一部分，它应作为正常的 `ai` 步骤固化在管线中。
+6. **注意事项（notes）写作规范**：
+   - 采用**无序列表**（每项以 `-` 开头），不要按「问题1/处理1」编号排序。
+   - 每条 = **问题加粗** + 解决办法（含具体规避做法或正确写法），同一条目内给出。
+   - 格式：`- **问题简述**：解决办法（具体做法）。`
+   - 示例：
+     - **查询文件不存在**：以虚拟路径访问与校验（workspace/、scripts/…），勿使用 Windows 绝对路径。
+     - **脚本 callback 缺失**：脚本执行后把输出写入 workspace/script_callback_*.md，AI 环节先读再写，禁止编造。
+7. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
 {
-  "summary": "方法/流程摘要（一两段，非结果）",
-  "success_path": "仅成功步骤的有序清单（编号列表，每步=操作+目的）",
-  "order_section": "执行顺序说明（与 pipeline_steps 一致，强调有序而非强制交错）",
-  "script_section": "脚本步骤清单（每步=操作+目的）",
-  "ai_section": "AI 步骤清单（须注明先读 workspace/script_callback_*.md）",
-  "environment": "运行环境要点",
-  "notes": "注意事项",
+  "summary": "摘要：概要介绍经验的主要作用（一两段，非结果）",
+  "success_path": "仅成功且必要的有序步骤（按固定格式：序号. 执行角色:\"{执行内容}\";[步骤说明]，每步=操作+目的，执行顺序直接体现在编号中）",
+  "notes": "注意事项：无序列表（- 开头），每条 = **加粗问题** + 解决办法（具体做法）",
   "used_skills": ["skill-folder-name"],
   "reference_materials": [
-    {"path": "references/config.json", "note": "服务端环境参数，复跑需用"}
+    {"path": "uploads/references/config.json", "note": "服务端环境参数，复跑需用"}
   ],
   "script_files": [
     {"filename": "query_weather.bat", "content": "@echo off\\n...", "description": "...", "in_pipeline": true}
   ],
   "pipeline_steps": [
-    {"type": "script", "path": "scripts/query_weather.bat", "description": "拉取天气"},
-    {"type": "script", "path": "scripts/other.py", "description": "清洗数据"},
-    {"type": "ai", "description": "提取要点", "prompt_hint": "先读 workspace/script_callback_*.md"},
-    {"type": "ai", "description": "写出行建议到 deliverables/"},
-    {"type": "script", "path": "scripts/publish.py", "description": "合并交付"}
+    {"type": "script", "path": "scripts/collect_data.py", "description": "API 请求并保存原始数据到 workspace/（自动执行）"},
+    {"type": "ai", "description": "根据 workspace/ 中的收集材料整理分析并撰写报告", "prompt_hint": "先读 workspace/script_callback_*.md，再写报告到 deliverables/"},
+    {"type": "script", "path": "scripts/publish_deliverables.py", "description": "发布：把脚本实际产出文件复制到 deliverables/（保留原始文件）"}
   ]
 }
 说明：
-- **used_skills**：本次真实调用过的全局 Skill 目录名（如 "web-search"、"pdf-tools"），供快照到 references/skills/。
-- **reference_materials**：本次用到的可复用外部材料（第三方代码/登录与密钥配置/环境参数等），需保存进 references/ 并登记；敏感信息仅供本机使用。没有则为空数组。
+- **script 步骤**：确定性/机械工作，后续自动执行（不耗 Token）；
+  **ai 步骤**：明确的业务任务（理解/分析/整理/创意/写作/判断），后续运行照样调 LLM 执行该固定任务，
+  但**禁止重新规划整个 Pipeline**。不要把「读取 Skill / 思考下一步 / 决定调用什么工具」保存为
+  ai 步骤；如果“总结/写报告/生成内容”本身就是用户 Goal 的一部分，它应作为正常的 `ai` 步骤固化，
+  而不是结尾的 final_ai。不生成 final_ai，也不在管线结尾强制再唤一次 AI。
+- **严格对齐目标与实际执行**：不要根据 AI 自己的理解增加目标里没有的任务（如检查、总结、校验）；
+  目标要求什么就交付什么。若目标要求交付文件到 deliverables/，必须含一个把**实际产出文件**
+  复制到 deliverables/ 的发布步骤（不得用 final.md 合并代替原始文件）。
+- **script_files**：脚本最终会按规范重命名为 `项目ID_脚本作用(≤4词)_时间戳.扩展名`（filename 仅作作用提示）；
+  内容必须完整可独立运行，description 写清作用。**绝不覆盖/删除 scripts/ 下已有脚本**。
+- **used_skills**：本次真实调用过的全局 Skill 目录名（如 "web-search"、"pdf-tools"），供快照到 uploads/references/skills/。
+- **reference_materials**：本次用到的可复用外部材料（第三方代码/登录与密钥配置/环境参数等），需保存进 uploads/references/ 并登记；敏感信息仅供本机使用。没有则为空数组。
 - 有可复用命令时尽量同时给出 script_files 与 pipeline_steps；没有则可为空数组。
 """
 
@@ -754,7 +798,7 @@ def summarize_lesson_with_ai(
     - script_files: list[dict]（AI 手写脚本，可为空）
     - pipeline_steps: list[dict]（有序管线步骤）
     - used_skills: list[str]（本次用到的 Skill 目录名）
-    - reference_materials: list[dict]（需保存进 references/ 的材料）
+    - reference_materials: list[dict]（需保存进 uploads/references/ 的材料）
     生成过程在内部收齐，结束后一次性返回，避免向时间线刷进度气泡。
     """
     user = (
@@ -764,12 +808,31 @@ def summarize_lesson_with_ai(
         f"## 本次运行日志\n{run_log}\n\n"
         f"## 现有脚本与 pipeline\n{scripts_context}\n\n"
         f"## 环境提示\n{environment_hint or '（无）'}\n\n"
-        "请输出符合要求的 JSON。success_path 只保留**成功**的有序步骤（每步=操作+目的），"
-        "剔除失败/试错/被弃用尝试。若日志里出现可复用的本地脚本/命令（如 execute 跑 .py/.bat、"
-        "Skill 脚本），请在 script_files 写出完整源码，并在 pipeline_steps 给出下次运行的"
-        "有序步骤（可连续多个脚本再 AI，勿强制交错）。"
-        "若用到了第三方代码/登录/环境参数，请填到 used_skills 与 reference_materials，"
-        "供保存到 references/ 供下次稳定复跑。"
+        "请输出符合要求的 JSON。你总结的经验/管线/脚本在后续运行时会被**严格照章执行**，"
+        "错误或不严谨的路径会直接破坏后续工作：务必只写真实验证过、可复用且**尽量短**的步骤；"
+        "路径一律用虚拟路径（scripts/、workspace/、deliverables/、uploads/、memory/…），禁止 Windows 绝对路径。"
+        "success_path 只保留**成功且必要**的有序步骤，每步按固定格式："
+        "`序号. 执行角色:\"{执行内容}\";[步骤说明]`（执行角色=AI/工具调用/脚本执行/系统执行；"
+        "`{}` 内写详细命令/脚本地址/提示词，`[]` 内写解释性说明），执行顺序直接体现在编号中，"
+        "剔除失败/试错/被弃用尝试并合并同类步骤。notes 用无序列表，每条=**加粗问题**+解决办法。"
+        "若日志里出现可复用"
+        "的本地脚本/命令（如 execute 跑 .py/.bat、Skill 脚本），请在 script_files 写出完整源码，"
+        "并在 pipeline_steps 明确给出每次执行的脚本地址/命令。"
+        "pipeline_steps 以日志中真实跑过的步骤为准，禁止凭空新增；每步判定类型："
+        "`script`=确定性/机械工作（API 请求、文件处理、数据转换、发布复制等，后续自动执行不耗 Token）；"
+        "`ai`=必须依赖 AI 的理解/分析/整理/创意/写作/判断的业务任务（如“根据收集的材料撰写报告”，"
+        "后续运行照样调 LLM 执行该固定任务，但**禁止重新规划整个 Pipeline**）。"
+        "**禁止把 Agent 内部思考过程保存为 ai 步骤**（读取 Skill、思考下一步、决定调用什么工具、"
+        "自由探索等）；ai 步骤必须是一句明确的业务任务。"
+        "**严格对齐项目目标与实际执行**：不要根据 AI 自己的理解增加目标里没有的任务"
+        "（如目标只要求运行脚本并把产物放到 deliverables，就不要再加检查/总结/校验步骤）。"
+        "不生成 final_ai，也不在管线结尾强制再唤一次 AI；如果“总结/写报告/生成内容”本身就是"
+        "用户 Goal 的一部分，它应作为正常的 ai 步骤固化在管线中。"
+        "若目标要求交付文件到 deliverables/，pipeline_steps 必须包含一个发布步骤："
+        "把脚本**实际产出文件**复制/移动到 deliverables/（保留原始文件，不要合并成 final.md 代替产物）。"
+        "简单任务（执行→发布）通常 2~3 步。"
+        "若用到了第三方代码/登录/环境参数，"
+        "请填到 used_skills 与 reference_materials，供保存到 uploads/references/ 供下次稳定复跑。"
     )
     messages = [
         {"role": "system", "content": _AI_SUMMARY_SYSTEM},
@@ -809,10 +872,6 @@ def summarize_lesson_with_ai(
     for key in (
         "summary",
         "success_path",
-        "order_section",
-        "script_section",
-        "ai_section",
-        "environment",
         "notes",
     ):
         val = data.get(key)
@@ -826,26 +885,31 @@ def summarize_lesson_with_ai(
     return out
 
 
-_AI_SUMMARY_JUDGE_SYSTEM = """你是 WokBee 的「经验是否需要更新」决策助手。
+_AI_SUMMARY_JUDGE_SYSTEM = """你是 WokBee 的「经验与 Pipeline 是否需要更新」决策助手。
 
-背景：项目已有至少一份经验（memory/experiences/，运行时只加载最新一份）。你需要根据
-「最新经验 + 本次运行日志 + 本轮结果」判断**是否值得**新建一份更新后的经验。
+背景：项目已有至少一份经验与 scripts/pipeline.json（后续运行按 steps 顺序执行）。你需要根据
+「最新经验 + 本次运行日志 + 本轮结果」判断**是否值得**新建一份更新后的经验、并重写 pipeline.json。
 
-值得更新的情形（任一命中即可）：
-1. 本次运行出现脚本报错 / 步骤报错 / 执行失败，且现有经验没记录该坑（值得写入注意事项或修正执行顺序）。
-2. AI 或脚本发现了**新的、更优的实现方法 / 更快的步骤顺序 / 新脚本**，与现有经验不同。
-3. 本次成功路径明显变化（脚本清单、执行顺序、依赖、环境参数变化）。
-4. 现有最新经验过薄/缺失关键章节，本次有更完整的流程可供固化。
+本次运行若没有出现任何异常（脚本全部成功、输出正常），默认不更新。
+
+需要判断的三种情形（结合本次异常及最终成功解决方案）：
+1. **偶发错误**（网络抖动、临时超时、外部服务暂不可用等）：本次偶发，不修改 Pipeline，也不改经验。
+2. **原 Pipeline 本身的问题**（脚本/顺序/命令有误或过时导致失败，AI 已用新方法修正）：需要更新
+   经验并重写 Pipeline（以本次真实成功执行的操作/脚本/顺序为准）。
+3. **发现了更稳定、更好的执行路径**（新脚本、更快的顺序、更可靠的命令，且已真实验证成功）：
+   应该替换原 Pipeline 与经验。
 
 不必更新的情形：
-1. 完全按已有经验+脚本稳定复跑成功，无新错误、无新方法、执行顺序未变。
+1. 完全按已有经验+脚本稳定复跑成功，无新错误、无新方法、执行顺序未变（含偶发错误且已由
+   现有路径稳定恢复）。
 2. 仅结果/数据变化（经验不记录结果），流程/方法/环境层面无新信息。
 3. 运行被用户取消，无实质新信息。
 
 硬性要求：
 - 只返回一个 JSON 对象（不要 Markdown 围栏），格式：
   {"should_update": true 或 false, "reason": "一句话理由，中文"}
-- should_update 默认应偏向 false（省 token）；只有确有意义的新方法 / 新错误 / 新顺序时才为 true。
+- should_update 默认应偏向 false（省 token，且避免每次都覆盖 Pipeline）；只有确有意义的新方法 /
+  新错误修正 / 新顺序（即情形 2、3）时才为 true。
 """
 
 
@@ -939,7 +1003,12 @@ def _normalize_ai_script_files(raw: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_ai_pipeline_steps(raw: Any) -> list[dict[str, Any]]:
-    """规整 AI 给出的有序管线步骤。"""
+    """规整 AI 给出的有序管线步骤。
+
+    不做硬性数量限制（复杂任务步骤可以多、AI 环节可以多）：
+    仅去掉**完全重复**的步骤（同一 type+path+description+args+prompt_hint），
+    避免明显的重复浪费；同一脚本在不同阶段跑（参数/说明不同）会保留。
+    """
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
@@ -968,6 +1037,31 @@ def _normalize_ai_pipeline_steps(raw: Any) -> list[dict[str, Any]]:
             if not step["description"]:
                 step["description"] = "AI 步骤"
         out.append(step)
+    return _dedupe_identical_pipeline_steps(out)
+
+
+def _dedupe_identical_pipeline_steps(steps: list[dict]) -> list[dict]:
+    """去掉完全重复的步骤（type+path+description+args+prompt_hint 全同）。"""
+    if not steps:
+        return steps
+    seen: set[str] = set()
+    out: list[dict] = []
+    for s in steps:
+        key = json.dumps(
+            {
+                "t": s.get("type"),
+                "p": str(s.get("path") or ""),
+                "d": str(s.get("description") or "").strip(),
+                "a": s.get("args") if isinstance(s.get("args"), dict) else {},
+                "h": str(s.get("prompt_hint") or "").strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
     return out
 
 
@@ -1131,7 +1225,7 @@ class LessonStore:
         name = latest.name if latest else "latest"
         return (
             f"【项目经验记忆】以下来自最新经验 `{name}`（历史经验不自动注入；"
-            "只关注实现步骤/执行顺序/环境/注意事项，忽略任何结果或产物描述）：\n\n"
+            "只关注摘要/成功路径/注意事项，忽略任何结果或产物描述）：\n\n"
             + text
             + "\n\n经验只含**成功路径**：按每步「操作+目的」理解，忽略任何失败/试错细节。\n"
         )
