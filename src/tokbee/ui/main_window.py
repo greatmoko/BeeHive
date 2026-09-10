@@ -32,6 +32,7 @@ class _PrimaryNav(QFrame):
         ("chat",       "chat",  "TokBee",  18, "top"),
         ("wokbee",     "🐝",    "WokBee",  18, "top"),
         ("autobee",    "⏰",    "AutoBee", 18, "top"),
+        ("dezibee",    "🎨",    "DeziBee", 18, "top"),
         ("automation", "⚡",    "AIConfig",  20, "top"),
         ("settings",   "⚙",    "Settings",    22, "bottom"),
     ]
@@ -245,6 +246,7 @@ class MainWindow(QMainWindow):
         from tokbee.core.provider_store import ProviderStore
         from wokbee.ui.wokbee_view import WokBeeView
         from autobee.ui.autobee_view import AutoBeeView
+        from dezibee.ui.dezibee_view import DeziBeeView
 
         svc = self._services
 
@@ -274,16 +276,19 @@ class MainWindow(QMainWindow):
             provider_store=ProviderStore(),
             project_store=svc.wokbee_store,
         )
+        dezibee = DeziBeeView(self.theme)
 
         self._views["chat"] = chat
         self._views["wokbee"] = wokbee
         self._views["autobee"] = autobee
+        self._views["dezibee"] = dezibee
         self._views["automation"] = automation
         self._views["settings"] = settings
 
         self._stack.addWidget(chat)
         self._stack.addWidget(wokbee)
         self._stack.addWidget(autobee)
+        self._stack.addWidget(dezibee)
         self._stack.addWidget(automation)
         self._stack.addWidget(settings)
 

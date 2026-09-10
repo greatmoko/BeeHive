@@ -41,9 +41,16 @@ DEFAULTS = {
     "additional_directories": [],
     # 额外 Skills 加载目录（绝对路径列表）：除固定的全局默认 skills 目录外，
     # 用户可自行添加目录并从其中加载技能。与 additional_directories 不同的是，
-    # 这些目录里的技能会纳入 SkillsStore 的 list/启用/挂载流程。
     "skills_dirs": [],
+    # DeziBee 工作文件夹：每个需求在其下创建 {需求ID}/ 子目录（Demo/PRD/互动记录）。
+    "dezibee_work_root": str(Path.home() / "WokBee" / "DeziBee"),
 }
+
+
+def _default_dezibee_work_root_str() -> str:
+    """默认 DeziBee 工作文件夹；旧版本号（~/.wokbee/wokbee）自动迁移。"""
+    p = Path.home() / "WokBee" / "DeziBee"
+    return str(p)
 
 
 def _default_workspace_str() -> str:
@@ -118,6 +125,17 @@ class WokBeeSettings:
     @workspace_root.setter
     def workspace_root(self, value: str | Path) -> None:
         self.set("workspace_root", str(value))
+
+    @property
+    def dezibee_work_root(self) -> Path:
+        raw = self.get("dezibee_work_root") or ""
+        if not str(raw).strip():
+            raw = _default_dezibee_work_root_str()
+        return Path(str(raw)).expanduser()
+
+    @dezibee_work_root.setter
+    def dezibee_work_root(self, value: str | Path) -> None:
+        self.set("dezibee_work_root", str(value))
 
     @property
     def approval(self) -> ApprovalFlags:
