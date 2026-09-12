@@ -30,6 +30,7 @@ const state = {
   selectedCardId: null,
   dragging: null,        // {cardId, dx, dy}
   panning: null,         // {sx, sy, tx, ty}
+  prdEditing: false,     // PRD 直接编辑模式
 };
 
 /* 卡片索引：id → {card, page}（全页面共用一个索引，跳转/连线跨页可达）。
@@ -200,7 +201,12 @@ function bindViewport() {
     fitAll();
   });
   window.addEventListener('keydown', (e) => {
-    if (e.target.matches('input, textarea')) return;
+    // 编辑 PRD 时：Ctrl+S 保存；其余画布快捷键一律让位给文本输入
+    if (state.prdEditing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault(); savePrd(); return;
+    }
+    if (e.target.matches('input, textarea, select') || e.target.isContentEditable) return;
+    if (state.prdEditing) return;
     if (e.key === '0' && !e.ctrlKey && !e.metaKey) resetOrigin();
     if (e.key === '1' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); fitAll(); }
     if (e.key === 'Escape') { state.selectedCardId = null; markSelected(); }
@@ -360,6 +366,8 @@ function renderPrd() {
   body.innerHTML = ''; toc.innerHTML = '';
   const sections = D.prd?.sections || [];
 
+  if (state.prdEditing) { renderPrdEditor(body, toc, sections); return; }
+
   for (const sec of sections) {
     // 目录项
     const t = el('div', `toc-item lvl${sec.level || 2}`, sec.title || sec.id);
@@ -410,6 +418,272 @@ function openPrdSection(secId, opts = {}) {
   }
 }
 
+/* ═══════════════ 5b. PRD 直接编辑 + 持久化 ═══════════════
+ * 用户在右栏直接改 PRD，保存时 POST 给 DeziBee 预览服务器，写回
+ * demo/index.html 的 WORKBENCH_DATA.prd（与 AI 编辑同一份真源）。
+ * 静态部署 / file:// 打开时没有该端点：编辑入口隐藏，页面保持纯只读。
+ * ═══════════════════════════════════════════════════════════════ */
+
+const PRD_ENDPOINT = '/__dezibee__/prd';
+const EXPORT_ENDPOINT = '/__dezibee__/export';
+
+/* 静态导出产物（单文件 HTML）里没有本地服务器：编辑/导出入口一律隐藏 */
+function isExportBuild() { return window.__DEZIBEE_EXPORT__ === true; }
+
+/* 只有从 DeziBee 本机预览服务器打开时，才提供「编辑 PRD / 导出单文件」这些需要服务端的能力 */
+function isLocalServer() {
+  return !isExportBuild() && location.protocol.startsWith('http') &&
+    (location.hostname === '127.0.0.1' || location.hostname === 'localhost');
+}
+
+/* 布局偏好（PRD 宽度 / 编辑区高度）本地记忆；隐私模式等取不到 localStorage 时静默降级 */
+function saveLayout(key, val) {
+  try {
+    if (val == null) localStorage.removeItem('dezibee.' + key);
+    else localStorage.setItem('dezibee.' + key, String(val));
+  } catch (e) { /* 忽略 */ }
+}
+
+function loadLayout(key) {
+  try {
+    const v = localStorage.getItem('dezibee.' + key);
+    return v == null ? null : Number(v);
+  } catch (e) { return null; }
+}
+
+function canEditPrd() {
+  return isLocalServer();
+}
+
+/* 从 URL 推断需求 ID：http://127.0.0.1:port/REQ-xxx/demo/index.html → REQ-xxx */
+function guessReqId() {
+  const parts = location.pathname.split('/').filter(Boolean);
+  if (location.protocol.startsWith('http')) return parts[0] || null;
+  const i = parts.lastIndexOf('demo');
+  return i > 0 ? parts[i - 1] : null;
+}
+
+function setPrdStatus(msg, kind) {
+  const n = $('#prdStatus');
+  if (!msg) { n.textContent = ''; n.className = 'prd-status hidden'; return; }
+  n.textContent = msg;
+  n.className = 'prd-status ' + (kind || 'info');
+}
+
+function setPrdButtons(editing) {
+  $('#prdEditBtn').classList.toggle('hidden', editing);
+  $('#prdSaveBtn').classList.toggle('hidden', !editing);
+  $('#prdCancelBtn').classList.toggle('hidden', !editing);
+  $('#prdTocBtn').classList.toggle('hidden', editing);
+  $('#prdToc').classList.toggle('hidden', editing);
+}
+
+function enterPrdEdit() {
+  state.prdEditing = true;
+  setPrdButtons(true);
+  renderPrd();
+  setPrdStatus('编辑中：改完点「✔ 保存」（Ctrl+S）写回 demo/index.html。', 'info');
+}
+
+function cancelPrdEdit() {
+  state.prdEditing = false;
+  setPrdButtons(false);
+  renderPrd();
+  setPrdStatus('', '');
+}
+
+/* 编辑态渲染：标题输入 + 层级选择 + 富文本正文（WYSIWYG） */
+function renderPrdEditor(body, toc, sections) {
+  toc.innerHTML = '<div class="toc-item lvl2 active">编辑中…</div>';
+  if (!sections.length) {
+    body.appendChild(el('p', '', '当前没有 PRD 章节 — 可在 DeziBee 对话里让 AI 先创建。'));
+    return;
+  }
+  sections.forEach((sec, idx) => {
+    const wrap = el('section', 'prd-edit-sec');
+    wrap.dataset.idx = String(idx);
+    wrap.dataset.secId = sec.id || '';
+
+    const head = el('div', 'prd-edit-head');
+    const title = document.createElement('input');
+    title.className = 'prd-edit-title';
+    title.value = sec.title || sec.id || '';
+    title.placeholder = '章节标题';
+    head.appendChild(title);
+    const level = document.createElement('select');
+    level.className = 'prd-edit-level';
+    for (const l of [2, 3, 4]) {
+      const o = document.createElement('option');
+      o.value = String(l); o.textContent = 'H' + l;
+      if ((sec.level || 2) === l) o.selected = true;
+      level.appendChild(o);
+    }
+    head.appendChild(level);
+    wrap.appendChild(head);
+
+    const content = document.createElement('div');
+    content.className = 'prd-edit-content';
+    content.contentEditable = 'true';
+    content.innerHTML = sec.html || '';
+    // 恢复上次拖动的高度（默认 46vh 由 CSS 给）
+    const savedH = loadLayout('prdEditH');
+    if (savedH && savedH >= 64) content.style.height = savedH + 'px';
+    wrap.appendChild(content);
+
+    // 高度拖拽手柄：向下拖加高编辑区
+    const grip = el('div', 'prd-edit-grip');
+    grip.title = '上下拖动调整编辑区高度';
+    grip.addEventListener('pointerdown', (e) => startEditResize(e, content));
+    wrap.appendChild(grip);
+
+    body.appendChild(wrap);
+  });
+}
+
+/* 收集编辑结果：id 保持原值 → 卡片 prdId 关联不断 */
+function collectPrdEdits() {
+  const orig = D.prd?.sections || [];
+  const out = [];
+  document.querySelectorAll('#prdBody .prd-edit-sec').forEach((wrap) => {
+    const sec = orig[Number(wrap.dataset.idx)] || {};
+    out.push({
+      id: sec.id,
+      title: wrap.querySelector('.prd-edit-title').value.trim() || sec.id,
+      level: Number(wrap.querySelector('.prd-edit-level').value) || 2,
+      html: wrap.querySelector('.prd-edit-content').innerHTML,
+    });
+  });
+  return out;
+}
+
+async function savePrd() {
+  if (!state.prdEditing) return;
+  const reqId = guessReqId();
+  if (!reqId) { setPrdStatus('无法确定需求 ID：请通过 DeziBee「预览」打开本页再编辑。', 'err'); return; }
+  const sections = collectPrdEdits();
+  setPrdStatus('保存中…', 'info');
+  try {
+    const resp = await fetch(PRD_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ req_id: reqId, prd: Object.assign({}, D.prd || {}, { sections }) }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    D.prd = Object.assign({}, D.prd || {}, { sections });
+    state.prdEditing = false;
+    setPrdButtons(false);
+    renderPrd();
+    setPrdStatus('已保存到 demo/index.html ✔', 'ok');
+  } catch (err) {
+    setPrdStatus('保存失败：' + err.message, 'err');
+  }
+}
+
+/* 统一的拖拽会话：用 pointer capture 保证在窗外松开也能收到 pointerup，
+   不会出现「拖到一半卡住、光标不复位」的情况。 */
+function startDrag(e, onMove, onEnd, bodyClass) {
+  const el = e.currentTarget;
+  const startX = e.clientX, startY = e.clientY;
+  try { el.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+  document.body.classList.add(bodyClass);
+
+  const move = (ev) => onMove(ev, { startX, startY });
+  const end = () => {
+    el.removeEventListener('pointermove', move);
+    el.removeEventListener('pointerup', end);
+    el.removeEventListener('pointercancel', end);
+    window.removeEventListener('pointerup', end);
+    window.removeEventListener('mouseup', end);
+    window.removeEventListener('blur', end);
+    document.body.classList.remove(bodyClass);
+    el.classList.remove('dragging');
+    if (onEnd) onEnd();
+  };
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  // 兜底：即使指针捕获不可用，松手/失焦也一定结束拖拽
+  window.addEventListener('pointerup', end);
+  window.addEventListener('mouseup', end);
+  window.addEventListener('blur', end);
+  el.classList.add('dragging');
+}
+
+/* 编辑区高度：拖动向下加高，上限 90vh，高度被记住 */
+function startEditResize(e, content) {
+  e.preventDefault();
+  const startH = content.getBoundingClientRect().height;
+  startDrag(e,
+    (ev, { startY }) => {
+      const h = Math.max(64, Math.min(window.innerHeight * 0.9, startH + (ev.clientY - startY)));
+      content.style.height = h + 'px';
+    },
+    () => saveLayout('prdEditH', Math.round(parseFloat(content.style.height))),
+    'resizing-row');
+}
+
+/* PRD 窗格宽度：拖拽左右调整，双击复位；宽度被记住 */
+function bindPrdResizer() {
+  const rz = $('#prdResizer');
+  const prd = $('#prd');
+  if (!rz || !prd) return;
+  const clamp = (w) => Math.max(260, Math.min(window.innerWidth - 460, w));
+
+  const saved = loadLayout('prdW');
+  if (saved && saved >= 260) prd.style.width = clamp(saved) + 'px';
+
+  rz.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    startDrag(e,
+      (ev) => { prd.style.width = clamp(window.innerWidth - ev.clientX) + 'px'; },
+      () => saveLayout('prdW', Math.round(parseFloat(prd.style.width))),
+      'resizing-col');
+  });
+
+  rz.addEventListener('dblclick', () => { prd.style.width = ''; saveLayout('prdW', null); });
+
+  window.addEventListener('resize', () => {
+    if (prd.style.width) prd.style.width = clamp(parseFloat(prd.style.width)) + 'px';
+  });
+}
+
+/* ═══════════════ 5c. 导出单文件 HTML ═══════════════
+ * 由本机预览服务器打包（内联 css/js/图片），以附件下载；产物可直接上传 OSS。
+ * ═════════════════════════════════════════════════════════════ */
+async function exportSingleFile() {
+  const reqId = guessReqId();
+  if (!reqId) {
+    setPrdStatus('无法确定需求 ID：请通过 DeziBee「预览」再导出。', 'err');
+    return;
+  }
+  // 有未保存的手改先落盘，避免导出旧内容
+  if (state.prdEditing) {
+    await savePrd();
+    if (state.prdEditing) { setPrdStatus('保存失败，已取消导出。', 'err'); return; }
+  }
+  setPrdStatus('正在打包单文件 HTML…', 'info');
+  try {
+    const resp = await fetch(EXPORT_ENDPOINT + '?req_id=' + encodeURIComponent(reqId));
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || ('HTTP ' + resp.status));
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = reqId + '.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setPrdStatus('已下载 ' + reqId + '.html（' + (blob.size / 1024).toFixed(0) + ' KB，自包含，可直接上传 OSS）', 'ok');
+  } catch (err) {
+    setPrdStatus('导出失败：' + err.message, 'err');
+  }
+}
+
 /* ═══════════════ 6. 启动 ═══════════════ */
 
 function init() {
@@ -418,6 +692,7 @@ function init() {
   renderPrd();
   renderPage();
   bindViewport();
+  bindPrdResizer();
   // 首屏自动适应内容
   requestAnimationFrame(() => fitAll());
 
@@ -429,6 +704,18 @@ function init() {
     if (state.selectedCardId) focusCard(state.selectedCardId);
   });
   $('#prdTocBtn').addEventListener('click', () => $('#prdToc').classList.toggle('hidden'));
+
+  // PRD 直接编辑 + 单文件导出（仅本机预览服务器下提供；静态产物隐藏入口）
+  if (isLocalServer()) {
+    $('#prdEditBtn').addEventListener('click', enterPrdEdit);
+    $('#prdSaveBtn').addEventListener('click', savePrd);
+    $('#prdCancelBtn').addEventListener('click', cancelPrdEdit);
+    $('#exportBtn').classList.remove('hidden');
+    $('#exportBtn').addEventListener('click', exportSingleFile);
+  } else {
+    $('#prdEditBtn').classList.add('hidden');
+    $('#exportBtn').classList.add('hidden');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

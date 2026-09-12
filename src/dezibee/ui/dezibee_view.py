@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -157,6 +158,7 @@ class DeziBeeView(QWidget):
         # 功能及用户输入区（输入框在上，按钮在下）
         bar = self.workspace.input_bar
         bar.preview_clicked.connect(self._on_preview)
+        bar.export_clicked.connect(self._on_export)
         bar.summarize_clicked.connect(self._on_summarize)
         bar.new_conversation_clicked.connect(self._on_new_conversation)
         bar.open_folder_clicked.connect(self._on_open_folder)
@@ -409,6 +411,63 @@ class DeziBeeView(QWidget):
             from wokbee.ui.dialogs import tip
 
             tip(self, self.theme, f"无法打开浏览器。请手动访问：{url}")
+
+    # ── 导出原型 ─────────────────────────────────────────
+    def _on_export(self):
+        req = self._current_req()
+        if req is None:
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, "请先选择或创建一个需求。")
+            return
+        index = req.index_file
+        if not index.is_file():
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, "当前需求还没有 Demo 原型（demo/index.html），暂时无法导出。")
+            return
+        from dezibee.core.packager import build_single_file
+
+        # 先让用户选择保存位置，再打包写入（不默认塞进 demo/）
+        from PySide6.QtWidgets import QFileDialog
+
+        default_path = str(req.root / f"{req.id}.html")
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "导出原型", default_path, "HTML 文件 (*.html)"
+        )
+        if not chosen:
+            return  # 用户取消
+
+        try:
+            html, warnings = build_single_file(req.demo_dir)
+        except Exception as e:  # noqa: BLE001
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, f"导出失败：{e}")
+            return
+
+        out = Path(chosen)
+        if out.suffix.lower() != ".html":
+            out = out.with_suffix(".html")
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(html, encoding="utf-8")
+        except OSError as e:
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, f"写入导出文件失败：{e}")
+            return
+
+        from wokbee.ui.dialogs import tip
+
+        mb = len(html.encode("utf-8")) / 1024 / 1024
+        warn = ("\n\n注意：以下引用未内联（可能仍是外链）：\n" + "；".join(warnings)) if warnings else ""
+        tip(
+            self,
+            self.theme,
+            f"已导出原型（{mb:.2f} MB）：\n{out}\n\n"
+            f"该文件自包含、零外部请求，直接上传 OSS 即可。{warn}",
+        )
 
     # ── 打开需求文件夹 ───────────────────────────────────
     def _on_open_folder(self):

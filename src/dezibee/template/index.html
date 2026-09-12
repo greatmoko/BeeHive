@@ -12,6 +12,8 @@
      三栏固定骨架：导航栏 | 原型画布 | PRD
      页面/卡片/PRD 内容全部由 DeziBee(AI) 在 WORKBENCH_DATA 中定义，
      框架只负责承载与联动。修改数据请同时阅读 GUIDE.md。
+     注：通过 DeziBee「预览」打开时，右栏 PRD 可点「✎ 编辑」直接手改并保存
+     （写回本文件的 WORKBENCH_DATA.prd，与 AI 编辑同一份数据）。
      ═══════════════════════════════════════════════════════════════ -->
 <div id="app">
   <!-- ── 左栏：导航 ── -->
@@ -36,6 +38,7 @@
       <span id="zoomLabel" class="zoom-label">100%</span>
       <button id="zoomInBtn" title="放大">＋</button>
       <button id="focusBtn" title="聚焦当前选中的原型卡片">◎ 聚焦</button>
+      <button id="exportBtn" class="hidden" title="导出原型">📦 导出</button>
     </div>
     <div id="viewport">
       <div id="world"><!-- 卡片与连线由 JS 按 WORKBENCH_DATA 渲染 -->
@@ -45,12 +48,21 @@
     <div id="cardHint" class="card-hint hidden"></div>
   </main>
 
+  <!-- 拖拽调整 PRD 宽度（双击复位） -->
+  <div id="prdResizer" class="prd-resizer" title="左右拖动调整「产品说明」宽度；双击复位"></div>
+
   <!-- ── 右栏：PRD ── -->
   <aside id="prd">
     <div class="prd-head">
       <span class="prd-title">产品说明</span>
-      <button id="prdTocBtn" title="展开/收起目录">☰</button>
+      <span class="prd-actions">
+        <button id="prdEditBtn" title="直接编辑产品说明；保存会写回 demo/index.html">✎ 编辑</button>
+        <button id="prdSaveBtn" class="hidden" title="保存到 demo/index.html（Ctrl+S）">✔ 保存</button>
+        <button id="prdCancelBtn" class="hidden" title="放弃本次修改">✕ 取消</button>
+        <button id="prdTocBtn" title="展开/收起目录">☰</button>
+      </span>
     </div>
+    <div id="prdStatus" class="prd-status hidden"></div>
     <nav id="prdToc" class="prd-toc"><!-- JS 渲染 PRD 目录 --></nav>
     <article id="prdBody" class="prd-body"><!-- PRD 内容由 JS 渲染 --></article>
   </aside>

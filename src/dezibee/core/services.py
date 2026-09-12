@@ -191,10 +191,14 @@ def build_design_prompt(req: Requirement, conversation: Conversation | None) -> 
         "——一个需要开发明确理解的独立视觉/交互状态就是一张卡片；内容必须真实 HTML/CSS/JS，"
         "禁止图片模拟；\n"
         "3. links：卡片间交互关系（from/to/trigger/condition/note），画布自动画连线；\n"
-        "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动）。\n"
+        "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动）。"
+        "注意：用户可在「预览」页右栏点「✎ 编辑」直接手改 PRD（保存写回同一份 index.html），"
+        "因此每次改 PRD 前务必重新 read_file demo/index.html，不要用旧内容覆盖用户的手改。\n"
         "动手前先读 demo/GUIDE.md（数据模型 + 创作规范 + 自查清单）。\n"
         "【可部署要求】整个 demo/ 文件夹必须能直接复制部署到对象存储 OSS / GitHub Pages 等"
         "静态托管：纯静态、相对路径、无构建步骤、无本地绝对路径、无服务端依赖。"
+        "若用户只能上传单个文件，引导其用「⤓ 导出」把原型打成自包含单文件 HTML"
+        "（css/js 内联、本地图片转 data URI、零外部请求）；图片放 demo/assets/ 用相对路径即可被内联。\n"
     )
     parts.append(
         "工作顺序：\n"

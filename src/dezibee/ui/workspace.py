@@ -44,6 +44,7 @@ class InputBar(QFrame):
     pause_clicked = Signal()
     open_folder_clicked = Signal()
     preview_clicked = Signal()
+    export_clicked = Signal()
     summarize_clicked = Signal()
     new_conversation_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
@@ -105,10 +106,7 @@ class InputBar(QFrame):
         """
 
         open_folder = QPushButton("📁")
-        open_folder.setToolTip(
-            "打开需求文件夹\n\n在系统资源管理器中打开当前需求的工作目录"
-            "（demo / prd / uploads / 对话记录）。",
-        )
+        open_folder.setToolTip("打开需求文件夹")
         open_folder.setFixedSize(34, 34)
         open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         open_folder.setStyleSheet(self._icon_btn_style)
@@ -116,10 +114,7 @@ class InputBar(QFrame):
         row.addWidget(open_folder)
 
         self._summarize_btn = QPushButton("📝")
-        self._summarize_btn.setToolTip(
-            "总结上下文\n\n用 AI 把当前对话的交互记录压缩为 Design Context 摘要，"
-            "后续对话优先沿用；原始记录保留不删除。",
-        )
+        self._summarize_btn.setToolTip("总结上下文")
         self._summarize_btn.setFixedSize(34, 34)
         self._summarize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._summarize_btn.setStyleSheet(self._icon_btn_style)
@@ -127,10 +122,7 @@ class InputBar(QFrame):
         row.addWidget(self._summarize_btn)
 
         self._new_conv_btn = QPushButton("💬")
-        self._new_conv_btn.setToolTip(
-            "另起对话\n\n在同一需求下开启一个新对话，"
-            "继承需求信息、当前 Demo/PRD 文件与最新上下文摘要。",
-        )
+        self._new_conv_btn.setToolTip("另起对话")
         self._new_conv_btn.setFixedSize(34, 34)
         self._new_conv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._new_conv_btn.setStyleSheet(self._icon_btn_style)
@@ -138,21 +130,27 @@ class InputBar(QFrame):
         row.addWidget(self._new_conv_btn)
 
         self._preview_btn = QPushButton("🌐")
-        self._preview_btn.setToolTip(
-            "预览\n\n在浏览器中打开当前需求的 Demo 原型"
-            "（demo/index.html，页面间可互相跳转）。",
-        )
+        self._preview_btn.setToolTip("预览")
         self._preview_btn.setFixedSize(34, 34)
         self._preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._preview_btn.setStyleSheet(self._icon_btn_style)
         self._preview_btn.clicked.connect(self.preview_clicked.emit)
         row.addWidget(self._preview_btn)
 
+        self._export_btn = QPushButton("📦")
+        self._export_btn.setToolTip("导出原型")
+        self._export_btn.setFixedSize(34, 34)
+        self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_btn.setStyleSheet(self._icon_btn_style)
+        self._export_btn.clicked.connect(self.export_clicked.emit)
+        row.addWidget(self._export_btn)
+
         # 运行中需要禁用的功能按钮（打开文件夹保持可用）
         self._action_btns = [
             self._summarize_btn,
             self._new_conv_btn,
             self._preview_btn,
+            self._export_btn,
         ]
 
         row.addStretch()
