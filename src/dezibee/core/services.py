@@ -48,17 +48,20 @@ class DeziBeeWorker(QThread):
         project: Project | None = None,
         approval: ApprovalFlags | None = None,
         max_steps: int = 40,
+        attachments: list[dict] | None = None,
     ):
         super().__init__(parent)
         self._req = req
         self._user_message = user_message
         self._project = project
+        self._attachments = list(attachments or [])
         self._approval = approval or ApprovalFlags.from_dict(
             {"skip_read": True, "skip_write": True, "skip_routine": True,
              "skip_high_risk": True, "bypass_sandbox": False}
         )
         self._max_steps = max_steps
         self._cancel_requested = False
+        self._runner = None  # run() 中创建；cancel() 需要借此中断进行中的一轮
 
     def run(self):
         from wokbee.engine.runner import (
@@ -67,13 +70,11 @@ class DeziBeeWorker(QThread):
             RunResult,
             resolve_model_for_project,
         )
-        from wokbee.core.paths import ensure_project_layout
 
         try:
             # 需求目录即项目根；该目录存在才允许跑（Agent 工作区）
             project_root = self._req.root
             project_root.mkdir(parents=True, exist_ok=True)
-            ensure_project_layout(project_root)
 
             # 用需求绑定模型；未绑定时用全局默认/第一可用
             provider_store = ProviderStore()
@@ -91,6 +92,7 @@ class DeziBeeWorker(QThread):
                 return
 
             runner = AgentRunner()
+            self._runner = runner
             runner.on_event = self._on_event
             runner.on_approval_needed = self._on_approval
             request = RunRequest(
@@ -100,6 +102,8 @@ class DeziBeeWorker(QThread):
                 resolved=resolved,
                 approval=self._approval,
                 max_steps=self._max_steps,
+                attachments=self._attachments,
+                runner_mode="design",
             )
             if self._cancel_requested:
                 from wokbee.engine.runner import RunResult
@@ -129,7 +133,14 @@ class DeziBeeWorker(QThread):
         self.approval_needed.emit(pending)
 
     def cancel(self):
+        """请求暂停：中断进行中的一轮对话（含正在执行的命令/等待审批）。"""
         self._cancel_requested = True
+        runner = self._runner
+        if runner is not None:
+            try:
+                runner.request_cancel()
+            except Exception:
+                logger.exception("请求取消 Agent 运行失败")
 
 
 # ── 上下文总结（轻量单轮） ──────────────────────────────
@@ -158,29 +169,43 @@ def summarize_context(
 
 
 def build_design_prompt(req: Requirement, conversation: Conversation | None) -> str:
-    """组装 DeziBee Agent 首条系统提示词（复用 WokBee 静态系统提示词前导）。"""
+    """组装 DeziBee Agent 首条系统提示词（目录规则与产出结构）。"""
     parts: list[str] = []
     parts.append(
         "你是 DeziBee——WokBee 中的 AI 产品设计工作台。你的角色：产品经理 / UX/UI 设计师 / "
-        "原型设计师 / PRD 分析师 / 前端原型工程师。"
+        "原型设计师 / PRD 分析师。"
     )
     parts.append(
         f"当前需求：{req.title}\n需求描述：{req.description or '（无）'}\n"
         f"工作目录：{req.root}（可写；这是本需求唯一可写目录）\n"
         "【路径规则】一律使用虚拟相对路径，禁止绝对路径（如 C:\\…）；"
-        "本项目没有 workspace/ 目录概念——Demo 写入 demo/（index.html 入口，"
-        "其它页面 demo/pages/），PRD 写入 prd/<页名>.md。"
+        "本项目没有 workspace/ 目录概念——原型工作台在 demo/（index.html 入口 + "
+        "css/js 框架 + GUIDE.md 使用说明），PRD 写入 prd/，用户上传在 uploads/。"
+    )
+    parts.append(
+        "【产出结构：三栏原型工作台（已预置骨架）】\n"
+        "demo/index.html 是三栏 Prototype Workspace：左「原型导航」/ 中「自由画布」/ "
+        "右「PRD 产品说明」。你只编辑其中的 WORKBENCH_DATA 数据区：\n"
+        "1. pages：页面树（支持多级分组），用户可要求新增/删除/重命名/排序页面——直接改数组；\n"
+        "2. pages[].cards：原型卡片（唯一 ID、位置、尺寸、status、prdId、真实 HTML 内容）"
+        "——一个需要开发明确理解的独立视觉/交互状态就是一张卡片；内容必须真实 HTML/CSS/JS，"
+        "禁止图片模拟；\n"
+        "3. links：卡片间交互关系（from/to/trigger/condition/note），画布自动画连线；\n"
+        "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动）。\n"
+        "动手前先读 demo/GUIDE.md（数据模型 + 创作规范 + 自查清单）。\n"
+        "【可部署要求】整个 demo/ 文件夹必须能直接复制部署到对象存储 OSS / GitHub Pages 等"
+        "静态托管：纯静态、相对路径、无构建步骤、无本地绝对路径、无服务端依赖。"
     )
     parts.append(
         "工作顺序：\n"
         "1. 分析需求，拆解页面与导航（首页 + 若干子页）。\n"
-        "2. 先设计信息架构，再生成可交互 HTML/CSS/JS 原型（支持点击/跳转/表单/弹窗/状态变化）。\n"
-        "3. 【重要】每个页面同步各写一份 PRD（页面结构/功能说明/元素说明/交互说明/业务逻辑/状态变化/异常状态），"
-        "写到 prd/<页名>.md。\n"
-        "4. index.html 必须包含到其它页的导航链接；页面间可互相跳转。\n"
-        "5. 全部完成后再回复用户，概述本轮完成内容（哪些页面、哪些 PRD），并提示可点「预览」。\n"
-        "6. 后续用户反馈：先修改 Demo，再同步修改对应 PRD。\n"
-        "注意：不要因为指令看起来简单就只生成单个文件——需求涉及多个页面时必须完整生成。"
+        "2. 先读 demo/GUIDE.md，再编辑 demo/index.html 的 WORKBENCH_DATA：建页面 → 建卡片 → "
+        "建关系 → 写 PRD 章节 → 建立双向关联。\n"
+        "3. 如需更完整的独立 PRD 文档，写到 prd/<主题>.md（可选）。\n"
+        "4. 全部完成后再回复用户，概述本轮完成内容（页面/卡片/PRD 更新点），"
+        "并提示可点「预览」查看；需要部署时直接复制 demo/ 文件夹。\n"
+        "5. 后续用户反馈：先改原型，再同步更新对应 PRD 章节与关联。\n"
+        "注意：不要因为指令看起来简单就只建一个页面——需求涉及多个页面/状态时必须完整拆解。"
     )
     if conversation and conversation.summary:
         parts.append(

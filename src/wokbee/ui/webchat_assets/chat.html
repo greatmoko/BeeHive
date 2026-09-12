@@ -105,6 +105,11 @@ body {
 }
 .bubble.system.approval { background: #fff7e6; border-color: var(--amber-border); color: var(--amber); }
 .bubble.system.lesson { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.bubble.system.deliverables { background: #eef4ff; border-color: #bfd3f4; color: #1e3a5f; cursor: pointer; }
+.bubble.system.deliverables:hover { background: #e2ecff; border-color: #9dbbe9; }
+.deliverables-btn { font-weight: 700; font-size: 13px; color: #2563eb; }
+.deliverables-btn:hover { text-decoration: underline; }
+.deliverables-hint { font-size: 12px; color: var(--hint); margin-top: 2px; }
 .bubble.thinking {
   background: var(--blue-soft); border: 1px solid #bfdbfe;
   border-left: 3px solid var(--blue); border-top-left-radius: 4px;
@@ -336,6 +341,7 @@ function avatarFor(role, kind) {
   if (role === 'thinking') return '💭';
   if (kind === 'approval') return '✅';
   if (kind === 'lesson') return '📝';
+  if (kind === 'deliverables') return '📦';
   return '💻';
 }
 
@@ -347,13 +353,14 @@ function bubbleCls(role, kind) {
   if (role === 'thinking') return 'thinking';
   if (kind === 'approval') return 'system approval';
   if (kind === 'lesson') return 'system lesson';
+  if (kind === 'deliverables') return 'system deliverables';
   return 'system';
 }
 
 function headLabel(role, kind, time) {
   const tag = {
     user: '用户', ai: 'AI', error: '错误', tool: '工具', thinking: '思考',
-    system: { approval: '审批', lesson: '经验', info: '系统' }[kind] || '系统',
+    system: { approval: '审批', lesson: '经验', info: '系统', deliverables: '交付物' }[kind] || '系统',
   }[role];
   return (tag || kind || '') + ' · ' + (time || '');
 }
@@ -374,6 +381,25 @@ function makeMsg(d) {
     row.appendChild(el('div', 'avatar ' + role, avatarFor(role, d.kind)));
     row.appendChild(bubble);
   }
+  return row;
+}
+
+/* 交付物快捷链接气泡（点击打开交付物目录） */
+function makeDeliverables(d) {
+  const row = el('div', 'msg');
+  row.appendChild(el('div', 'avatar system', '📦'));
+  const bubble = el('div', 'bubble system deliverables');
+  bubble.appendChild(el('div', 'bubble-head', escapeHtml(headLabel('system', 'deliverables', d.time))));
+  const btn = el('div', 'deliverables-btn', '📂 打开交付物目录');
+  btn.addEventListener('click', () => {
+    try {
+      const pid = (d.project_id || '').toString();
+      if (bridge && typeof bridge.open_deliverables === 'function') { bridge.open_deliverables(pid, 0); }
+    } catch (e) {}
+  });
+  bubble.appendChild(btn);
+  bubble.appendChild(el('div', 'deliverables-hint', 'AI 任务已完成，点击查看交付成果'));
+  row.appendChild(bubble);
   return row;
 }
 
@@ -646,6 +672,7 @@ function renderEvent(d) {
   const role = d.role || 'system';
   if (kind === 'tool') return renderTool(d);
   if (kind === 'agent' && d.phase === 'reasoning') return makeThinking(d);
+  if (kind === 'deliverables') return makeDeliverables(d);
   return makeMsg(d);
 }
 

@@ -522,17 +522,21 @@ def extract_scriptable_from_path_text(success_path: str) -> list[ScriptStep]:
                 line,
             )
             if m and _is_scriptable_execute(m.group(1)):
-                events.append(
-                    _E(
-                        "",
-                        kind="tool",
-                        meta={
-                            "phase": "call",
-                            "tool": "execute",
-                            "args": {"command": m.group(1).strip()},
-                        },
+                # success_path 固定格式 `...:"{命令}";[说明]`：截掉 }" 之后被带进来的尾巴，
+                # 否则与事件提取的同一命令 args 不一致，去重失败会固化出重复脚本。
+                cmd = re.split(r'["}]\s*;?\s*\[', m.group(1))[0].rstrip('}"').strip()
+                if cmd and _is_scriptable_execute(cmd):
+                    events.append(
+                        _E(
+                            "",
+                            kind="tool",
+                            meta={
+                                "phase": "call",
+                                "tool": "execute",
+                                "args": {"command": cmd},
+                            },
+                        )
                     )
-                )
     return extract_scriptable_from_events(events)
 
 
@@ -1331,6 +1335,61 @@ def apply_ai_pipeline_steps(
         json.dumps(data, ensure_ascii=False, indent=2),
     )
     return True
+
+
+def drop_missing_pipeline_scripts(project_root: Path) -> list[str]:
+    """移除 pipeline.json 中引用不存在脚本文件的 script 步骤，返回被移除的路径。
+
+    经验写入（尤其工具路径 AI 未给 script_files 时）可能产出引用幽灵脚本的管线；
+    写入后立即清理，保证下次运行不会因「文件不存在」中断。仅当确有移除时才重写文件。
+    """
+    from wokbee.engine.script_runner import format_order_markdown, load_pipeline
+
+    root = Path(project_root)
+    data = load_pipeline(root)
+    if not data:
+        return []
+    steps = data.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return []
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for s in steps:
+        if not isinstance(s, dict) or str(s.get("type") or "").lower() != "script":
+            kept.append(s)
+            continue
+        rel = str(s.get("path") or "").replace("\\", "/").strip()
+        if rel and (root / rel).exists():
+            kept.append(s)
+        else:
+            dropped.append(rel or "（空路径步骤）")
+    if not dropped:
+        return []
+    data["steps"] = kept
+    data["scripts"] = [
+        {
+            "path": s.get("path"),
+            "tool": s.get("tool"),
+            "description": s.get("description"),
+            "args": s.get("args") or {},
+        }
+        for s in kept
+        if isinstance(s, dict) and s.get("type") == "script"
+    ]
+    data["ai_steps"] = [
+        {
+            "description": s.get("description"),
+            "prompt_hint": s.get("prompt_hint") or "",
+        }
+        for s in kept
+        if isinstance(s, dict) and s.get("type") == "ai"
+    ]
+    data["order_markdown"] = format_order_markdown(kept)
+    safe_write_text(
+        scripts_dir(root) / "pipeline.json",
+        json.dumps(data, ensure_ascii=False, indent=2),
+    )
+    return dropped
 
 
 # 清理时会处理/忽略的脚本扩展名（pipeline.json 另作保留）

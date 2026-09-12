@@ -29,9 +29,6 @@ class AgentWorker(QThread):
         parent=None,
         *,
         mode: str = "run",
-        skill_target=None,
-        skill_name: str = "",
-        skill_description: str = "",
         attachments: list[dict] | None = None,
     ):
         super().__init__(parent)
@@ -41,10 +38,7 @@ class AgentWorker(QThread):
         self._user_message = user_message
         self._approval = approval
         self._max_steps = max_steps
-        self.mode = mode  # run | chat | skill
-        self.skill_target = skill_target
-        self.skill_name = skill_name
-        self.skill_description = skill_description
+        self.mode = mode  # run | chat
         self.attachments = list(attachments or [])
         self.request = None
         self._last_pending_count = 0  # 最近一次审批待决数量（由 _on_approval 填充）
@@ -75,9 +69,6 @@ class AgentWorker(QThread):
             return
 
         self.runner = AgentRunner(self._settings)
-        self.runner.skill_target = self.skill_target
-        self.runner.skill_name = self.skill_name
-        self.runner.skill_description = self.skill_description
         self.request = RunRequest(
             project=self._project,
             project_root=self._project_root,
@@ -94,13 +85,7 @@ class AgentWorker(QThread):
             self.runner.request_cancel()
 
         try:
-            if self.mode == "skill":
-                result = self.runner.run_skill(
-                    self.request,
-                    name=self.skill_name,
-                    description=self.skill_description,
-                )
-            elif self.mode == "chat":
+            if self.mode == "chat":
                 result = self.runner.run_chat(self.request)
             else:
                 result = self.runner.run(self.request)
@@ -247,3 +232,108 @@ class LessonWorker(QThread):
     def cancel(self):
         if self.runner is not None:
             self.runner.request_cancel()
+
+
+class MemoryWorker(QThread):
+    """后台更新跨项目 Agent 记忆（归档等场景），不阻塞 UI。
+
+    线程内解析默认模型 → 读最新经验与对话记忆 → refresh_agent_memory 提炼 upsert。
+    只更新记忆库条目；记忆概述由 update_memory_overview 工具按需触发。
+    """
+
+    event_emitted = Signal(str, str, object)  # kind, content, meta
+    finished_memory = Signal()  # 成功或无事可做
+    failed = Signal(str)
+
+    def __init__(self, settings, project, project_root, *, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self._project = project
+        self._project_root = project_root
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def run(self):
+        from wokbee.engine import ensure_engine_warm
+
+        ensure_engine_warm()
+        from wokbee.engine.agent_memory import get_memory, refresh_agent_memory
+        from wokbee.engine.chat_memory import chat_memory_path
+        from wokbee.engine.model_factory import build_chat_model
+        from wokbee.engine.runner import RunRequest, resolve_model_for_project
+        from wokbee.engine.lessons import LessonStore
+
+        try:
+            if self._cancelled.is_set():
+                self.finished_memory.emit()
+                return
+            try:
+                resolved = resolve_model_for_project(self._project, self._settings)
+            except Exception as e:
+                self.failed.emit(str(e))
+                return
+            if not (
+                getattr(resolved, "api_key", None)
+                and getattr(resolved, "api_host", None)
+            ):
+                self.event_emitted.emit(
+                    "info", "无可用模型密钥，跳过记忆库后台更新。", {}
+                )
+                self.finished_memory.emit()
+                return
+            if self._cancelled.is_set():
+                self.finished_memory.emit()
+                return
+
+            # 无经验也无对话记忆时无事可做（避免空提炼覆盖既有条目）
+            store = LessonStore(self._project_root)
+            lesson_text = store.read_latest_text(max_chars=4000)
+            chat_mem = ""
+            try:
+                cp = chat_memory_path(self._project_root)
+                if cp.exists():
+                    chat_mem = cp.read_text(encoding="utf-8")[-2000:]
+            except OSError:
+                chat_mem = ""
+            if not (lesson_text or chat_mem).strip():
+                self.event_emitted.emit(
+                    "info", "无经验与对话记忆可提炼，跳过记忆库后台更新。", {}
+                )
+                self.finished_memory.emit()
+                return
+
+            self.request = RunRequest(
+                project=self._project,
+                project_root=self._project_root,
+                user_message="",
+                resolved=resolved,
+                approval=self._project.approval.copy(),
+                max_steps=self._settings.max_steps,
+            )
+
+            def _emit(kind: str, content: str, meta: dict | None = None) -> None:
+                self.event_emitted.emit(kind, content, meta or {})
+
+            _emit("info", "正在后台更新跨项目 Agent 记忆…")
+            prev_row = get_memory(self._project.id, kind="agent")
+            previous = str(prev_row.get("content") or "") if prev_row else ""
+            chat = build_chat_model(
+                resolved, timeout=self._settings.model_timeout_seconds
+            )
+            ok = refresh_agent_memory(
+                model=chat,
+                project_id=self._project.id,
+                goal=self._project.goal or "",
+                previous_agent_memory=previous,
+                lesson_text=lesson_text,
+                chat_memory_text=chat_mem,
+                refs=[str(store.latest_path() or "")] if store.latest_path() else [],
+                emit=_emit,
+            )
+            if not ok:
+                _emit("info", "记忆库后台更新未写入（无新内容或提炼失败）。")
+            self.finished_memory.emit()
+        except Exception as e:
+            self.failed.emit(str(e))

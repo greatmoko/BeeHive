@@ -417,8 +417,9 @@ def format_runtime_env_block(
     model: str = "",
     policy: str = "",
     extra: str = "",
+    design_mode: bool = False,
 ) -> str:
-    """将 RuntimeEnv 格式化为 Agent 可读块。"""
+    """将 RuntimeEnv 格式化为 Agent 可读块（design_mode 用 DeziBee 目录约定）。"""
     lines = [
         "【运行环境】（WokBee 本机实测；execute 与 scripts 均在此环境执行）",
     ]
@@ -433,17 +434,33 @@ def format_runtime_env_block(
         f"- OS：{rt.os_name} {rt.os_release} ({rt.machine})",
         f"- 项目目录（真实路径，**仅供 execute**）：{rt.project_root or project_root or '（未知）'}",
         f"- 当前工作目录：{rt.cwd}",
-        "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
-        "项目外路径须先 request_access 申请、获批后走 /ext/…）：",
-        "  · workspace/…  workspace 沙箱",
-        "  · deliverables/…  交付物",
-        "  · uploads/…  用户上传",
-        "  · memory/…  经验（experiences/）",
-        "  · scripts/…  管线脚本",
-        "  · uploads/references/…  参考材料（含 Skills 快照）",
-        "  · /skills/…  全局 Skills（只读）",
-        "  · /ext/<slug>/…  已授权附加目录（项目外；先 request_access 申请→人工高危审批→用返回的 /ext/<slug>/…）",
-        "  · 示例：workspace/wttr_shenzhen.json（勿写完整 Windows 路径）",
+    ])
+    if design_mode:
+        lines.extend([
+            "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
+            "项目外路径须先 request_access 申请、获批后走 /ext/…）：",
+            "  · demo/…  原型产出（index.html 入口，可部署）",
+            "  · prd/…  产品说明文档",
+            "  · uploads/…  用户上传（含 references/ 参考材料）",
+            "  · /skills/…  全局 Skills（只读）",
+            "  · /ext/<slug>/…  已授权附加目录（项目外）",
+            "  · 示例：demo/index.html（勿写完整 Windows 路径）",
+        ])
+    else:
+        lines.extend([
+            "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
+            "项目外路径须先 request_access 申请、获批后走 /ext/…）：",
+            "  · workspace/…  workspace 沙箱",
+            "  · deliverables/…  交付物",
+            "  · uploads/…  用户上传",
+            "  · memory/…  经验（experiences/）",
+            "  · scripts/…  管线脚本",
+            "  · uploads/references/…  参考材料（含 Skills 快照）",
+            "  · /skills/…  全局 Skills（只读）",
+            "  · /ext/<slug>/…  已授权附加目录（项目外；先 request_access 申请→人工高危审批→用返回的 /ext/<slug>/…）",
+            "  · 示例：workspace/wttr_shenzhen.json（勿写完整 Windows 路径）",
+        ])
+    lines.extend([
         f"- Python（WokBee 解释器）：{rt.python_exe} ({rt.python_version})",
     ])
     if rt.comspec:
@@ -510,6 +527,7 @@ def build_runtime_env_block(
     policy: str = "",
     extra: str = "",
     settings=None,
+    design_mode: bool = False,
 ) -> str:
     """供【会话上下文】注入的环境说明块（读缓存，无缓存时才探测）。"""
     rt = collect_runtime_env(project_root=project_root or None, settings=settings)
@@ -519,6 +537,7 @@ def build_runtime_env_block(
         model=model,
         policy=policy,
         extra=extra,
+        design_mode=design_mode,
     )
 
 

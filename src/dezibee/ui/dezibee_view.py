@@ -145,20 +145,24 @@ class DeziBeeView(QWidget):
         self.sidebar = DeziBeeSidebar(self.theme)
         self.sidebar.new_req.connect(self._on_new_req)
         self.sidebar.req_selected.connect(self._on_req_selected)
+        self.sidebar.pin_requested.connect(self._on_pin_req)
+        self.sidebar.rename_requested.connect(self._on_rename_req)
+        self.sidebar.copy_id_requested.connect(self._on_copy_req_id)
+        self.sidebar.delete_requested.connect(self._on_delete_req)
         layout.addWidget(self.sidebar)
 
         self.workspace = DeziBeeWorkspace(self.theme)
         layout.addWidget(self.workspace, 1)
 
-        # 功能区
-        bar = self.workspace.action_bar
+        # 功能及用户输入区（输入框在上，按钮在下）
+        bar = self.workspace.input_bar
         bar.preview_clicked.connect(self._on_preview)
         bar.summarize_clicked.connect(self._on_summarize)
         bar.new_conversation_clicked.connect(self._on_new_conversation)
+        bar.open_folder_clicked.connect(self._on_open_folder)
+        bar.pause_clicked.connect(self._on_pause)
         bar.model_changed.connect(self._on_model_changed)
-
-        # 输入区
-        self.workspace.input_bar.send_clicked.connect(self._on_send)
+        bar.send_clicked.connect(self._on_send)
 
     # ── 数据刷新 ─────────────────────────────────────────
     def _refresh(self):
@@ -183,6 +187,68 @@ class DeziBeeView(QWidget):
             self.workspace.set_req(None)
             return
         self.workspace.set_req(req)
+        # 运行状态跟随当前 worker（可能正在跑别的需求）
+        running = self._worker is not None and self._worker.isRunning()
+        self.workspace.info_panel.set_running(running)
+
+    # ── 需求列表右键菜单：置顶 / 重命名 / 复制ID / 删除 ──
+    def _on_pin_req(self, req_id: str):
+        req = self._store.get(req_id)
+        if req is None:
+            return
+        req.pinned = not req.pinned
+        self._persist(req)
+        self._refresh()
+
+    def _on_rename_req(self, req_id: str):
+        req = self._store.get(req_id)
+        if req is None:
+            return
+        from wokbee.ui.dialogs import _ask_text
+
+        name = _ask_text(
+            self, self.theme, "重命名需求", "新的需求名称：", req.title, max_length=80
+        )
+        if not name or name == req.title:
+            return
+        req.title = name
+        self._persist(req)
+        self._refresh()
+        if self.sidebar.current_selected() == req_id:
+            self.workspace.set_req(self._store.get(req_id))
+
+    def _on_copy_req_id(self, req_id: str):
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(req_id)
+        from wokbee.ui.dialogs import tip
+
+        tip(self, self.theme, f"已复制需求ID：{req_id}")
+
+    def _on_delete_req(self, req_id: str):
+        if self._worker is not None and self._worker.isRunning():
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, "Agent 正在处理中，请先暂停交互再删除需求。")
+            return
+        req = self._store.get(req_id)
+        title = req.title if req else req_id
+        from wokbee.ui.dialogs import _confirm
+
+        if not _confirm(
+            self,
+            self.theme,
+            "删除需求",
+            f"确定删除需求「{title}」吗？\n"
+            "该需求的工作文件夹（含 Demo / PRD / 对话记录）将被一并删除。",
+        ):
+            return
+        self._store.delete(req_id)
+        if self.sidebar.current_selected() == req_id:
+            self.sidebar.clear_selection()
+            self.workspace.set_req(None)
+        self._refresh()
+        self.sidebar.select_first()
 
     # ── 新建需求 ─────────────────────────────────────────
     def _on_new_req(self):
@@ -206,7 +272,7 @@ class DeziBeeView(QWidget):
         self.sidebar.select(req.id)
 
     # ── 发送消息 → Agent ─────────────────────────────────
-    def _on_send(self, text: str):
+    def _on_send(self, text: str, attachments: list | None = None):
         req = self._current_req()
         if req is None:
             from wokbee.ui.dialogs import tip
@@ -215,24 +281,37 @@ class DeziBeeView(QWidget):
             return
         if self._worker is not None and self._worker.isRunning():
             return  # 已在处理中
+        text = (text or "").strip()
+        attachments = list(attachments or [])
+        if not text and not attachments:
+            return
 
-        # 追加用户消息到当前对话
+        # 追加用户消息到当前对话（附件名一并记录，便于回看）
         conv = req.active_conversation()
-        self._append_conv_event(conv, "user", text)
-        self.workspace.chat_log._append_bubble("user", text)
+        bubble_text = text
+        if attachments:
+            names = ", ".join(
+                str(a.get("display_name") or a.get("path") or "附件")
+                for a in attachments
+            )
+            bubble_text = f"{text}\n\n[附件] {names}" if text else f"（发送了附件：{names}）"
+        self._append_conv_event(conv, "user", bubble_text)
+        self.workspace.chat_log._append_bubble("user", bubble_text)
         self._persist(req)
 
-        self._start_worker(req, text)
+        self._start_worker(req, text, attachments)
 
-    def _start_worker(self, req: Requirement, text: str):
+    def _start_worker(self, req: Requirement, text: str, attachments: list | None = None):
         self.workspace.input_bar.set_running(True)
-        self.workspace.action_bar.set_running(True)
-        self.workspace.action_bar.setEnabled(False)
+        self.workspace.info_panel.set_running(True)
+        # 通知网页端新一轮开始（重置工具行配对与流式气泡状态）
+        self.workspace.chat_log.begin_run()
 
         worker = DeziBeeWorker(
             req,
             self._build_user_message(req, text),
             parent=self,
+            attachments=attachments,
         )
         worker.event_emitted.connect(self._on_agent_event)
         worker.finished_result.connect(self._on_agent_finished)
@@ -253,28 +332,21 @@ class DeziBeeView(QWidget):
         meta = meta if isinstance(meta, dict) else {}
         target = "reasoning" if str(meta.get("target") or "") == "reasoning" else "text"
         if kind == "agent_stream":
-            self.workspace.chat_log.append_stream(content, target)
+            # 流式增量：只驱动网页实时气泡，不落盘（完整 agent 事件到达时前端自动定稿去重）
+            self.workspace.chat_log.append_stream(target, content)
             return
-        # 记录到当前对话（agent/user/error/info/tool）
+        # 记录到当前对话（agent/user/error/info/tool），工具事件保留结构化 meta
         if kind in ("agent", "user", "error", "info", "tool"):
-            self._append_conv_event(conv, kind, content)
-            phase = str(meta.get("phase") or "")
-            if kind == "agent" and phase in ("reasoning", "narration", "answer"):
-                # 完整事件到达：把流式气泡原地定稿，避免同一段内容渲染两遍
-                bubble_target = "reasoning" if phase == "reasoning" else "text"
-                if self.workspace.chat_log.finalize_stream(bubble_target, content):
-                    self._persist(req)
-                    return
+            self._append_conv_event(conv, kind, content, meta)
             self.workspace.chat_log._render_event(
-                {"kind": kind, "content": content}
+                {"kind": kind, "content": content, "meta": meta}
             )
             self._persist(req)
 
     def _on_agent_finished(self, result):
         self._worker = None
         self.workspace.input_bar.set_running(False)
-        self.workspace.action_bar.set_running(False)
-        self.workspace.action_bar.setEnabled(True)
+        self.workspace.info_panel.set_running(False)
         self.workspace.chat_log.end_stream()
         # 关键：整轮结束后重新加载需求，确保界面状态最新
         self._refresh()
@@ -285,20 +357,21 @@ class DeziBeeView(QWidget):
     def _on_model_error(self, msg: str):
         self._worker = None
         self.workspace.input_bar.set_running(False)
-        self.workspace.action_bar.set_running(False)
-        self.workspace.action_bar.setEnabled(True)
+        self.workspace.info_panel.set_running(False)
         from wokbee.ui.dialogs import tip
 
         tip(self, self.theme, msg)
 
     # ── 事件落盘 ─────────────────────────────────────────
-    def _append_conv_event(self, conv: Conversation, kind: str, content: str):
+    def _append_conv_event(
+        self, conv: Conversation, kind: str, content: str, meta: dict | None = None
+    ):
         from wokbee.core.models import ProjectEvent
 
         ev = ProjectEvent(
             kind=kind,
             content=content,
-            meta={},
+            meta=dict(meta or {}),
         ).to_dict()
         conv.events.append(ev)
         conv.touch()
@@ -336,6 +409,36 @@ class DeziBeeView(QWidget):
             from wokbee.ui.dialogs import tip
 
             tip(self, self.theme, f"无法打开浏览器。请手动访问：{url}")
+
+    # ── 打开需求文件夹 ───────────────────────────────────
+    def _on_open_folder(self):
+        req = self._current_req()
+        if req is None:
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, "请先选择或创建一个需求。")
+            return
+        from wokbee.ui.dialogs import open_path
+
+        req_dir = self._store.req_dir(req.id)
+        req_dir.mkdir(parents=True, exist_ok=True)
+        open_path(req_dir)
+
+    # ── 暂停交互 ─────────────────────────────────────────
+    def _on_pause(self):
+        if self._worker is None or not self._worker.isRunning():
+            from wokbee.ui.dialogs import tip
+
+            tip(self, self.theme, "当前没有运行中的交互。")
+            return
+        self._worker.cancel()
+        self.workspace.chat_log._render_event(
+            {"kind": "info", "content": "用户请求暂停：正在终止当前交互。"}
+        )
+        req = self._current_req()
+        if req is not None:
+            self._append_conv_event(req.active_conversation(), "info", "用户请求暂停：正在终止当前交互。")
+            self._persist(req)
 
     # ── 总结上下文 ───────────────────────────────────────
     def _on_summarize(self):

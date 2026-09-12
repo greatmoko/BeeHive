@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -31,8 +30,6 @@ from wokbee.core.credential_store import redact_obj, redact_text
 from wokbee.core.paths import (
     ensure_project_layout,
     memory_dir,
-    references_dir,
-    scripts_dir,
     workspace_sandbox,
 )
 from wokbee.core.settings import WokBeeSettings
@@ -48,13 +45,14 @@ from wokbee.engine.access_request import (
 )
 from wokbee.engine.access_coerce import AccessCoerceBackend
 from wokbee.engine.readonly_backend import ReadOnlyBackend
+from wokbee.engine.file_tools import build_file_tools
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
     build_lesson_digest,
+    build_experience_tools,
     collect_events_log,
     collect_scripts_context,
-    judge_should_update_experience,
     slice_latest_round,
     summarize_lesson_with_ai,
 )
@@ -85,14 +83,8 @@ from wokbee.engine.chat_memory import (
 from wokbee.engine.agent_memory import (
     build_memory_tools,
     ensure_overview,
-    get_memory,
-    judge_update_overview,
     recall_block_summary,
     recall_memories,
-    rewrite_overview,
-    summarize_project_agent_memory,
-    upsert_memory,
-    write_overview,
 )
 from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.credential_tools import build_credential_tools
@@ -125,6 +117,8 @@ class RunRequest:
     approval: ApprovalFlags
     max_steps: int = 40
     attachments: list[dict] = field(default_factory=list)
+    # 运行器模式：run（经验管线）| chat（交互）| design（DeziBee 设计，无经验/记忆）
+    runner_mode: str = ""
 
 
 @dataclass
@@ -731,11 +725,10 @@ class AgentRunner:
         self._prefix_guard: PrefixGuard | None = None
         self._session_context_block: str = ""
         self._context_injected: bool = False
+        # 本轮是否已由 Agent 用 update_project_experience 工具更新过经验（结束兜底据此跳过）
+        self._experience_updated_by_tool: bool = False
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
-        self.skill_target: Path | None = None
-        self.skill_name: str = ""
-        self.skill_description: str = ""
         self.on_ask_user_needed: Callable[[dict], None] | None = None
 
     def request_cancel(self) -> None:
@@ -750,19 +743,17 @@ class AgentRunner:
         self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
         self.resolve_ask_user({"cancelled": True})
 
+    def _mark_experience_updated(self) -> None:
+        """工具成功写入经验后标记，结束兜底据此跳过自动总结。"""
+        self._experience_updated_by_tool = True
+
     def _cancelled_result(
         self, req: RunRequest, allow_auto_lesson: bool
     ) -> RunResult:
-        lesson = None
-        if allow_auto_lesson:
-            lesson = self._maybe_auto_write_lesson(
-                req, "cancelled", "用户取消", ""
-            )
         return RunResult(
             ok=False,
             outcome="cancelled",
             error="已取消",
-            lesson_id=lesson.id if lesson else "",
         )
 
     def resolve_approval(self, decisions: list[dict]) -> None:
@@ -860,10 +851,20 @@ class AgentRunner:
         mode=run：按经验管线推进项目目标。
         mode=chat：同等完整能力（文件/联网/execute/MCP/Skills），但不跑经验管线；
                    提问可与目标无关，并可改项目名称/目标。
+        mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验/
+                   记忆概述/跨项目记忆召回，不挂经验与跨项目记忆工具；
+                   保留 Skills 与对话记忆（load/append）。
         """
-        ensure_project_layout(req.project_root)
-        workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
-        _ensure_memory_files(req.project_root, req.project)
+        if mode != "design":
+            ensure_project_layout(req.project_root)
+            workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
+            _ensure_memory_files(req.project_root, req.project)
+        else:
+            # design 模式（DeziBee）：不用 WokBee 目录约定（不建 memory/workspace/
+            # deliverables 等管线目录），只要 demo/prd/uploads（demo/index.html 由 store 创建）。
+            req.project_root.mkdir(parents=True, exist_ok=True)
+            for sub in ("demo", "prd", "uploads"):
+                (req.project_root / sub).mkdir(parents=True, exist_ok=True)
 
         # Windows：容忍 resolve() 偶发返回的 \\?\ 扩展路径，避免并发写文件时误判越界
         from wokbee.engine.backend_paths import install_extended_path_tolerance
@@ -926,26 +927,6 @@ class AgentRunner:
         except Exception as e:
             logger.exception("加载 Skills 失败")
             self._emit("error", f"Skills 加载失败：{e}")
-
-        # ---- 一键生成 SKILLS：把目标 skills 目录以可写路由 /skillbuild/ 挂给 Agent ----
-        skillbuild_extra_lines: list[str] = []
-        if self.skill_target:
-            try:
-                target_root = Path(self.skill_target)
-                target_root.mkdir(parents=True, exist_ok=True)
-                routes["/skillbuild/"] = FilesystemBackend(
-                    root_dir=str(target_root), virtual_mode=True,
-                )
-                skillbuild_extra_lines.append(
-                    f"- Skills 生成目标（可写）：{target_root}（经 /skillbuild/ 写入）"
-                )
-                self._emit(
-                    "info",
-                    f"已为本轮挂载可写 Skills 生成目录：{target_root}（/skillbuild/）",
-                )
-            except Exception as e:
-                logger.exception("挂载 /skillbuild/ 失败")
-                self._emit("error", f"挂载 Skills 生成目录失败：{e}")
 
         # ---- 附加目录：预挂载全局白名单 + 供 request_access 动态挂载 ----
         access_registry = ApprovedDirRegistry()
@@ -1011,17 +992,20 @@ class AgentRunner:
             logger.exception("加载 MCP 失败")
             self._emit("error", f"MCP 加载失败：{e}")
 
-        lesson_store = LessonStore(req.project_root)
-
         # 记忆/经验注入策略：
         # - 项目经验（memory/experiences/ 最新一份）与【记忆概述】：首次与非首次运行都自动注入；
         # - 跨项目相关记忆（search_memory 召回）：仅「首次运行」（执行管线为空）自动查询并注入；
         #   非首次运行不自动查询，由 AI 按需主动用 search_memory 查询。
+        # - design 模式（DeziBee）：全部跳过——不注入经验/概述/召回，AI 也无需回溯说明。
+        #   注意 LessonStore.__init__ 会 ensure_project_layout（建 memory/ 等目录），
+        #   design 模式不能创建它。
         pipe_probe = peek_pipeline(req.project_root)
         first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
+        design_mode = mode == "design"
+        lesson_store = None if design_mode else LessonStore(req.project_root)
 
-        experience_digest = lesson_store.prompt_digest()
-        if not lesson_store.is_empty():
+        experience_digest = "" if design_mode else lesson_store.prompt_digest()
+        if not design_mode and not lesson_store.is_empty():
             latest = lesson_store.latest_path()
             if first_run:
                 self._emit(
@@ -1045,8 +1029,9 @@ class AgentRunner:
             model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
             policy=req.approval.summary(),
             settings=self.settings,
+            design_mode=(mode == "design"),
         )
-        context_extra: list[str] = list(skills_extra_lines) + skillbuild_extra_lines + access_extra_lines
+        context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
         if mode == "run" and not first_run:
@@ -1059,9 +1044,10 @@ class AgentRunner:
 
         # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级。
         # 仅首次运行自动查询注入；非首次运行不自动查询（由 AI 按需 search_memory）。
+        # design 模式（DeziBee）不做任何跨项目记忆召回。
         intent_text = (req.user_message or "").strip() or (req.project.goal or "").strip()
         memory_recall_block = ""
-        if first_run:
+        if first_run and not design_mode:
             recall_failed = False
             if intent_text:
                 try:
@@ -1090,7 +1076,7 @@ class AgentRunner:
             experience_digest=experience_digest,
             mode=mode,
             runtime_env_block=runtime_env_block,
-            memory_overview_digest=ensure_overview(),
+            memory_overview_digest="" if design_mode else ensure_overview(),
             memory_recall_block=memory_recall_block,
             extra_lines=context_extra or None,
         )
@@ -1132,10 +1118,33 @@ class AgentRunner:
 
         tools = sort_tools_by_name(
             list(NETWORK_TOOLS)
+            + list(build_file_tools(backend=backend, emit=self._emit))
             + list(project_tools)
             + list(build_credential_tools())
             + list(build_chat_memory_tools(project_root=req.project_root, emit=self._emit))
-            + list(build_memory_tools(emit=self._emit))
+            + (
+                []
+                if design_mode
+                else list(build_experience_tools(
+                    project_id=req.project.id,
+                    project_root=req.project_root,
+                    goal=req.project.goal or req.user_message,
+                    model_label=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+                    policy=req.approval.summary(),
+                    emit=self._emit,
+                    on_written=self._mark_experience_updated,
+                    events_provider=self._snapshot_run_events,
+                ))
+            )
+            + (
+                []
+                if design_mode
+                else list(build_memory_tools(
+                    emit=self._emit,
+                    project_id=req.project.id,
+                    project_root=req.project_root,
+                ))
+            )
             + [build_ask_user_tool()]
             + [build_access_request_tool(
                 composite_backend, access_registry, self.settings,
@@ -1422,16 +1431,10 @@ class AgentRunner:
         while _has_pending(agent, config) and guard < 50:
             guard += 1
             if self._cancel.is_set():
-                lesson = None
-                if allow_auto_lesson:
-                    lesson = self._maybe_auto_write_lesson(
-                        req, "cancelled", "用户取消", ""
-                    )
                 return RunResult(
                     ok=False,
                     outcome="cancelled",
                     error="已取消",
-                    lesson_id=lesson.id if lesson else "",
                 )
 
             ask_payload = _first_ask_user_payload(agent, config)
@@ -1444,16 +1447,10 @@ class AgentRunner:
                 )
                 answers = self._wait_ask_user(ask_payload)
                 if self._cancel.is_set():
-                    lesson = None
-                    if allow_auto_lesson:
-                        lesson = self._maybe_auto_write_lesson(
-                            req, "cancelled", "用户取消", ""
-                        )
                     return RunResult(
                         ok=False,
                         outcome="cancelled",
                         error="已取消",
-                        lesson_id=lesson.id if lesson else "",
                     )
                 if answers.get("cancelled"):
                     self._emit("info", "你取消了澄清提问。")
@@ -1484,16 +1481,10 @@ class AgentRunner:
 
             decisions = self._wait_approval(pending)
             if self._cancel.is_set():
-                lesson = None
-                if allow_auto_lesson:
-                    lesson = self._maybe_auto_write_lesson(
-                        req, "cancelled", "用户取消", ""
-                    )
                 return RunResult(
                     ok=False,
                     outcome="cancelled",
                     error="已取消",
-                    lesson_id=lesson.id if lesson else "",
                 )
 
             approved = sum(1 for d in decisions if d.get("type") == "approve")
@@ -1585,17 +1576,32 @@ class AgentRunner:
         if not question and not req.attachments:
             return RunResult(ok=False, outcome="failed", error="提问内容为空")
 
+        # DeziBee 设计模式经 run_chat 执行：按 runner_mode 选 build_agent 形态。
+        # 否则会按交互模式误建 WokBee 目录（memory/workspace/deliverables 等）。
+        chat_mode = (
+            "design"
+            if (getattr(req, "runner_mode", "") or "") == "design"
+            else "chat"
+        )
         try:
-            agent = self.build_agent(req, mode="chat")
+            agent = self.build_agent(req, mode=chat_mode)
         except Exception as e:
             logger.exception("创建交互 Agent 失败")
             return RunResult(ok=False, outcome="failed", error=str(e))
 
         self._emit(
             "agent",
-            f"交互模式（完整能力，不跑经验管线）。"
-            f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
-            "可用：联网 / 文件 / execute / Skills / MCP / 项目名称与目标工具。",
+            (
+                "设计模式（DeziBee：不跑经验管线，不加载跨项目记忆）。"
+                if chat_mode == "design"
+                else "交互模式（完整能力，不跑经验管线）。"
+            )
+            + f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
+            + (
+                "可用：联网 / 文件 / execute / Skills / MCP。"
+                if chat_mode == "design"
+                else "可用：联网 / 文件 / execute / Skills / MCP / 项目名称与目标工具。"
+            ),
             {"phase": "hint"},
         )
 
@@ -1640,9 +1646,8 @@ class AgentRunner:
                 pass
 
             self._emit("info", "本轮回复已完成")
-            recorded = self._maybe_record_chat_memory(req, final_text)
-            if recorded:
-                self._maybe_update_agent_memory(req, chat_text=final_text)
+            # 交互模式：对话结束只记录对话记忆；跨项目记忆/概述由 AI 按需用工具更新
+            self._maybe_record_chat_memory(req, final_text)
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
@@ -1655,58 +1660,6 @@ class AgentRunner:
                 self._emit("info", "— 本轮对话结束 —", {"session_end": True})
             except Exception:
                 pass
-
-    def run_skill(
-        self,
-        req: RunRequest,
-        *,
-        name: str = "",
-        description: str = "",
-    ) -> RunResult:
-        """一键生成 SKILLS：把本项目的完成经验固化为可复用/可分享的 Agent Skill。
-
-        依赖 build_agent 在 self.skill_target 非空时挂载的 /skillbuild/（可写）路由。
-        复用 run_chat 的完整能力（文件/联网/execute/Skills），Agent 在 /skillbuild/wokbee-<slug>/
-        下创建 SKILL.md（Claude 式 Agent Skills 规范）并携带完成任务所需材料。
-        """
-        if not self.skill_target:
-            return RunResult(ok=False, outcome="failed", error="未指定 Skills 生成目录。")
-        self.skill_name = (name or "").strip()
-        self.skill_description = (description or "").strip()
-
-        slug = re.sub(r"[^\w\-]+", "-", self.skill_name.strip()).strip("-").lower() or "wokbee-skill"
-        slug = slug[:40]
-        slug = f"wokbee-{slug}" if not slug.startswith("wokbee-") else slug
-
-        title = self.skill_name or slug
-        desc_line = f"技能描述：{self.skill_description}" if self.skill_description else "技能描述：由 Agent 依据本项目任务归纳。"
-        instruction = (
-            f"请把当前项目「{req.project.title}」本次已完成的（一次）任务，固化成一个可复用、可移植、可分享的 Agent Skill。\n"
-            f"{desc_line}\n\n"
-            "## 要生成的技能\n"
-            f"在 `/skillbuild/{slug}/` 下创建技能（这就是目标 skills 目录，可写）：\n"
-            f"1. `SKILL.md`：严格遵循 Claude 式 Agent Skills 规范——开头 YAML frontmatter（`name`、`description`、可选 `version`/`author`/`requires`），"
-            "正文为 Markdown，至少包含以下小节：\n"
-            "   - 目的 / 何时使用\n"
-            "   - 前置条件与依赖（环境、模型、第三方工具/库、是否需要联网）\n"
-            "   - 所需材料与输入（脚本、模板、配置、数据文件等，路径要写明）\n"
-            "   - 执行步骤（可操作、按顺序、可复现）\n"
-            "   - 输出位置与格式\n"
-            "   - 第三方下载说明（凡需要下载第三方材料，必须在这里明确写出来源 URL 与安装/使用方式）\n"
-            "2. 把完成任务**必需**的脚本/模板/参考材料复制进技能目录（如 `scripts/` 子目录）。\n"
-            "\n## 依据的材料\n"
-            "请用你的文件工具读取当前项目：`memory/experiences/`（经验）、`scripts/` 与 `scripts/pipeline.json`、"
-            "`uploads/references/`、`deliverables/`、`runs/events.jsonl`（时间线），以及【近期时间线摘录】。\n"
-            "\n## 硬性要求\n"
-            "- 技能要能在**新环境**独立复跑：材料齐全、步骤完整、依赖明确。\n"
-            "- 涉及第三方下载/安装必须写进「第三方下载说明」。\n"
-            "- **严禁**把任何凭据、密钥、登录信息、cookie、`uploads/`、`memory/`、`archives/` 的内容放进技能。\n"
-            "- 完成后用 `ls`/`glob` 检查 `/skillbuild/{slug}/` 结构完整（有 SKILL.md，材料在）。\n"
-            "- 最后用一句话总结技能名与位置。"
-        )
-        req.user_message = instruction
-        self._emit("agent", f"开始一键生成 SKILLS（目标目录：/skillbuild/）…", {"phase": "hint"})
-        return self.run_chat(req)
 
     def _maybe_record_chat_memory(
         self,
@@ -1815,6 +1768,7 @@ class AgentRunner:
         with self._events_lock:
             self._run_events = []
         self._context_injected = False
+        self._experience_updated_by_tool = False
         thread_id = f"wokbee-{req.project.id}"
         config = {"configurable": {"thread_id": thread_id}}
         seen_msg_ids: set[str] = set()
@@ -1830,7 +1784,7 @@ class AgentRunner:
             # 非 resume 必须清空 checkpoint，否则会继承上次空 AIMessage / 半截计划而秒退
             if not resume:
                 _reset_run_state(req.project.id)
-            agent = self.build_agent(req)
+            agent = self.build_agent(req, mode=req.runner_mode or "run")
         except Exception as e:
             logger.exception("创建 Agent 失败")
             return RunResult(ok=False, outcome="failed", error=str(e))
@@ -1849,6 +1803,44 @@ class AgentRunner:
 
         final_text = ""
         trajectory_messages: list = []
+
+        # ── design 模式（DeziBee）：单轮对话式执行，无 pipeline / 经验兜底 ──
+        # DeziBee 需求没有 pipeline.json（不走 ensure memory/experience），
+        # 管线循环对它没有意义；直接一轮 agent turn，结束不写经验。
+        if getattr(req, "runner_mode", "") == "design":
+            try:
+                early = self._run_agent_turn(
+                    agent,
+                    config,
+                    seen_msg_ids,
+                    req,
+                    payload={"messages": [{"role": "user", "content": base_content}]},
+                    first=True,
+                    allow_auto_lesson=False,
+                    start_hint="Agent 处理中…",
+                )
+                if early:
+                    return early
+                try:
+                    state = agent.get_state(config)
+                    values = getattr(state, "values", None) or {}
+                    messages = values.get("messages") if isinstance(values, dict) else None
+                    if messages:
+                        final_text = _extract_text(list(messages))
+                except Exception:
+                    pass
+                self._emit("info", "本轮设计已完成")
+                return RunResult(ok=True, outcome="success", final_text=final_text)
+            except Exception as e:
+                logger.exception("DeziBee 设计执行失败")
+                err = _format_engine_error(e)
+                self._emit("error", f"执行失败：{err}")
+                return RunResult(ok=False, outcome="failed", error=err)
+            finally:
+                try:
+                    self._emit("info", "— 本轮设计结束 —", {"session_end": True})
+                except Exception:
+                    pass
 
         try:
             if resume:
@@ -2010,7 +2002,7 @@ class AgentRunner:
                 return self._cancelled_result(req, True)
 
             success_path = build_success_path_from_messages(trajectory_messages)
-            lesson = self._maybe_auto_write_lesson(
+            lesson = self._ensure_lesson_written(
                 req,
                 "success",
                 final_text[:800] or "任务执行完成",
@@ -2038,7 +2030,7 @@ class AgentRunner:
                     fail_path = build_success_path_from_messages(list(messages))
             except Exception:
                 pass
-            lesson = self._maybe_auto_write_lesson(
+            lesson = self._ensure_lesson_written(
                 req,
                 "failed",
                 str(e)[:500],
@@ -2080,7 +2072,7 @@ class AgentRunner:
                     return True
         return False
 
-    def _maybe_auto_write_lesson(
+    def _ensure_lesson_written(
         self,
         req: RunRequest,
         outcome: str,
@@ -2091,232 +2083,42 @@ class AgentRunner:
         notes: str = "",
         artifacts: str = "",
     ) -> Lesson | None:
-        """首次运行自动总结并生成 Pipeline；已有经验时仅当本轮出现异常才由 AI 判断是否更新。
+        """经验写入兜底：主责是 Agent 运行中用 update_project_experience 工具自写。
 
-        稳定复跑（无异常）不做更新判断，也不覆盖已有 Pipeline——script 步骤 0 Token 自动执行，
-        ai 步骤按固定业务任务消耗必要 Token，正常路径不重新规划。
+        仅两种情况由系统补写（走 AI 总结管线）：
+        1. 首次运行（经验库为空）且 Agent 未写过——保底固化管线；
+        2. 本轮出现异常且 Agent 未更新经验——保底记录修正方法。
+        其余情况（非首次成功、Agent 已更新、取消）不写。
         """
         store = LessonStore(req.project_root)
-        if store.is_empty():
-            # 首次运行：自动总结并固化脚本
-            if outcome == "cancelled":
-                self._emit("info", "已取消；尚无经验，未写入取消类经验。")
-                return None
-            return self._write_lesson_then_memory(
-                req,
-                outcome,
-                summary,
-                errors,
-                success_path=success_path,
-                notes=notes,
-            )
-
-        # 已有经验：仅本轮出现异常（AI 接管处理过）时才判断是否需要更新
+        first_run = store.is_empty()
         if outcome == "cancelled":
-            self._emit("info", "已取消；未更新经验。")
+            if first_run:
+                self._emit("info", "已取消；尚无经验，未写入取消类经验。")
+            else:
+                self._emit("info", "已取消；未更新经验。")
             return None
-        if not self._run_had_exception():
+        if self._experience_updated_by_tool:
+            return None
+        if not first_run and not self._run_had_exception():
+            return None
+        if not first_run:
             self._emit(
                 "info",
-                "本轮为稳定执行且无异常，跳过经验 / Pipeline 更新判断（不覆盖已有 Pipeline）。",
+                "本轮出现异常但 Agent 未用 update_project_experience 更新经验；"
+                "系统兜底总结修正经验（含 pipeline/脚本）。",
             )
-            return None
-        should, reason = self._judge_update_experience(req, store, outcome)
-        if not should:
-            self._emit(
-                "info",
-                "AI 判断本次无需更新经验："
-                f"{reason or '无新错误 / 无更优方法 / 成功路径未变'}",
-            )
-            return None
-        self._emit(
-            "info",
-            f"AI 判断本次需要更新经验：{reason or ''}",
-        )
-        return self._write_lesson_then_memory(
+        return self._write_lesson(
             req,
             outcome,
             summary,
             errors,
             success_path=success_path,
             notes=notes,
-        )
-
-    def _write_lesson_then_memory(
-        self,
-        req: RunRequest,
-        outcome: str,
-        summary: str,
-        errors: str,
-        *,
-        success_path: str = "",
-        notes: str = "",
-    ) -> Lesson | None:
-        """写入经验后，若本轮产生了新经验则顺带更新跨项目 Agent 记忆。"""
-        lesson = self._write_lesson(
-            req,
-            outcome,
-            summary,
-            errors,
-            success_path=success_path,
-            notes=notes,
-            artifacts="",
+            artifacts=artifacts,
             events=self._snapshot_run_events(),
             use_ai=True,
         )
-        if lesson is not None:
-            self._maybe_update_agent_memory(
-                req,
-                lesson_text=(lesson.summary or lesson.success_path or "")[:2000],
-            )
-        return lesson
-
-    def _judge_update_experience(
-        self,
-        req: RunRequest,
-        store: LessonStore,
-        outcome: str,
-    ) -> tuple[bool, str]:
-        """用轻量模型调用判断是否值得更新经验（无模型/失败则跳过）。"""
-        if not (
-            getattr(req.resolved, "api_key", None)
-            and getattr(req.resolved, "api_host", None)
-        ):
-            return False, "无可用模型，跳过判断"
-        try:
-            chat = build_chat_model(
-                req.resolved,
-                timeout=self.settings.model_timeout_seconds,
-            )
-            previous_text = store.read_latest_text(max_chars=4000)
-            run_log = build_lesson_digest(self._snapshot_run_events(), max_chars=12000)
-            return judge_should_update_experience(
-                model=chat,
-                goal=req.project.goal or req.user_message,
-                outcome=outcome,
-                previous_experience=previous_text,
-                run_log=run_log,
-            )
-        except Exception:
-            logger.exception("AI 判断是否需要更新经验失败，默认不更新")
-            return False, "判断失败"
-
-    def _maybe_update_agent_memory(
-        self,
-        req: RunRequest,
-        *,
-        lesson_text: str = "",
-        chat_text: str = "",
-    ) -> None:
-        """本轮产生了新的经验/对话记忆时，更新跨项目 Agent 记忆（单表 kind='agent'）。
-
-        记忆库按关键字跨项目检索；概览仅当 AI 判断有必要时才重写。
-        """
-        if not (
-            getattr(req.resolved, "api_key", None)
-            and getattr(req.resolved, "api_host", None)
-        ):
-            return
-        project_id = req.project.id
-        try:
-            refs = self._collect_agent_memory_refs(req.project_root)
-            previous = ""
-            prev_row = get_memory(project_id, kind="agent")
-            if prev_row:
-                previous = str(prev_row.get("content") or "")
-            chat_mem = ""
-            try:
-                from wokbee.engine.chat_memory import chat_memory_path
-
-                cp = chat_memory_path(req.project_root)
-                if cp.exists():
-                    chat_mem = cp.read_text(encoding="utf-8")[-2000:]
-            except OSError:
-                chat_mem = ""
-
-            chat = build_chat_model(
-                req.resolved,
-                timeout=self.settings.model_timeout_seconds,
-            )
-            self._emit("info", "正在更新跨项目 Agent 记忆…")
-            result = summarize_project_agent_memory(
-                model=chat,
-                project_id=project_id,
-                goal=req.project.goal or req.user_message,
-                previous_agent_memory=previous,
-                lesson_text=lesson_text or chat_text,
-                chat_memory_text=chat_mem,
-                refs=refs,
-            )
-            if not result:
-                self._emit("info", "Agent 记忆提炼失败，本轮未更新记忆库。")
-                return
-            upsert_memory(
-                project_id=project_id,
-                kind="agent",
-                content=result.get("summary") or "",
-                keywords=result.get("keywords") or [],
-                refs=result.get("refs") or [],
-            )
-            kw_s = "、".join(str(k) for k in (result.get("keywords") or [])[:8])
-            self._emit(
-                "info",
-                f"已更新项目 Agent 记忆（{project_id}，关键字：{kw_s or '（无）'}）；"
-                "可跨项目用 search_memory 检索。",
-            )
-
-            # 概览：仅当 AI 判断有必要才重写
-            try:
-                overview = ensure_overview()
-                if judge_update_overview(
-                    model=chat,
-                    overview=overview,
-                    project_id=project_id,
-                    new_info=(result.get("summary") or "")[:3000],
-                ):
-                    new_overview = rewrite_overview(
-                        model=chat,
-                        overview=overview,
-                        project_id=project_id,
-                        new_info=(result.get("summary") or "")[:4000],
-                    )
-                    if new_overview and new_overview.strip() != overview.strip():
-                        write_overview(new_overview)
-                        self._emit("info", "AI 判断有必要，已更新跨项目记忆概述。")
-            except Exception:
-                logger.exception("更新记忆概述失败（不影响记忆库）")
-        except Exception:
-            logger.exception("更新跨项目 Agent 记忆失败（不影响本轮结果）")
-
-    @staticmethod
-    def _collect_agent_memory_refs(project_root: Path) -> list[str]:
-        """收集项目 Agent 记忆相关的原始文件绝对路径（仅地址）。"""
-        from wokbee.engine.chat_memory import chat_memory_path
-
-        root = Path(project_root)
-        refs: list[str] = []
-        for p in (
-            chat_memory_path(root),
-            references_dir(root) / "MANIFEST.md",
-        ):
-            if p.exists() and p.is_file():
-                refs.append(str(p))
-        try:
-            store = LessonStore(root)
-            latest = store.latest_path()
-            if latest and latest.exists():
-                refs.append(str(latest))
-        except Exception:
-            pass
-        sdir = root / "scripts"
-        if sdir.exists():
-            try:
-                for p in sorted(sdir.iterdir())[:20]:
-                    if p.is_file():
-                        refs.append(str(p))
-            except OSError:
-                pass
-        return list(dict.fromkeys(refs))
 
     def write_lesson_manual(
         self,

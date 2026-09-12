@@ -46,3 +46,8 @@ reasonix.toml
 
 # Firecrawl 本地抓取工作目录（不入库）
 .firecrawl/
+
+# ZCode 本地会话数据（不入库）
+.zcode/
+# Windows 重定向产物
+nul

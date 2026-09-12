@@ -42,6 +42,30 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _build_bg_model():
+    """后台线程内解析默认可用模型并构造 chat model；无密钥返回 None。
+
+    供工具触发的后台任务（如 update_memory_overview）使用：不依赖当次运行的
+    req.resolved，从厂商设置解析默认模型即可。
+    """
+    try:
+        from tokbee.core.provider_store import ProviderStore
+
+        store = ProviderStore()
+        default = store.resolve_default()
+        if not default or not (
+            getattr(default, "api_key", "") and getattr(default, "api_host", "")
+        ):
+            return None
+        from wokbee.core.settings import WokBeeSettings
+        from wokbee.engine.model_factory import build_chat_model
+
+        return build_chat_model(default, timeout=WokBeeSettings().model_timeout_seconds)
+    except Exception:
+        logger.exception("后台任务解析默认模型失败")
+        return None
+
+
 def agent_memory_root() -> Path:
     root = default_data_dir() / _MEMORY_DIR_NAME
     root.mkdir(parents=True, exist_ok=True)
@@ -729,8 +753,8 @@ def rewrite_overview(*, model: Any, overview: str, project_id: str, new_info: st
 # 工具
 # --------------------------------------------------------------------------- #
 
-def build_memory_tools(*, emit=None):
-    """构造跨项目记忆工具：search_memory / save_user_memory。"""
+def build_memory_tools(*, emit=None, project_id: str = "", project_root: Path | None = None):
+    """构造跨项目记忆工具：search_memory / save_user_memory / update_cross_project_memory / update_memory_overview。"""
     from langchain_core.tools import tool
 
     def _notify(kind: str, content: str, meta: dict | None = None) -> None:
@@ -765,7 +789,138 @@ def build_memory_tools(*, emit=None):
         _notify("info", f"已保存用户记忆（key={key}），可跨项目检索。")
         return f"已保存用户记忆，key={key}；之后可随时用 search_memory 按关键字调取。"
 
-    return [search_memory, save_user_memory]
+    @tool
+    def update_cross_project_memory(
+        content: str, keywords: str = "", refs: list[str] | None = None
+    ) -> str:
+        """把本项目的可复用方法/经验/踩坑沉淀为**本项目**的跨项目 Agent 记忆（毫秒级，不阻塞）。
+
+        适用场景：用户让你「记一下这个方法/经验」；或你判断本轮工作产生了对其他项目
+        也有参考价值的方法/坑，想主动沉淀。content 为记忆正文（方法向，≤2000 字）；
+        keywords 用逗号分隔便于日后 search_memory 检索；refs 为相关原始文件路径（可选）。
+        单纯的项目内细节请用 update_project_experience；全局性/跨项目级变化用 update_memory_overview。
+        """
+        if not (content or "").strip():
+            return "错误：content 不能为空"
+        kw_list = [x.strip() for x in str(keywords or "").replace("，", ",").split(",") if x.strip()]
+        upsert_memory(
+            project_id=project_id or "user",
+            kind="agent",
+            content=content.strip(),
+            keywords=kw_list,
+            refs=refs or [],
+        )
+        kw_s = "、".join(kw_list[:8])
+        _notify(
+            "info",
+            f"已更新跨项目 Agent 记忆（{project_id or 'user'}"
+            + (f"，关键字：{kw_s}" if kw_s else "")
+            + "）；可跨项目用 search_memory 检索。",
+        )
+        return "跨项目 Agent 记忆已保存；本项目与其它项目均可 search_memory 检索到。"
+
+    @tool
+    def update_memory_overview(reason: str = "", new_info: str = "") -> str:
+        """申请更新**全局记忆概述**（跨项目、每次运行自动注入的高层总结，一般不更新）。
+
+        仅当出现影响未来所有项目的跨项目级变化时调用：新能力/新工具/环境变化、
+        用户画像显著且稳定的变化、概述缺失关键章节或明显过时。
+        这是异步后台任务：调用后立即返回，概述稍后在后台由 AI 判断并重写（不阻塞当前工作）。
+        reason: 一句话说明为什么需要更新；new_info: 支撑更新的新信息摘要（可选）。
+        """
+        info = (new_info or "").strip() or (reason or "").strip()
+        if not info:
+            return "错误：请提供 reason 或 new_info 说明更新内容"
+
+        def _job() -> None:
+            try:
+                chat = _build_bg_model()
+                if chat is None:
+                    _notify("info", "记忆概述后台更新：无可用模型密钥，已跳过。")
+                    return
+                overview = ensure_overview()
+                if not judge_update_overview(
+                    model=chat, overview=overview,
+                    project_id=project_id or "user", new_info=info[:3000],
+                ):
+                    _notify("info", "记忆概述后台更新：AI 判断无需更新（非跨项目级变化）。")
+                    return
+                new_overview = rewrite_overview(
+                    model=chat, overview=overview,
+                    project_id=project_id or "user", new_info=info[:4000],
+                )
+                if new_overview and new_overview.strip() != overview.strip():
+                    write_overview(new_overview)
+                    _notify("info", "记忆概述已在后台更新完成。")
+                else:
+                    _notify("info", "记忆概述后台更新：内容无变化。")
+            except Exception:
+                import logging
+
+                logging.getLogger("wokbee").exception("后台更新记忆概述失败")
+
+        t = threading.Thread(target=_job, name="wokbee-overview-update", daemon=True)
+        t.start()
+        return "已提交记忆概述后台更新（AI 判断有必要才会重写，完成后会提示）。"
+
+    return [search_memory, save_user_memory, update_cross_project_memory, update_memory_overview]
+
+
+def refresh_agent_memory(
+    *,
+    model: Any,
+    project_id: str,
+    goal: str,
+    previous_agent_memory: str = "",
+    lesson_text: str = "",
+    chat_memory_text: str = "",
+    refs: list[str] | None = None,
+    emit=None,
+) -> bool:
+    """用现成模型提炼并 upsert 一条项目 Agent 记忆（供归档后台线程等复用）。
+
+    与工具路径（update_cross_project_memory，Agent 直接写）不同：本函数由系统调用，
+    基于最新经验/对话记忆做一次提炼。只更新记忆库条目，**不更新记忆概述**
+    （概述由 update_memory_overview 工具按需触发，或由 AI 判断）。
+    返回是否写入成功。
+    """
+    if not (lesson_text or chat_memory_text or "").strip():
+        return False
+    try:
+        result = summarize_project_agent_memory(
+            model=model,
+            project_id=project_id,
+            goal=goal,
+            previous_agent_memory=previous_agent_memory,
+            lesson_text=lesson_text,
+            chat_memory_text=chat_memory_text,
+            refs=refs or [],
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger("wokbee").exception("提炼跨项目 Agent 记忆失败")
+        return False
+    if not result:
+        return False
+    upsert_memory(
+        project_id=project_id,
+        kind="agent",
+        content=result.get("summary") or "",
+        keywords=result.get("keywords") or [],
+        refs=result.get("refs") or [],
+    )
+    if emit:
+        kw_s = "、".join(str(k) for k in (result.get("keywords") or [])[:8])
+        try:
+            emit(
+                "info",
+                f"已更新项目 Agent 记忆（{project_id}，关键字：{kw_s or '（无）'}）；"
+                "可跨项目用 search_memory 检索。",
+            )
+        except Exception:
+            pass
+    return True
 
 
 def search_memory_store(query: str, *, kind: str = "all", k: int = 3) -> list[dict]:

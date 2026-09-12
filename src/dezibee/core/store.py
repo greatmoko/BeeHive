@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import shutil
 import threading
 from pathlib import Path
 
@@ -18,8 +19,36 @@ from dezibee.core.models import Requirement, _load_json, _save_json
 _INDEX_NAME = "_index.json"  # 工作文件夹下需求清单
 _REQ_META_NAME = "dezibee.json"  # 需求目录内元数据（需求 + 对话 + 摘要）
 
-# 需求目录约定的子目录
-REQ_SUBDIRS = ("demo", "prd")
+# 需求目录约定的子目录（DeziBee 核心是可部署的原型，不用 WokBee 运行管线目录）
+REQ_SUBDIRS = ("demo", "prd", "uploads")
+
+# 原型工作台模板源（src/dezibee/template/）：新需求预置三栏骨架进 demo/
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "template"
+# 复制进 demo/ 的模板文件（相对模板根）
+_TEMPLATE_FILES = ("index.html", "GUIDE.md")
+_TEMPLATE_SUBDIRS = ("css", "js")
+
+
+def _seed_demo_from_template(demo_dir: Path) -> None:
+    """把原型工作台模板复制进 demo/（缺失的文件才复制，不覆盖已有内容）。"""
+    demo_dir.mkdir(parents=True, exist_ok=True)
+    for rel in _TEMPLATE_FILES:
+        src = _TEMPLATE_DIR / rel
+        dst = demo_dir / rel
+        if src.exists() and not dst.exists():
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    for sub in _TEMPLATE_SUBDIRS:
+        sdir = _TEMPLATE_DIR / sub
+        if not sdir.is_dir():
+            continue
+        for src in sdir.iterdir():
+            if not src.is_file():
+                continue
+            dst_root = demo_dir / sub
+            dst_root.mkdir(parents=True, exist_ok=True)
+            dst = dst_root / src.name
+            if not dst.exists():
+                shutil.copy2(src, dst)
 
 _lock = threading.RLock()
 
@@ -81,8 +110,8 @@ class DeziBeeStore:
                 raise PermissionError(f"无法创建需求目录：{req_dir}（{e}）") from e
             for sub in REQ_SUBDIRS:
                 (req_dir / sub).mkdir(parents=True, exist_ok=True)
-            # 每个需求目录下的 Demo 根 index.html 约定（可为空）
-            (req_dir / "demo" / "index.html").touch(exist_ok=True)
+            # 预置三栏原型工作台骨架（AI 在 WORKBENCH_DATA 上创作）
+            _seed_demo_from_template(req_dir / "demo")
 
             self._write_req_meta(req)
             self._update_index(add=req)
@@ -131,8 +160,11 @@ class DeziBeeStore:
                             updated_at="",
                         )
                     )
-            # 按 created_at 倒序；无时间戳排最后
-            result.sort(key=lambda r: r.created_at or "", reverse=True)
+            # 置顶优先，其余按 created_at 倒序；无时间戳排最后
+            result.sort(
+                key=lambda r: (1 if r.pinned else 0, r.created_at or ""),
+                reverse=True,
+            )
             return result
 
     def get(self, req_id: str) -> Requirement | None:
@@ -144,13 +176,14 @@ class DeziBeeStore:
 
     # ── 保存 ─────────────────────────────────────────────
     def save(self, req: Requirement) -> None:
-        """保存需求元数据（含对话记录与摘要）；目录不存在时补建。"""
+        """保存需求元数据（含对话记录与摘要）；目录不存在时补建（含工作台骨架）。"""
         with _lock:
             req.touch()
             req_dir = self.req_dir(req.id)
             req_dir.mkdir(parents=True, exist_ok=True)
             for sub in REQ_SUBDIRS:
                 (req_dir / sub).mkdir(parents=True, exist_ok=True)
+            _seed_demo_from_template(req_dir / "demo")
             self._write_req_meta(req)
             self._update_index(add=req)
 

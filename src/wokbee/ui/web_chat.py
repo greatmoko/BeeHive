@@ -55,6 +55,9 @@ def _event_to_dict(ev: ProjectEvent) -> dict:
         "time": ev.created_at,
         "content": _redact_display(body),
     }
+    if ev.kind == "deliverables":
+        d["deliverable"] = True
+        d["project_id"] = str(meta.get("project_id") or "")
     if ev.kind == "tool":
         d["tool"] = {
             "id": str(meta.get("tool_call_id") or ""),
@@ -85,6 +88,8 @@ class _ChatBridge(QObject):
     resume_approval = Signal(bool)
     show_empty = Signal(str)
 
+    open_deliverables_requested = Signal(str, int)  # project_id, display_idx
+
     def __init__(self, host, parent=None):
         super().__init__(parent)
         self._host = host
@@ -96,6 +101,10 @@ class _ChatBridge(QObject):
     @Slot()
     def load_older(self):
         self._host._on_load_older()
+
+    @Slot(str, int)
+    def open_deliverables(self, project_id: str, idx: int = 0):
+        self.open_deliverables_requested.emit(project_id, idx)
 
 
 class _NoContextPage(QWebEnginePage):
@@ -196,6 +205,10 @@ class _WebChat(QFrame):
     def _bubbles(self):
         """时间线是否已有内容（workspace 用它判断是否整表重绘）。"""
         return self._all_events if self._has_rendered else []
+
+    def bridge(self):
+        """暴露 QWebChannel 桥接对象，供外部连接前端回传信号。"""
+        return self._bridge
 
     def show_empty(self, text: str = "选择或新建一个项目开始。"):
         self._all_events = []

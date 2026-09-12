@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prototype Workspace</title>
+<link rel="stylesheet" href="css/workbench.css">
+</head>
+<body>
+<!-- ═══════════════════════════════════════════════════════════════
+     DeziBee 原型设计工作台（Prototype Workspace）
+     三栏固定骨架：导航栏 | 原型画布 | PRD
+     页面/卡片/PRD 内容全部由 DeziBee(AI) 在 WORKBENCH_DATA 中定义，
+     框架只负责承载与联动。修改数据请同时阅读 GUIDE.md。
+     ═══════════════════════════════════════════════════════════════ -->
+<div id="app">
+  <!-- ── 左栏：导航 ── -->
+  <aside id="nav">
+    <div class="nav-head">
+      <span class="nav-title" id="navProjectTitle">原型导航</span>
+      <span class="nav-count" id="navPageCount"></span>
+    </div>
+    <div class="nav-tree" id="navTree"><!-- JS 渲染页面树 --></div>
+    <div class="nav-foot">
+      <button id="fitAllBtn" title="自动适应全部内容（当前页面）">⤢ 适应内容</button>
+      <button id="originBtn" title="画布回到原点">⌂ 原点</button>
+    </div>
+  </aside>
+
+  <!-- ── 中栏：原型画布 ── -->
+  <main id="canvasWrap">
+    <div class="canvas-toolbar">
+      <span id="canvasPageName" class="canvas-page-name"></span>
+      <span class="flex-sp"></span>
+      <button id="zoomOutBtn" title="缩小">−</button>
+      <span id="zoomLabel" class="zoom-label">100%</span>
+      <button id="zoomInBtn" title="放大">＋</button>
+      <button id="focusBtn" title="聚焦当前选中的原型卡片">◎ 聚焦</button>
+    </div>
+    <div id="viewport">
+      <div id="world"><!-- 卡片与连线由 JS 按 WORKBENCH_DATA 渲染 -->
+        <svg id="links" xmlns="http://www.w3.org/2000/svg"><!-- 关系连线层（随画布缩放平移） --></svg>
+      </div>
+    </div>
+    <div id="cardHint" class="card-hint hidden"></div>
+  </main>
+
+  <!-- ── 右栏：PRD ── -->
+  <aside id="prd">
+    <div class="prd-head">
+      <span class="prd-title">产品说明</span>
+      <button id="prdTocBtn" title="展开/收起目录">☰</button>
+    </div>
+    <nav id="prdToc" class="prd-toc"><!-- JS 渲染 PRD 目录 --></nav>
+    <article id="prdBody" class="prd-body"><!-- PRD 内容由 JS 渲染 --></article>
+  </aside>
+</div>
+
+<!-- 高亮联动浮层 -->
+<div id="hlOverlay" class="hidden"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   WORKBENCH_DATA —— DeziBee(AI) 唯一需要编辑的数据区。
+   结构说明见 GUIDE.md。核心约定：
+   - 每个页面 page.id / 每个卡片 card.id / 每个 PRD 章节锚点 section.id
+     必须全局唯一；卡片.prdId ↔ 章节锚点 构成双向关联（唯一 ID，不做名称匹配）。
+   - 卡片内容 card.html 是真实 HTML/CSS/JS（禁止用图片模拟页面）。
+   ═══════════════════════════════════════════════════════════════ */
+const WORKBENCH_DATA = window.WORKBENCH_DATA = {
+  project: { title: "未命名原型项目" },
+
+  /* 页面树：支持 label 分组（多级）；entry 是页面 */
+  pages: [
+    {
+      id: "page-home",
+      name: "示例页面",
+      group: "",            // 多级分组用 "一级/二级"，空串为顶级
+      cards: [
+        {
+          id: "card-sample-login",
+          name: "登录页",
+          type: "page",                 // 类型由 AI 自由定义：page/dialog/state/flow…
+          x: 120, y: 160,               // 画布坐标
+          w: 360, h: 560,               // AI 自由决定尺寸
+          status: "draft",              // draft | confirmed | deprecated（自由扩展）
+          prdId: "sec-login",           // ↔ PRD 章节锚点（双向关联）
+          html: "<style>.demo{font-family:system-ui;padding:24px} .demo h3{margin:0 0 12px}</style><div class='demo'><h3>示例原型</h3><p>这是一个原型卡片。替换为真实 HTML/CSS/JS。</p><button onclick=\"alert('交互可用')\">点击交互</button></div>"
+        }
+      ]
+    }
+  ],
+
+  /* 卡片间关系：来源 --触发(条件)--> 目标；用于开发理解"什么操作导致什么状态" */
+  links: [
+    // { id: "lnk-1", from: "card-a", to: "card-b", trigger: "点击「提交」", condition: "校验通过", note: "说明" }
+  ],
+
+  /* PRD：章节树；section.anchorId 必须与卡片.prdId 对应（如需） */
+  prd: {
+    sections: [
+      {
+        id: "sec-login",
+        title: "登录页",
+        level: 2,                       // 2=二级标题，3=三级…
+        // 页面设计/结构/功能/元素/交互/业务规则/状态/异常/跳转/数据API…由 AI 自由组织
+        html: "<p>本页为示例章节。请替换为真实 PRD 内容。</p>"
+      }
+    ]
+  }
+};
+</script>
+<script src="js/workbench.js"></script>
+</body>
+</html>

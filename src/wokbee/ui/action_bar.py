@@ -1,4 +1,4 @@
-"""WokBee 下段操作栏：输入、运行/暂停、审批条、模型切换、上下文用量环。"""
+"""WokBee 下段操作栏：输入、运行/发送（运行中再点同按钮即暂停）、审批条、模型切换、上下文用量环。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from tokbee.ui.styles.system import bind_text_edit_context_menu
 from tokbee.ui.styles.theme import Theme
 from tokbee.ui.widgets.context_ring import ContextUsageRing
 
-# 运行中：运行按钮音频均衡器动效 —— 5 根细竖条自绘，底部对齐，随机跃升 + 指数回落
+# 运行中：活跃按钮（运行/发送）音频均衡器动效 —— 5 根细竖条自绘，底部对齐，随机跃升 + 指数回落
 _RUN_EQ_BARS = 5
 _RUN_EQ_BAR_W = 3        # 竖条宽度（细）
 _RUN_EQ_GAP = 4          # 竖条间距
@@ -36,26 +36,29 @@ _RUN_EQ_DECAY = 0.82     # 每帧回落系数（真实均衡器风格）
 _RUN_EQ_PEAK = 0.35      # 高于该值的随机量才触发跃升
 
 
-class _RunButton(QPushButton):
-    """运行按钮：空闲显示「运行」，运行中自绘底部对齐的音频均衡器动画。"""
+class _EqButton(QPushButton):
+    """通用启停按钮：空闲显示原文字，运行中自绘均衡器动画并保持可点击（再点一次即暂停）。"""
 
-    def __init__(self, theme: Theme, parent=None):
-        super().__init__("运行", parent)
+    def __init__(self, theme: Theme, *, text: str, width: int, bg: str, bg_hover: str, parent=None):
+        super().__init__(text, parent)
         self._theme = theme
+        self._idle_text = text
         self._spinning = False
         self._levels = [0.0] * _RUN_EQ_BARS
         self._eq_timer = QTimer(self)
         self._eq_timer.setInterval(_RUN_EQ_INTERVAL)
         self._eq_timer.timeout.connect(self._tick)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(59, 34)
+        self.setFixedSize(width, 34)
+        c = theme.colors
         self.setStyleSheet(f"""
             QPushButton {{
-                background: #faad14; color: white;
+                background: {bg}; color: white;
                 border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
             }}
-            QPushButton:hover {{ background: #e69500; }}
-            QPushButton:pressed {{ background: #faad14; }}
+            QPushButton:hover {{ background: {bg_hover}; }}
+            QPushButton:pressed {{ background: {bg}; }}
+            QPushButton:disabled {{ background: {c['btn_bg']}; color: {c['text_hint']}; }}
         """)
 
     def set_spinning(self, spinning: bool):
@@ -63,10 +66,11 @@ class _RunButton(QPushButton):
         if spinning:
             self._levels = [0.0] * _RUN_EQ_BARS
             self._eq_timer.start()
+            self.setToolTip("点击暂停")
         else:
             self._eq_timer.stop()
-            self.setText("运行")
-        self.setEnabled(not spinning)
+            self.setText(self._idle_text)
+            self.setToolTip("")
         self.update()
 
     def _tick(self):
@@ -209,18 +213,16 @@ class _AttachmentChip(QFrame):
 
 class _ActionBar(QFrame):
     run_clicked = Signal()
-    pause_clicked = Signal()
+    pause_requested = Signal()
     open_folder_clicked = Signal()
     archive_clicked = Signal()
     upload_clicked = Signal()
-    open_deliverables_clicked = Signal()
     send_clicked = Signal(str, list)  # text, attachments
     approve_clicked = Signal()
     reject_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
     compress_clicked = Signal()
     draft_changed = Signal()
-    gen_skill_clicked = Signal()
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -228,6 +230,7 @@ class _ActionBar(QFrame):
         self._model_updating = False
         self._attachments: list[dict] = []
         self._uploads_root: Path | None = None
+        self._running_mode: str | None = None  # 运行中的模式：None | run | chat
         self._build()
 
     def _build(self):
@@ -319,7 +322,6 @@ class _ActionBar(QFrame):
 
         for icon, tip, slot in (
             ("📁", "打开目录", self.open_folder_clicked.emit),
-            ("📦", "打开交付物目录", self.open_deliverables_clicked.emit),
             ("⬆️", "上传文件", self.upload_clicked.emit),
             ("🗄️", "归档（仅保留最新经验）", self.archive_clicked.emit),
         ):
@@ -330,14 +332,6 @@ class _ActionBar(QFrame):
             btn.setStyleSheet(self._icon_btn_qss())
             btn.clicked.connect(slot)
             row.addWidget(btn)
-
-        self._gen_skill_btn = QPushButton("🧩")
-        self._gen_skill_btn.setToolTip("生成SKILLS：把本次已完成任务固化为可复用/可分享的 Agent Skill")
-        self._gen_skill_btn.setFixedSize(34, 34)
-        self._gen_skill_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gen_skill_btn.setStyleSheet(self._icon_btn_qss())
-        self._gen_skill_btn.clicked.connect(self.gen_skill_clicked.emit)
-        row.addWidget(self._gen_skill_btn)
 
         row.addStretch()
 
@@ -365,37 +359,17 @@ class _ActionBar(QFrame):
         self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
         row.addWidget(self._ctx_ring)
 
-        pause_btn = QPushButton("暂停")
-        pause_btn.setFixedSize(48, 34)
-        pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        pause_btn.setStyleSheet("""
-            QPushButton {
-                background: #dc2626; color: white;
-                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
-            }
-            QPushButton:hover { background: #b91c1c; }
-            QPushButton:pressed { background: #991b1b; }
-        """)
-        pause_btn.clicked.connect(self.pause_clicked.emit)
-        row.addWidget(pause_btn)
-
-        self._run_btn = _RunButton(self.theme)
-        self._run_btn.clicked.connect(self.run_clicked.emit)
+        self._run_btn = _EqButton(
+            self.theme, text="运行", width=59, bg="#faad14", bg_hover="#e69500"
+        )
+        self._run_btn.clicked.connect(self._on_run_btn_clicked)
         row.addWidget(self._run_btn)
 
-        send_btn = QPushButton("发送")
-        send_btn.setFixedSize(72, 34)
-        send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setStyleSheet("""
-            QPushButton {
-                background: #07c160; color: white;
-                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
-            }
-            QPushButton:hover { background: #06ad56; }
-            QPushButton:pressed { background: #07c160; }
-        """)
-        send_btn.clicked.connect(self._on_send)
-        row.addWidget(send_btn)
+        self._send_btn = _EqButton(
+            self.theme, text="发送", width=72, bg="#07c160", bg_hover="#06ad56"
+        )
+        self._send_btn.clicked.connect(self._on_send)
+        row.addWidget(self._send_btn)
         layout.addLayout(row)
 
         self.reload_models()
@@ -561,7 +535,19 @@ class _ActionBar(QFrame):
         self._refresh_attach_bar()
         return items
 
+    def _on_run_btn_clicked(self):
+        # 运行按钮即启停开关：run 模式运行中再点=暂停，否则启动运行。
+        if self._running_mode == "run":
+            self.pause_requested.emit()
+            return
+        self.run_clicked.emit()
+
     def _on_send(self):
+        if self._running_mode:
+            # chat 模式运行中点击发送=暂停；run 模式时按钮已禁用，此为 Enter 键兜底。
+            if self._running_mode == "chat":
+                self.pause_requested.emit()
+            return
         text = self._input.toPlainText().strip()
         if text or self._attachments:
             self.send_clicked.emit(text, self._take_attachments())
@@ -582,10 +568,16 @@ class _ActionBar(QFrame):
         """只读当前附件快照（供 settings 侧边栏等展示），不取出。"""
         return list(self._attachments)
 
-    def set_running(self, running: bool):
-        self._run_btn.set_spinning(running)
+    def set_running(self, running: bool, mode: str = "run"):
+        """运行态切换：mode 决定哪个按钮跳动（run→运行按钮，chat→发送按钮），另一个按钮禁用。"""
+        self._running_mode = mode if running else None
+        run_active = running and mode == "run"
+        chat_active = running and mode == "chat"
+        self._run_btn.set_spinning(run_active)
+        self._run_btn.setEnabled(not chat_active)
+        self._send_btn.set_spinning(chat_active)
+        self._send_btn.setEnabled(not run_active)
         self._model_combo.setEnabled(not running)
-        self._gen_skill_btn.setEnabled(not running)
 
     def show_approval(self, text: str):
         self._approval_label.setText(text)

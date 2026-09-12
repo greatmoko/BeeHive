@@ -45,7 +45,6 @@ from wokbee.core.context_usage import (
 from wokbee.core.models import MAX_PROJECT_TITLE_LEN, Project, ProjectEvent, ProjectStatus
 from wokbee.core.paths import deliverables_dir, list_deliverable_names, uploads_dir
 from wokbee.core.project_store import MAX_ARCHIVES, ProjectStore, TRASH_RETENTION_DAYS
-from wokbee.core.skills_store import SkillsStore
 from wokbee.ui.action_bar import _ActionBar
 from wokbee.ui.ask_user_dialog import AskUserDialog
 from wokbee.ui.dialogs import (
@@ -730,6 +729,8 @@ class _ProjectWorkspace(QWidget):
         self._status_before_lesson: ProjectStatus | None = None
         self._compact_worker: _CompactWorker | None = None
         self._refine_worker: _RefineMetaWorker | None = None
+        self._memory_worker: MemoryWorker | None = None
+        self._memory_worker_project_id: str | None = None
         self._build()
 
     def _build(self):
@@ -745,12 +746,12 @@ class _ProjectWorkspace(QWidget):
 
         self._timeline = _WebChat(self.theme)
         layout.addWidget(self._timeline, stretch=1)
+        self._timeline.bridge().open_deliverables_requested.connect(self._on_open_deliverables)
 
         self._actions = _ActionBar(self.theme)
         self._actions.run_clicked.connect(self._on_run)
-        self._actions.pause_clicked.connect(self._on_pause)
+        self._actions.pause_requested.connect(self._on_pause)
         self._actions.open_folder_clicked.connect(self._on_open_folder)
-        self._actions.open_deliverables_clicked.connect(self._on_open_deliverables)
         self._actions.upload_clicked.connect(self._on_upload)
         self._actions.archive_clicked.connect(self._on_archive)
         self._actions.send_clicked.connect(self._on_send)
@@ -759,7 +760,6 @@ class _ProjectWorkspace(QWidget):
         self._actions.model_changed.connect(self._on_model_changed)
         self._actions.compress_clicked.connect(self._on_compress_clicked)
         self._actions.draft_changed.connect(self._schedule_usage_refresh)
-        self._actions.gen_skill_clicked.connect(self._on_gen_skill)
         layout.addWidget(self._actions)
 
         self._essentials_timer = QTimer(self)
@@ -1162,7 +1162,7 @@ class _ProjectWorkspace(QWidget):
         if not text and not attachments:
             return
         if self._worker and self._worker.isRunning():
-            _tip(self, self.theme, "当前正在运行或对话中，请稍候或先点暂停。")
+            _tip(self, self.theme, "当前正在运行或对话中，可再次点击发送/运行按钮暂停。")
             return
         if self._lesson_worker and self._lesson_worker.isRunning():
             _tip(self, self.theme, "正在总结经验，请稍候。")
@@ -1222,7 +1222,7 @@ class _ProjectWorkspace(QWidget):
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._worker.model_error.connect(self._on_worker_model_error)
-        self._actions.set_running(True)
+        self._actions.set_running(True, "chat")
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
         self._worker.start()
@@ -1317,144 +1317,7 @@ class _ProjectWorkspace(QWidget):
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._worker.model_error.connect(self._on_worker_model_error)
-        self._actions.set_running(True)
-        self._actions.set_cache_stats("")
-        self._actions.hide_approval()
-        self._worker.start()
-
-    def _on_gen_skill(self):
-        """一键生成 SKILLS：确认后把当前项目本次完成的任务固化为 Agent Skill。"""
-        from wokbee.engine.worker import AgentWorker
-
-        if not self._project_id:
-            _tip(self, self.theme, "请先新建或选择一个项目。")
-            return
-        if self._worker and self._worker.isRunning():
-            _tip(self, self.theme, "当前项目正在运行或对话中，请先暂停。")
-            return
-        if self._lesson_worker and self._lesson_worker.isRunning():
-            _tip(self, self.theme, "正在总结经验，请稍候。")
-            return
-        if self._compact_worker and self._compact_worker.isRunning():
-            _tip(self, self.theme, "正在压缩上下文，请稍候。")
-            return
-        if self._refine_worker and self._refine_worker.isRunning():
-            _tip(self, self.theme, "正在更新项目信息，请稍候。")
-            return
-
-        project = self.store.get(self._project_id)
-        if not project:
-            return
-
-        c = self.theme.colors
-        default_root = SkillsStore().root
-        slug = re.sub(r"[^\w\-]+", "-", (project.title or "").strip()).strip("-").lower()
-        default_name = f"wokbee-{slug[:40]}" if slug else "wokbee-skill"
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("生成 SKILLS")
-        dlg.setMinimumWidth(460)
-        dlg.setStyleSheet(f"background: {c['content_bg']};")
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(24, 20, 24, 18)
-        lay.setSpacing(10)
-
-        def _lab(t):
-            l = QLabel(t)
-            l.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent; border: none;")
-            return l
-
-        tip = QLabel(
-            "将把当前项目本次已完成的任务，固化为一个可复用/可分享的 Agent Skill\n"
-            "（Claude 式 Agent Skills：SKILL.md + 所需材料）。生成中会读取项目经验/脚本/参考/时间线。"
-        )
-        tip.setWordWrap(True)
-        tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']}; background: transparent; border: none;")
-        lay.addWidget(tip)
-
-        lay.addWidget(_lab("技能名称（文件夹名，将写入目标 Skills 目录）"))
-        name_edit = QLineEdit(default_name)
-        name_edit.setFixedHeight(32)
-        lay.addWidget(name_edit)
-
-        lay.addWidget(_lab("描述（一句话说明这个技能做什么）"))
-        desc_edit = QLineEdit()
-        desc_edit.setPlaceholderText("例如：把网页抓取并整理为结构化简报")
-        desc_edit.setFixedHeight(32)
-        lay.addWidget(desc_edit)
-
-        lay.addWidget(_lab("生成到目录"))
-        dir_row = QHBoxLayout()
-        dir_edit = QLineEdit(str(default_root))
-        dir_edit.setFixedHeight(32)
-        dir_row.addWidget(dir_edit, stretch=1)
-        browse_btn = QPushButton("浏览…")
-        browse_btn.setFixedHeight(32)
-        browse_btn.clicked.connect(
-            lambda: dir_edit.setText(
-                QFileDialog.getExistingDirectory(self, "选择 Skills 目标目录", dir_edit.text() or str(default_root))
-                or dir_edit.text()
-            )
-        )
-        dir_row.addWidget(browse_btn)
-        lay.addLayout(dir_row)
-
-        hint = QLabel("目标目录可改为任意已配置的额外 Skills 目录；默认写入全局默认目录。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;")
-        lay.addWidget(hint)
-
-        row = QHBoxLayout()
-        row.addStretch()
-        cancel = QPushButton("取消")
-        cancel.clicked.connect(dlg.reject)
-        ok = QPushButton("确认生成")
-        ok.clicked.connect(dlg.accept)
-        row.addWidget(cancel)
-        row.addWidget(ok)
-        lay.addLayout(row)
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        name = (name_edit.text() or "").strip() or default_name
-        desc = (desc_edit.text() or "").strip()
-        target = (dir_edit.text() or "").strip()
-        try:
-            target_root = Path(target).expanduser().resolve()
-        except OSError:
-            target_root = default_root
-        try:
-            target_root.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            _tip(self, self.theme, f"无法创建目录：{e}")
-            return
-
-        self._status_before_chat = project.status
-        self.store.set_status(self._project_id, ProjectStatus.RUNNING, current_step="生成 SKILLS 中")
-        self._schedule_essentials_refresh()
-
-        self._worker_project_id = self._project_id
-        self._worker_mode = "skill"
-        self._worker = AgentWorker(
-            self.store.settings,
-            project,
-            self.store.path_for(project.id),
-            "",
-            project.approval.copy(),
-            self.store.settings.max_steps,
-            parent=self,
-            mode="skill",
-            skill_target=target_root,
-            skill_name=name,
-            skill_description=desc,
-        )
-        self._timeline.begin_run()
-        self._worker.event_emitted.connect(self._on_engine_event)
-        self._worker.approval_needed.connect(self._on_approval_needed)
-        self._worker.ask_user_needed.connect(self._on_ask_user_needed)
-        self._worker.finished_result.connect(self._on_engine_finished)
-        self._worker.model_error.connect(self._on_worker_model_error)
-        self._actions.set_running(True)
+        self._actions.set_running(True, "run")
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
         self._worker.start()
@@ -1610,8 +1473,8 @@ class _ProjectWorkspace(QWidget):
         err = getattr(result, "error", "") or ""
         mode = self._worker_mode or "run"
 
-        if mode in ("chat", "skill"):
-            # 对话/生成 SKILLS 结束：尽量恢复进入前的状态，避免把「完成」冲掉
+        if mode in ("chat",):
+            # 对话结束：尽量恢复进入前的状态，避免把「完成」冲掉
             prev = self._status_before_chat
             if outcome == "awaiting_approval":
                 self.store.set_status(
@@ -1648,12 +1511,8 @@ class _ProjectWorkspace(QWidget):
                     restore,
                     current_step=step,
                 )
-                if mode == "skill":
-                    skill_dir = getattr(self._worker, "skill_target", "") if self._worker else ""
-                    _tip(
-                        self, self.theme,
-                        f"SKILL 已生成到：{skill_dir or '目标目录'}",
-                    )
+                if mode == "chat" and outcome == "success":
+                    self._append_deliverables_bubble(target)
             self._status_before_chat = None
             self._worker_mode = "run"
             self._worker = None
@@ -1671,6 +1530,7 @@ class _ProjectWorkspace(QWidget):
                 progress_done=1,
                 progress_total=1,
             )
+            self._append_deliverables_bubble(target)
         elif outcome == "cancelled":
             self.store.set_status(
                 target,
@@ -1746,13 +1606,27 @@ class _ProjectWorkspace(QWidget):
             return
         _open_in_explorer(self.store.path_for(self._project_id))
 
-    def _on_open_deliverables(self):
-        if not self._project_id:
+    def _on_open_deliverables(self, project_id: str = "", _idx: int = 0):
+        target = project_id or self._project_id
+        if not target:
             _tip(self, self.theme, "请先选择项目。")
             return
-        path = deliverables_dir(self.store.path_for(self._project_id))
+        path = deliverables_dir(self.store.path_for(target))
         path.mkdir(parents=True, exist_ok=True)
         _open_in_explorer(path)
+
+    def _append_deliverables_bubble(self, target: str):
+        """任务完成后追加一个「打开交付物目录」的快捷链接气泡（交互/运行模式）。"""
+        if not target:
+            return
+        ev = ProjectEvent(
+            kind="deliverables",
+            content="交付物目录",
+            meta={"project_id": target},
+        )
+        self.store.append_event(target, ev)
+        if target == self._project_id and self._timeline is not None:
+            self._timeline.append_event(ev)
 
     def _on_upload(self):
         if not self._project_id:
@@ -1908,7 +1782,10 @@ class _ProjectWorkspace(QWidget):
         self.status_changed.emit()
 
     def _on_archive(self):
-        """归档本次会话；历史经验一并归档，仅保留最新一份经验与 scripts/。"""
+        """归档本次会话；历史经验一并归档，仅保留最新一份经验与 scripts/。
+
+        归档完成后在后台线程更新跨项目 Agent 记忆（不阻塞 UI）。
+        """
         if not self._project_id:
             return
         if self._worker and self._worker.isRunning():
@@ -1923,7 +1800,8 @@ class _ProjectWorkspace(QWidget):
             "• 归档：对话、工作区、交付物、运行记录（uploads 上传资料保留）\n"
             "• 经验文档仅保留**最新一份**，历史经验一并归档\n"
             "• 保留：项目名称、目标、审核策略、uploads/（含参考材料）\n"
-            f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n\n"
+            f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n"
+            "• 归档后在后台更新记忆概述与跨项目记忆（不影响继续使用）\n\n"
             "是否继续？",
         )
         if not ok:
@@ -1936,7 +1814,61 @@ class _ProjectWorkspace(QWidget):
         if not dest:
             return
         self._archive_old_experiences(self._project_id, dest)
+        self._start_memory_worker(self._project_id)
         self._refresh()
+
+    def _start_memory_worker(self, project_id: str) -> None:
+        """归档后后台更新跨项目 Agent 记忆（MemoryWorker 线程；已有在跑则跳过）。"""
+        from wokbee.engine.worker import MemoryWorker
+
+        if self._memory_worker and self._memory_worker.isRunning():
+            logger.info("记忆库后台更新已在进行，跳过本次触发")
+            return
+        project = self.store.get(project_id)
+        if not project:
+            return
+        self._memory_worker_project_id = project_id  # 发起时捕获，切项目不串写
+        wk = MemoryWorker(
+            self.store.settings,
+            project,
+            self.store.path_for(project_id),
+            parent=self,
+        )
+        wk.event_emitted.connect(self._on_memory_worker_event)
+        wk.finished_memory.connect(self._on_memory_worker_finished)
+        wk.failed.connect(self._on_memory_worker_failed)
+        self._memory_worker = wk
+        wk.start()
+
+    def _on_memory_worker_event(self, kind: str, content: str, meta: object) -> None:
+        """MemoryWorker 事件写回发起项目（保数据），仅当前可见时刷时间线。"""
+        target = self._memory_worker_project_id or self._project_id
+        if not target:
+            return
+        ev = ProjectEvent(
+            kind=kind if kind in ("info", "error", "agent") else "info",
+            content=content,
+        )
+        self.store.append_event(target, ev)
+        if target == self._project_id:
+            self._timeline.append_event(ev)
+
+    def _on_memory_worker_finished(self) -> None:
+        target = self._memory_worker_project_id or self._project_id
+        self._memory_worker = None
+        self._memory_worker_project_id = None
+        if target:
+            self._schedule_essentials_refresh()
+
+    def _on_memory_worker_failed(self, err: str) -> None:
+        target = self._memory_worker_project_id or self._project_id
+        self._memory_worker = None
+        self._memory_worker_project_id = None
+        if target:
+            ev = ProjectEvent(kind="error", content=f"记忆库后台更新失败：{err}")
+            self.store.append_event(target, ev)
+            if target == self._project_id:
+                self._timeline.append_event(ev)
 
     def _archive_old_experiences(self, project_id: str, dest: Path) -> None:
         """把 memory/experiences/ 下除最新一份外的历史经验归档到 dest，只保留最新。"""

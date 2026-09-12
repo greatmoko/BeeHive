@@ -1,28 +1,35 @@
-"""DeziBee 需求列表：左侧需求列表 + 新建/搜索。"""
+"""DeziBee 需求列表：左侧需求列表 + 新建/搜索 + 右键菜单（置顶/重命名/复制ID/删除）。"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from tokbee.ui.styles.system import apply_context_menu
 from tokbee.ui.styles.theme import Theme
 
 from dezibee.core.models import Requirement
 
 
 class _ReqItem(QFrame):
-    """需求列表单项（点击选中）。"""
+    """需求列表单项（点击选中，右键弹出操作菜单）。"""
 
     clicked = Signal(str)
+    pin_requested = Signal(str)
+    rename_requested = Signal(str)
+    copy_id_requested = Signal(str)
+    delete_requested = Signal(str)
 
     def __init__(self, req: Requirement, theme: Theme, selected: bool = False, parent=None):
         super().__init__(parent)
@@ -50,7 +57,7 @@ class _ReqItem(QFrame):
         layout.setSpacing(2)
 
         top = QHBoxLayout()
-        title = QLabel(self.req.title)
+        title = QLabel(("📌 " if self.req.pinned else "") + self.req.title)
         title.setWordWrap(False)
         title.setStyleSheet(
             f"font-size: 13px; font-weight: bold; color: {c['text']};"
@@ -74,12 +81,34 @@ class _ReqItem(QFrame):
             self.clicked.emit(self.req.id)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event: QContextMenuEvent):
+        menu = QMenu(self)
+        apply_context_menu(menu, self.theme.colors)
+        pin = menu.addAction("取消置顶" if self.req.pinned else "置顶")
+        rename = menu.addAction("重命名")
+        copy_id = menu.addAction("复制需求ID")
+        menu.addSeparator()
+        delete = menu.addAction("删除")
+        chosen = menu.exec(event.globalPos())
+        if chosen is pin:
+            self.pin_requested.emit(self.req.id)
+        elif chosen is rename:
+            self.rename_requested.emit(self.req.id)
+        elif chosen is copy_id:
+            self.copy_id_requested.emit(self.req.id)
+        elif chosen is delete:
+            self.delete_requested.emit(self.req.id)
+
 
 class DeziBeeSidebar(QFrame):
     """左侧需求列表。"""
 
     req_selected = Signal(str)
     new_req = Signal()
+    pin_requested = Signal(str)
+    rename_requested = Signal(str)
+    copy_id_requested = Signal(str)
+    delete_requested = Signal(str)
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -178,6 +207,10 @@ class DeziBeeSidebar(QFrame):
                 found = True
             item = _ReqItem(r, self.theme, selected=(r.id == self._selected_id))
             item.clicked.connect(self._on_select)
+            item.pin_requested.connect(self.pin_requested.emit)
+            item.rename_requested.connect(self.rename_requested.emit)
+            item.copy_id_requested.connect(self.copy_id_requested.emit)
+            item.delete_requested.connect(self.delete_requested.emit)
             self._list_layout.addWidget(item)
         if self._selected_id and not found:
             self._selected_id = None

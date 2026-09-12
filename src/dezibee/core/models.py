@@ -125,6 +125,7 @@ class Requirement:
     title: str = "未命名需求"
     description: str = ""
     status: str = "active"  # active | archived
+    pinned: bool = False  # 列表置顶（右键菜单切换）
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     # 绑定模型（复用 ProviderStore）；空 = 使用全局默认
@@ -165,6 +166,7 @@ class Requirement:
             title=str(data.get("title") or "未命名需求"),
             description=str(data.get("description") or ""),
             status=str(data.get("status") or "active"),
+            pinned=bool(data.get("pinned")),
             created_at=str(data.get("created_at") or _now()),
             updated_at=str(data.get("updated_at") or _now()),
             provider=str(data.get("provider") or ""),
