@@ -49,5 +49,9 @@ reasonix.toml
 
 # ZCode 本地会话数据（不入库）
 .zcode/
+
+# CodeGraph 本地代码索引（不入库）
+.codegraph/
+
 # Windows 重定向产物
 nul
