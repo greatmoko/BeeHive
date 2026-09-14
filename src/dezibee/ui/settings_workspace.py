@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -104,6 +105,19 @@ class DeziBeeSettingsWorkspace(QWidget):
         self._stat.setStyleSheet(hint_label_qss(c))
         bl.addWidget(self._stat)
 
+        bl.addWidget(self._section_label("终端运行软件"))
+        self._terminal_combo = QComboBox()
+        self._terminal_combo.setFixedHeight(34)
+        self._terminal_combo.setFixedWidth(300)
+        self._terminal_combo.setStyleSheet(rounded_lineedit_qss(c))
+        bl.addWidget(self._terminal_combo, alignment=Qt.AlignmentFlag.AlignLeft)
+        terminal_hint = QLabel(
+            "Agent 运行命令行时使用的终端；未选择时默认使用 cmd。"
+        )
+        terminal_hint.setWordWrap(True)
+        terminal_hint.setStyleSheet(hint_label_qss(c))
+        bl.addWidget(terminal_hint)
+
         bl.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
@@ -157,6 +171,25 @@ class DeziBeeSettingsWorkspace(QWidget):
     def _load(self):
         self._path_edit.setText(str(self.settings.dezibee_work_root))
         self._update_stat()
+        self._reload_terminals()
+
+    def _reload_terminals(self):
+        """填充终端下拉框：系统内可用命令行工具 + 未选中时默认 cmd。"""
+        from wokbee.core.settings import detect_terminal_apps
+
+        self._terminal_combo.blockSignals(True)
+        self._terminal_combo.clear()
+        terminals = detect_terminal_apps()
+        for key, exe in terminals:
+            self._terminal_combo.addItem(exe, key)
+        current = self.settings.terminal_app
+        idx = 0
+        for i, (key, _exe) in enumerate(terminals):
+            if key == current:
+                idx = i
+                break
+        self._terminal_combo.setCurrentIndex(idx)
+        self._terminal_combo.blockSignals(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -174,6 +207,7 @@ class DeziBeeSettingsWorkspace(QWidget):
             _tip(self, self.theme, f"无法创建 DeziBee 工作文件夹：{e}")
             return
         self.settings.dezibee_work_root = path
+        self.settings.terminal_app = str(self._terminal_combo.currentData() or "cmd")
         self.settings.save()
         self._path_edit.setText(str(path))
         self._update_stat()

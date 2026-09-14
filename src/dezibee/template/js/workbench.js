@@ -1,11 +1,14 @@
 /* ═══════════════════════════════════════════════════════════════════
  * DeziBee Prototype Workspace 引擎
+ * DeziBee Workbench Framework v2 — 框架文件由 DeziBee 维护，请勿修改
  * 职责（框架能力，业务无关）：
  *   1. 渲染导航树（分组/页面/状态），页面切换
  *   2. 无限画布：平移/缩放/原点/适应内容/聚焦卡片
+ *      缩放用 CSS zoom（内容按目标尺寸重排渲染，缩放后不发糊）
  *   3. 原型卡片：按 WORKBENCH_DATA.pages[].cards 渲染（iframe 沙箱承载真实 HTML）
+ *      可选 shell 字段：phone 手机壳 / tablet 平板壳 / browser 浏览器壳（w/h 为屏幕内容区）
  *   4. 卡片关系连线（SVG，来源/触发/条件 → 提示悬停）
- *   5. 双向关联（唯一 ID）：卡片点击 → PRD 定位高亮；PRD 引用 → 画布聚焦
+ *   5. 双向关联（唯一 ID）：选中卡片/切换页面 → PRD 定位高亮；PRD 引用 → 画布聚焦
  * 数据全部来自 index.html 的 WORKBENCH_DATA；AI 只改数据，不改本文件。
  * ═══════════════════════════════════════════════════════════════════ */
 'use strict';
@@ -80,7 +83,7 @@ function buildNavTree() {
   $('#navPageCount').textContent = D.pages.length + ' 页';
 }
 
-function switchPage(pageId) {
+function switchPage(pageId, opts = {}) {
   if (!cardIndexHasPage(pageId)) return;
   state.currentPageId = pageId;
   state.selectedCardId = null;
@@ -88,14 +91,44 @@ function switchPage(pageId) {
     n.classList.toggle('active', n.dataset.pageId === pageId);
   });
   renderPage();
+  // 页面 → PRD 联动：右栏自动跳到该页对应章节（focusCard 聚焦卡片时自带章节定位，跳过）
+  if (!opts.skipPrd) syncPrdToPage(pageId);
+}
+
+/* 页面 → PRD 章节映射：page.prdId 优先，否则取该页第一张带 prdId 的卡片 */
+function syncPrdToPage(pageId) {
+  const page = D.pages.find(p => p.id === pageId);
+  if (!page) return;
+  const prdId = page.prdId || (page.cards || []).map(c => c.prdId).find(Boolean);
+  if (prdId) openPrdSection(prdId);
 }
 
 function cardIndexHasPage(pageId) { return D.pages.some(p => p.id === pageId); }
 
 /* ═══════════════ 2. 画布：平移/缩放/聚焦 ═══════════════ */
 
+/* 缩放实现：#panner(transform: translate 平移) > #world(zoom 缩放)。
+   CSS zoom 让 iframe 内容按目标尺寸重新布局渲染（不同于 transform: scale 的
+   位图缩放），缩小/放大后文字与内容依然清晰。zoom 兼容写法见 applyTransform。 */
+function ensurePanner() {
+  const world = $('#world');
+  if (!world || (world.parentElement && world.parentElement.id === 'panner')) return;
+  const pan = document.createElement('div');
+  pan.id = 'panner';
+  world.parentNode.insertBefore(pan, world);
+  pan.appendChild(world);
+}
+
 function applyTransform() {
-  $('#world').style.transform = `translate(${state.tx}px, ${state.ty}px) scale(${state.scale})`;
+  const pan = $('#panner');
+  if (pan) pan.style.transform = `translate(${state.tx}px, ${state.ty}px)`;
+  const world = $('#world');
+  if ('zoom' in world.style) {
+    world.style.zoom = String(state.scale);
+  } else {
+    // 兜底（极旧内核）：退回 transform 缩放
+    world.style.transform = `scale(${state.scale})`;
+  }
   $('#zoomLabel').textContent = Math.round(state.scale * 100) + '%';
   drawLinks();
 }
@@ -116,14 +149,15 @@ function viewportCenter() {
 }
 
 function fitAll() {
-  // 适应当前页面全部卡片
+  // 适应当前页面全部卡片（含外壳装饰）
   const page = D.pages.find(p => p.id === state.currentPageId);
   const cards = page?.cards || [];
   if (!cards.length) { resetOrigin(); return; }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const c of cards) {
+    const o = cardOuterSize(c);
     minX = Math.min(minX, c.x); minY = Math.min(minY, c.y);
-    maxX = Math.max(maxX, c.x + (c.w || 360)); maxY = Math.max(maxY, c.y + (c.h || 560));
+    maxX = Math.max(maxX, c.x + o.w); maxY = Math.max(maxY, c.y + o.h);
   }
   const v = $('#viewport');
   const pad = 60;
@@ -138,14 +172,15 @@ function fitAll() {
 function resetOrigin() { state.scale = 1; state.tx = 0; state.ty = 0; applyTransform(); }
 
 function focusCard(cardId, opts = {}) {
-  // 聚焦卡片：切到所属页面（若需要）→ 居中 → 高亮闪烁
+  // 聚焦卡片：切到所属页面（若需要）→ 居中 → 高亮闪烁 → PRD 跳到对应章节
   const rec = cardIndex.get(cardId);
   if (!rec) return;
-  if (rec.page.id !== state.currentPageId) switchPage(rec.page.id);
+  if (rec.page.id !== state.currentPageId) switchPage(rec.page.id, { skipPrd: true });
   state.selectedCardId = cardId;
   const v = $('#viewport');
   const c = rec.card;
-  const w = (c.w || 360), h = (c.h || 560);
+  const o = cardOuterSize(c);
+  const w = o.w, h = o.h;
   state.scale = opts.scale || Math.min(1.2, Math.max(0.3,
     Math.min((v.clientWidth - 120) / w, (v.clientHeight - 120) / h)));
   state.tx = v.clientWidth / 2 - (c.x + w / 2) * state.scale;
@@ -156,6 +191,7 @@ function focusCard(cardId, opts = {}) {
   if (node) {
     node.classList.remove('flash'); void node.offsetWidth; node.classList.add('flash');
   }
+  openPrdForCard(cardId);
 }
 
 function markSelected() {
@@ -215,13 +251,57 @@ function bindViewport() {
 
 /* ═══════════════ 3. 原型卡片渲染 ═══════════════ */
 
+/* 设备外壳：系统组件，AI 只写 shell 字段；卡片 w/h 始终指屏幕内容区尺寸 */
+const SHELLS = {
+  phone:   { pad: 12, chromeH: 0 },
+  tablet:  { pad: 14, chromeH: 0 },
+  browser: { pad: 0,  chromeH: 34 },
+};
+
+/* 标题栏固定高度（与 CSS .card-head 保持一致），w/h 始终指屏幕内容区，
+   外壳与标题栏都画在屏幕区之外，不挤占原型空间（+2 为卡片自身 1px 边框的补偿） */
+const CARD_HEAD_H = 28;
+
+function cardShell(c) {
+  return c.shell && SHELLS[c.shell] ? c.shell : '';
+}
+
+/* 卡片外围尺寸（标题栏 + 外壳装饰 + 边框补偿），供画布包围盒/聚焦/连线计算 */
+function cardOuterSize(c) {
+  const shell = cardShell(c);
+  const conf = shell ? SHELLS[shell] : null;
+  const pad = conf ? conf.pad * 2 : 0;
+  return {
+    w: (c.w || 360) + pad + 2,
+    h: (c.h || 560) + CARD_HEAD_H + pad + (conf ? conf.chromeH : 0) + 2,
+  };
+}
+
+/* iframe 注入：隐藏原生滚动条（不占布局空间），并提供 3px 浮动滚动指示条——
+   滚动时浮现于内容之上，停止约 0.8 秒后自动淡出（移动端 overlay 风格） */
+const FRAME_EXTRAS =
+  '<style>::-webkit-scrollbar{width:0;height:0}html{scrollbar-width:none}</style>' +
+  '<script>(function(){var bar=null,timer=0;function refresh(){' +
+  'var de=document.documentElement,vh=de.clientHeight,sh=de.scrollHeight;' +
+  'var st=de.scrollTop||document.body.scrollTop||0;' +
+  'if(sh<=vh+1){if(bar)bar.style.opacity="0";return;}' +
+  'if(!bar){bar=document.createElement("div");' +
+  'bar.style.cssText="position:fixed;top:0;right:2px;width:3px;border-radius:2px;' +
+  'background:rgba(0,0,0,.22);z-index:2147483647;pointer-events:none;opacity:0;' +
+  'transition:opacity .3s";document.body.appendChild(bar);}' +
+  'var h=Math.max(28,vh*vh/sh),y=st/(sh-vh)*(vh-h);' +
+  'bar.style.top=y+"px";bar.style.height=h+"px";bar.style.opacity="1";' +
+  'clearTimeout(timer);timer=setTimeout(function(){bar.style.opacity="0"},800);}' +
+  'addEventListener("scroll",refresh);addEventListener("resize",refresh);' +
+  'addEventListener("load",function(){setTimeout(refresh,60)});})();<\/script>';
+
 function renderPage() {
   buildCardIndex();
   const world = $('#world');
   // 只清卡片，保留连线层 SVG（它在 world 内、随画布变换）
   world.querySelectorAll('.proto-card').forEach(n => n.remove());
   const page = D.pages.find(p => p.id === state.currentPageId);
-  $('#canvasPageName').textContent = page ? (page.name || page.id) : '';
+  $('#canvasPageName').textContent = page ? `画布详情 · ${page.name || page.id}` : '画布详情';
   const cards = page?.cards || [];
 
   if (!cards.length) {
@@ -237,8 +317,11 @@ function renderPage() {
     node.dataset.cardId = c.id;
     node.style.left = (c.x || 0) + 'px';
     node.style.top = (c.y || 0) + 'px';
-    node.style.width = (c.w || 360) + 'px';
-    node.style.height = (c.h || 560) + 'px';
+
+    const shell = cardShell(c);
+    const outer = cardOuterSize(c);
+    node.style.width = outer.w + 'px';
+    node.style.height = outer.h + 'px';
 
     const head = el('div', 'card-head');
     head.appendChild(el('span', 'card-name', c.name || c.id));
@@ -246,36 +329,50 @@ function renderPage() {
     if (c.status) head.appendChild(el('span', 'card-status', c.status));
     node.appendChild(head);
 
-    const body = el('div', 'card-body');
+    let body;
+    if (shell) {
+      const shellEl = el('div', 'shell shell-' + shell);
+      if (shell === 'browser') {
+        const dots = document.createElement('span');
+        dots.className = 'dots';
+        dots.innerHTML = '<i class="d-r"></i><i class="d-y"></i><i class="d-g"></i>';
+        shellEl.appendChild(dots);
+      }
+      body = el('div', 'card-body screen');
+      shellEl.appendChild(body);
+      node.appendChild(shellEl);
+    } else {
+      body = el('div', 'card-body');
+      node.appendChild(body);
+    }
+
     // 真实 HTML 用 iframe 沙箱承载：样式隔离 + 交互真实可用（禁止图片模拟页面）
     const frame = document.createElement('iframe');
     frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
     body.appendChild(frame);
-    node.appendChild(body);
-    world.appendChild(node);
 
-    frame.srcdoc =
-      '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
-      '<style>html,body{margin:0;padding:0;overflow-x:hidden}</style>' +
-      '</head><body>' + (c.html || '') + '</body></html>';
-
-    // 卡片交互：单击选中；点击选中后再次点击 → PRD 联动；头部拖拽移动
+    // 卡片交互：单击选中即联动 PRD；头部拖拽移动
     node.addEventListener('mousedown', (e) => {
       e.stopPropagation();
-      if (state.selectedCardId === c.id && !e.target.closest('.card-head')) {
-        openPrdForCard(c.id);   // 已选中 → 双向联动到 PRD
-        return;
-      }
       state.selectedCardId = c.id;
       markSelected();
+      openPrdForCard(c.id);   // 选中即联动：PRD 跳到对应章节（无关联章节时为空操作）
       if (e.target.closest('.card-head')) {
-        const rect = node.getBoundingClientRect();
         state.dragging = {
           cardId: c.id, sx: e.clientX, sy: e.clientY,
-          cx: c.x, cy: c.y, rx: rect.left, ry: rect.top,
+          cx: c.x, cy: c.y,
         };
       }
     });
+
+    // srcdoc 放最后写入：DOM 结构就绪后再加载，避免壳样式抖动
+    frame.srcdoc =
+      '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+      '<style>html,body{margin:0;padding:0;overflow-x:hidden}</style>' +
+      FRAME_EXTRAS +
+      '</head><body>' + (c.html || '') + '</body></html>';
+
+    world.appendChild(node);
   }
   drawLinks();
 }
@@ -286,9 +383,10 @@ function cardAnchor(cardId) {
   const rec = cardIndex.get(cardId);
   if (!rec) return null;
   const c = rec.card;
+  const o = cardOuterSize(c);
   return {
-    cx: c.x + (c.w || 360) / 2,
-    cy: c.y + (c.h || 560) / 2,
+    cx: c.x + o.w / 2,
+    cy: c.y + o.h / 2,
     onCurrentPage: rec.page.id === state.currentPageId,
     node: $(`#world [data-card-id="${CSS.escape(cardId)}"]`),
   };
@@ -403,6 +501,7 @@ function openPrdForCard(cardId) {
 }
 
 function openPrdSection(secId, opts = {}) {
+  if (state.prdEditing) return;   // 编辑 PRD 时不抢滚动位置
   const node = document.getElementById('sec-' + CSS.escape(secId));
   if (!node) return;
   node.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -687,12 +786,18 @@ async function exportSingleFile() {
 /* ═══════════════ 6. 启动 ═══════════════ */
 
 function init() {
-  $('#navProjectTitle').textContent = D.project?.title || '原型导航';
+  ensurePanner();
+  // 三栏固定称呼：画布导航 | 画布详情 | 产品需求说明书（与 GUIDE 术语一致，覆盖旧模板文案）
+  $('#navProjectTitle').textContent = '画布导航';
+  if (D.project?.title) document.title = D.project.title;
+  const prdTitle = document.querySelector('.prd-title');
+  if (prdTitle) prdTitle.textContent = '产品需求说明书';
   buildNavTree();
   renderPrd();
   renderPage();
   bindViewport();
   bindPrdResizer();
+  syncPrdToPage(state.currentPageId);   // 首屏 PRD 跟随初始页面
   // 首屏自动适应内容
   requestAnimationFrame(() => fitAll());
 

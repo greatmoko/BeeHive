@@ -22,7 +22,7 @@ from tokbee.ui.combo_style import (
 )
 from tokbee.core.provider_store import ProviderStore
 
-from wokbee.core.settings import WokBeeSettings
+from wokbee.core.settings import WokBeeSettings, detect_terminal_apps
 from wokbee.ui.dialogs import (
     apply_flags_to_checks,
     build_approval_checkboxes,
@@ -134,6 +134,20 @@ class WokBeeSettingsWorkspace(QWidget):
         ext_note.setWordWrap(True)
         ext_note.setStyleSheet(hint_label_qss(c))
         bl.addWidget(ext_note)
+
+        bl.addWidget(self._section_label("终端运行软件"))
+        self._terminal_combo = QComboBox()
+        apply_combo_popup_style(
+            self._terminal_combo, c, rounded=True,
+            fixed_width=300, fixed_height=40,
+        )
+        bl.addWidget(self._terminal_combo, alignment=Qt.AlignmentFlag.AlignLeft)
+        terminal_hint = QLabel(
+            "Agent 运行命令行时使用的终端；未选择时默认使用 cmd。"
+        )
+        terminal_hint.setWordWrap(True)
+        terminal_hint.setStyleSheet(hint_label_qss(c))
+        bl.addWidget(terminal_hint)
 
         bl.addWidget(self._section_label("默认审核策略（勾选 = 免审）"))
         approval_box, self._approval_checks = build_approval_checkboxes(self.theme)
@@ -350,6 +364,7 @@ class WokBeeSettingsWorkspace(QWidget):
         self._enable_search.setChecked(self.settings.enable_deepseek_search)
         self._reload_ext_dirs()
         self._reload_models()
+        self._reload_terminals()
 
     def _reload_ext_dirs(self):
         """刷新「已授权附加目录」列表。"""
@@ -436,6 +451,22 @@ class WokBeeSettingsWorkspace(QWidget):
                 select = i
         self._model_combo.setCurrentIndex(select)
 
+    def _reload_terminals(self):
+        """填充终端下拉框：系统内可用命令行工具 + 未选中时默认 cmd。"""
+        self._terminal_combo.blockSignals(True)
+        self._terminal_combo.clear()
+        terminals = detect_terminal_apps()
+        for key, exe in terminals:
+            self._terminal_combo.addItem(exe, key)
+        current = self.settings.terminal_app
+        idx = 0
+        for i, (key, _exe) in enumerate(terminals):
+            if key == current:
+                idx = i
+                break
+        self._terminal_combo.setCurrentIndex(idx)
+        self._terminal_combo.blockSignals(False)
+
     def showEvent(self, event):
         super().showEvent(event)
         self._reload_models()
@@ -462,5 +493,6 @@ class WokBeeSettingsWorkspace(QWidget):
         pair = self._model_combo.currentData() or ("", "")
         self.settings.default_provider = pair[0]
         self.settings.default_model_id = pair[1]
+        self.settings.terminal_app = str(self._terminal_combo.currentData() or "cmd")
         self.settings.save()
         _tip(self, self.theme, "WokBee 设置已保存。")

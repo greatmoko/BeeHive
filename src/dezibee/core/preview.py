@@ -203,10 +203,18 @@ def _find_free_port(start: int, tries: int = 40) -> int:
 
 
 class _Handler(SimpleHTTPRequestHandler):
-    """安静版静态处理器：不往 stdout 打日志。"""
+    """安静版静态处理器：不往 stdout 打日志。
+
+    统一 no-cache：css/js 等框架文件随应用升级会覆盖，浏览器每次需回源校验
+    （未变更回 304），避免升级后仍用旧缓存的框架文件。
+    """
 
     def log_message(self, format, *args):  # noqa: A002
         return
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
 
 
 class _PreviewServer:

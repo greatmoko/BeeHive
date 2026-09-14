@@ -36,6 +36,7 @@ class DeziBeeWorker(QThread):
 
     event_emitted = Signal(str, str, object)  # kind, content, meta
     approval_needed = Signal(object)
+    ask_user_needed = Signal(object)  # dict payload（澄清意图弹窗）
     finished_result = Signal(object)
     model_error = Signal(str)
 
@@ -95,6 +96,7 @@ class DeziBeeWorker(QThread):
             self._runner = runner
             runner.on_event = self._on_event
             runner.on_approval_needed = self._on_approval
+            runner.on_ask_user_needed = self._on_ask_user
             request = RunRequest(
                 project=project,
                 project_root=project_root,
@@ -132,6 +134,15 @@ class DeziBeeWorker(QThread):
     def _on_approval(self, pending: list):
         self.approval_needed.emit(pending)
 
+    def _on_ask_user(self, payload: dict):
+        self.ask_user_needed.emit(payload)
+
+    def resolve_ask_user(self, answers: dict):
+        """UI 弹窗收集答案后回传后台 runner，唤醒等待中的澄清。"""
+        runner = self._runner
+        if runner is not None:
+            runner.resolve_ask_user(answers)
+
     def cancel(self):
         """请求暂停：中断进行中的一轮对话（含正在执行的命令/等待审批）。"""
         self._cancel_requested = True
@@ -168,6 +179,36 @@ def summarize_context(
     return summary
 
 
+def _shell_directive(req: Requirement) -> str:
+    """设备外壳/实际尺寸指令：默认壳取需求设置，AI 可按卡片覆盖。"""
+    shell = (getattr(req, "device_shell", "") or "").strip().lower()
+    known = {"phone", "tablet", "browser"}
+    if shell not in known:
+        # 未设置时按需求描述推断；推断不了就用手机（最常见）
+        desc = (req.description or "") + (req.title or "")
+        if any(k in desc for k in ("桌面", "网页", "web", "后台", "管理", "Web", "PC", "pc")):
+            shell = "browser"
+        elif any(k in desc for k in ("平板", "iPad", "ipad")):
+            shell = "tablet"
+        else:
+            shell = "phone"
+    sizes = {
+        "phone": '手机竖屏页面 w:375, h:812 + shell:"phone"',
+        "tablet": '平板竖屏页面 w:820, h:1180 + shell:"tablet"',
+        "browser": '桌面网页页面 w:1440, h:900 + shell:"browser"',
+    }
+    return (
+        "【实际尺寸 + 设备外壳】原型一律按设备真实 CSS 像素 1:1 生成，禁止缩小尺寸凑画布：\n"
+        f"- 本需求的默认外壳是 {shell}：页面级卡片默认用 {sizes[shell]}；\n"
+        "- 其它平台卡片按需覆盖：手机 375×812/phone、平板 820×1180/tablet、桌面 1440×900/browser；\n"
+        "- 同平台统一用同一种 shell；弹窗/局部状态尺寸跟随所属平台；\n"
+        "- 不要用 HTML/CSS 自画外壳或状态栏（圆角边框/刘海/浏览器顶栏由框架按 shell 自动绘制）；\n"
+        "- 手机/平板页面顶部留安全区：手机约 54px、平板约 40px 的 padding-top 避开刘海/边框；\n"
+        "- 页面滚动条由框架处理（隐藏原生滚动条 + 自动隐藏的浮动指示条），不要自绘滚动条；\n"
+        "- 字号用真实逻辑像素（手机正文 14-16px、桌面正文 14px）。"
+    )
+
+
 def build_design_prompt(req: Requirement, conversation: Conversation | None) -> str:
     """组装 DeziBee Agent 首条系统提示词（目录规则与产出结构）。"""
     parts: list[str] = []
@@ -191,7 +232,8 @@ def build_design_prompt(req: Requirement, conversation: Conversation | None) -> 
         "——一个需要开发明确理解的独立视觉/交互状态就是一张卡片；内容必须真实 HTML/CSS/JS，"
         "禁止图片模拟；\n"
         "3. links：卡片间交互关系（from/to/trigger/condition/note），画布自动画连线；\n"
-        "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动）。"
+        "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动；"
+        "页面也可写 page.prdId，切换页面时右栏自动定位到该页章节）。"
         "注意：用户可在「预览」页右栏点「✎ 编辑」直接手改 PRD（保存写回同一份 index.html），"
         "因此每次改 PRD 前务必重新 read_file demo/index.html，不要用旧内容覆盖用户的手改。\n"
         "动手前先读 demo/GUIDE.md（数据模型 + 创作规范 + 自查清单）。\n"
@@ -210,6 +252,18 @@ def build_design_prompt(req: Requirement, conversation: Conversation | None) -> 
         "并提示可点「预览」查看；需要部署时直接复制 demo/ 文件夹。\n"
         "5. 后续用户反馈：先改原型，再同步更新对应 PRD 章节与关联。\n"
         "注意：不要因为指令看起来简单就只建一个页面——需求涉及多个页面/状态时必须完整拆解。"
+    )
+    parts.append(_shell_directive(req))
+    parts.append(
+        "【三栏名称（务必分清用户要改的对象）】demo 工作台三栏：\n"
+        "- 左栏「画布导航」= pages[] 页面树：增删页面/改名/分组/排序都是改 pages；"
+        "导航树由 pages 自动渲染，没有独立的导航数据；\n"
+        "- 中栏「画布详情」= 无限画布：展示原型页面与原型卡片；改卡片外观/内容是改 "
+        "pages[].cards[] 的 card.html，改尺寸/壳/位置是 w/h/shell/x/y；\n"
+        "- 右栏「产品需求说明书」（用户也叫 PRD/需求说明/产品文档）= prd.sections[]："
+        "改章节标题/层级/内容都是改 prd.sections；\n"
+        "用户提到这些称呼时按上述对照确定唯一要改的数据对象；页面改动记得同步其 PRD 章节"
+        "（prdId 双向关联）；实在无法确定改哪个对象时用 ask_user 澄清。"
     )
     if conversation and conversation.summary:
         parts.append(

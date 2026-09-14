@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from tokbee.core.config import Config
@@ -44,6 +45,8 @@ DEFAULTS = {
     "skills_dirs": [],
     # DeziBee 工作文件夹：每个需求在其下创建 {需求ID}/ 子目录（Demo/PRD/互动记录）。
     "dezibee_work_root": str(Path.home() / "WokBee" / "DeziBee"),
+    # 终端运行软件默认配置：空 = 未选择，运行时按 cmd 处理。
+    "terminal_app": "",
 }
 
 
@@ -55,6 +58,29 @@ def _default_dezibee_work_root_str() -> str:
 
 def _default_workspace_str() -> str:
     return str(DEFAULT_WORKSPACE)
+
+
+# 系统内常见命令行工具（key → 可执行文件）：按探测顺序展示。
+TERMINAL_APPS: list[tuple[str, str]] = [
+    ("cmd", "cmd"),
+    ("powershell", "powershell"),
+    ("pwsh", "pwsh"),
+    ("wt", "wt"),
+]
+
+_DEFAULT_TERMINAL = "cmd"
+
+
+def detect_terminal_apps() -> list[tuple[str, str]]:
+    """探测系统 PATH 中可用的命令行工具，返回 [(key, 显示名)]。
+
+    cmd 是 Windows 系统组件，始终可用；其余按 shutil.which 探测。
+    """
+    found: list[tuple[str, str]] = []
+    for key, exe in TERMINAL_APPS:
+        if key == "cmd" or shutil.which(exe):
+            found.append((key, exe))
+    return found
 
 
 class WokBeeSettings:
@@ -316,6 +342,16 @@ class WokBeeSettings:
                 "slug": str(item.get("slug") or "") if isinstance(item, dict) else "",
             })
         return out
+
+    @property
+    def terminal_app(self) -> str:
+        """终端运行软件；未选择（空）时回退 cmd。"""
+        raw = str(self.get("terminal_app") or "").strip().lower()
+        return raw or _DEFAULT_TERMINAL
+
+    @terminal_app.setter
+    def terminal_app(self, value: str) -> None:
+        self.set("terminal_app", str(value or "").strip().lower())
 
     @property
     def ai_interval_ms(self) -> int:

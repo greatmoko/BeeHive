@@ -9,17 +9,17 @@
 <body>
 <!-- ═══════════════════════════════════════════════════════════════
      DeziBee 原型设计工作台（Prototype Workspace）
-     三栏固定骨架：导航栏 | 原型画布 | PRD
+     三栏固定骨架：画布导航 | 画布详情（原型页面 / 原型卡片）| 产品需求说明书（PRD）
      页面/卡片/PRD 内容全部由 DeziBee(AI) 在 WORKBENCH_DATA 中定义，
      框架只负责承载与联动。修改数据请同时阅读 GUIDE.md。
      注：通过 DeziBee「预览」打开时，右栏 PRD 可点「✎ 编辑」直接手改并保存
      （写回本文件的 WORKBENCH_DATA.prd，与 AI 编辑同一份数据）。
      ═══════════════════════════════════════════════════════════════ -->
 <div id="app">
-  <!-- ── 左栏：导航 ── -->
+  <!-- ── 左栏：画布导航（= pages 页面树，由框架自动渲染） ── -->
   <aside id="nav">
     <div class="nav-head">
-      <span class="nav-title" id="navProjectTitle">原型导航</span>
+      <span class="nav-title" id="navProjectTitle">画布导航</span>
       <span class="nav-count" id="navPageCount"></span>
     </div>
     <div class="nav-tree" id="navTree"><!-- JS 渲染页面树 --></div>
@@ -29,7 +29,7 @@
     </div>
   </aside>
 
-  <!-- ── 中栏：原型画布 ── -->
+  <!-- ── 中栏：画布详情（原型页面 / 原型卡片展示区） ── -->
   <main id="canvasWrap">
     <div class="canvas-toolbar">
       <span id="canvasPageName" class="canvas-page-name"></span>
@@ -49,14 +49,14 @@
   </main>
 
   <!-- 拖拽调整 PRD 宽度（双击复位） -->
-  <div id="prdResizer" class="prd-resizer" title="左右拖动调整「产品说明」宽度；双击复位"></div>
+  <div id="prdResizer" class="prd-resizer" title="左右拖动调整「产品需求说明书」宽度；双击复位"></div>
 
-  <!-- ── 右栏：PRD ── -->
+  <!-- ── 右栏：产品需求说明书（PRD / 需求说明 / 产品文档） ── -->
   <aside id="prd">
     <div class="prd-head">
-      <span class="prd-title">产品说明</span>
+      <span class="prd-title">产品需求说明书</span>
       <span class="prd-actions">
-        <button id="prdEditBtn" title="直接编辑产品说明；保存会写回 demo/index.html">✎ 编辑</button>
+        <button id="prdEditBtn" title="直接编辑产品需求说明书；保存会写回 demo/index.html">✎ 编辑</button>
         <button id="prdSaveBtn" class="hidden" title="保存到 demo/index.html（Ctrl+S）">✔ 保存</button>
         <button id="prdCancelBtn" class="hidden" title="放弃本次修改">✕ 取消</button>
         <button id="prdTocBtn" title="展开/收起目录">☰</button>
@@ -94,7 +94,8 @@ const WORKBENCH_DATA = window.WORKBENCH_DATA = {
           name: "登录页",
           type: "page",                 // 类型由 AI 自由定义：page/dialog/state/flow…
           x: 120, y: 160,               // 画布坐标
-          w: 360, h: 560,               // AI 自由决定尺寸
+          w: 375, h: 812,               // 屏幕内容区尺寸（设备真实 CSS 像素）
+          shell: "phone",               // 系统外壳：phone | tablet | browser（省略=裸卡片）
           status: "draft",              // draft | confirmed | deprecated（自由扩展）
           prdId: "sec-login",           // ↔ PRD 章节锚点（双向关联）
           html: "<style>.demo{font-family:system-ui;padding:24px} .demo h3{margin:0 0 12px}</style><div class='demo'><h3>示例原型</h3><p>这是一个原型卡片。替换为真实 HTML/CSS/JS。</p><button onclick=\"alert('交互可用')\">点击交互</button></div>"

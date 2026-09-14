@@ -20,6 +20,20 @@ _RESOURCES = Path(__file__).parent.parent / "resources"
 
 # ────────────────────────── 一级导航栏 ──────────────────────────
 
+class _ClickableLabel(QLabel):
+    """可点击的文字标签，与上方图标按钮触发同一回调。"""
+
+    def __init__(self, text: str, on_click, parent=None):
+        super().__init__(text, parent)
+        self._on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+        super().mousePressEvent(event)
+
+
 class _PrimaryNav(QFrame):
     """最左侧一级导航栏 — 数据驱动，循环构建。"""
 
@@ -120,7 +134,7 @@ class _PrimaryNav(QFrame):
 
         btn.clicked.connect(lambda _, nid=nav_id: self._on_click(nid))
 
-        lbl = QLabel(label_text)
+        lbl = _ClickableLabel(label_text, lambda nid=nav_id: self._on_click(nid))
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setStyleSheet("background: transparent; border: none;")
 

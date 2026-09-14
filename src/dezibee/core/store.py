@@ -27,10 +27,19 @@ _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "template"
 # 复制进 demo/ 的模板文件（相对模板根）
 _TEMPLATE_FILES = ("index.html", "GUIDE.md")
 _TEMPLATE_SUBDIRS = ("css", "js")
+# 框架托管文件（版本随应用升级；不含用户数据，可安全覆盖）。
+# index.html 含用户 WORKBENCH_DATA，绝不覆盖——升级只发生在用户首次创建时。
+# 旧需求缺壳样式/缩放改造时，靠覆盖这三个文件补齐（框架 UI 由 JS 运行时注入，无需改 index.html）。
+_TEMPLATE_FRAMEWORK_FILES = ("GUIDE.md", "css/workbench.css", "js/workbench.js")
 
 
 def _seed_demo_from_template(demo_dir: Path) -> None:
-    """把原型工作台模板复制进 demo/（缺失的文件才复制，不覆盖已有内容）。"""
+    """把原型工作台模板复制进 demo/。
+
+    - index.html 等用户数据文件：缺失才复制，绝不覆盖；
+    - 框架托管文件（GUIDE.md / css / js）：随应用升级覆盖，保证存量需求
+      也能拿到新版外壳/缩放框架（新壳 UI 由 JS 运行时注入，不依赖 index.html 变更）。
+    """
     demo_dir.mkdir(parents=True, exist_ok=True)
     for rel in _TEMPLATE_FILES:
         src = _TEMPLATE_DIR / rel
@@ -49,6 +58,18 @@ def _seed_demo_from_template(demo_dir: Path) -> None:
             dst = dst_root / src.name
             if not dst.exists():
                 shutil.copy2(src, dst)
+    # 框架文件升级：内容有变化才写，避免每次保存都动文件 mtime
+    for rel in _TEMPLATE_FRAMEWORK_FILES:
+        src = _TEMPLATE_DIR / rel
+        dst = demo_dir / rel
+        if not src.exists():
+            continue
+        new_text = src.read_text(encoding="utf-8")
+        try:
+            if not dst.exists() or dst.read_text(encoding="utf-8") != new_text:
+                dst.write_text(new_text, encoding="utf-8")
+        except OSError:
+            pass
 
 _lock = threading.RLock()
 

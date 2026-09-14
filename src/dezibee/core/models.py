@@ -133,6 +133,8 @@ class Requirement:
     model_id: str = ""
     provider_name: str = ""  # 展示用缓存
     model_label: str = ""  # 展示用缓存
+    # 默认设备外壳（卡片 shell 的缺省值）：空/phone/tablet/browser
+    device_shell: str = ""
     # 交互记录
     conversations: list[Conversation] = field(default_factory=list)
     # 设计上下文摘要（会话间继承）
@@ -173,6 +175,7 @@ class Requirement:
             model_id=str(data.get("model_id") or ""),
             provider_name=str(data.get("provider_name") or ""),
             model_label=str(data.get("model_label") or ""),
+            device_shell=str(data.get("device_shell") or ""),
             context_summary=str(data.get("context_summary") or ""),
             active_conv_id=str(data.get("active_conv_id") or ""),
         )

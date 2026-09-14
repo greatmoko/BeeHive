@@ -48,6 +48,7 @@ class InputBar(QFrame):
     summarize_clicked = Signal()
     new_conversation_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
+    shell_changed = Signal(str)  # device_shell（空=自动）
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -152,6 +153,37 @@ class InputBar(QFrame):
             self._preview_btn,
             self._export_btn,
         ]
+
+        # 设备外壳下拉：新页面/页面级卡片的默认壳（AI 可按卡片覆盖）
+        self._shell_combo = QComboBox()
+        self._shell_combo.setFixedHeight(34)
+        # 宽度恰好展示两个汉字：字宽 + 左右内边距8 + 箭头16 + 边框2
+        self._shell_combo.setFixedWidth(
+            self._shell_combo.fontMetrics().horizontalAdvance("自动") + 28
+        )
+        self._shell_combo.setToolTip(
+            "新页面默认设备外壳（手机/web/平板）；AI 仍可按卡片覆盖。下次发送时生效。"
+        )
+        self._shell_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {c["input_bg"]}; color: {c["text"]};
+                border: 1px solid {c["input_border"]}; border-radius: 6px;
+                padding: 0 4px; font-size: 12px;
+            }}
+            QComboBox:hover {{ border: 1px solid {c["input_focus_border"]}; }}
+            QComboBox:disabled {{ color: {c["text_hint"]}; }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+        """)
+        apply_combo_popup_style(self._shell_combo, c)
+        for label, key in (
+            ("自动", ""),
+            ("手机", "phone"),
+            ("web", "browser"),
+            ("平板", "tablet"),
+        ):
+            self._shell_combo.addItem(label, key)
+        self._shell_combo.currentIndexChanged.connect(self._on_shell_selected)
+        row.addWidget(self._shell_combo)
 
         row.addStretch()
 
@@ -373,6 +405,7 @@ class InputBar(QFrame):
         for btn in self._action_btns:
             btn.setEnabled(not running)
         self._model_combo.setEnabled(not running)
+        self._shell_combo.setEnabled(not running)
         self._status.setText("Agent 处理中…" if running else "")
 
     def focus_input(self):
@@ -395,6 +428,21 @@ class InputBar(QFrame):
     def _on_model_selected(self):
         pair = self._model_combo.currentData() or ("", "")
         self.model_changed.emit(str(pair[0]), str(pair[1]))
+
+    def _on_shell_selected(self):
+        self.shell_changed.emit(str(self._shell_combo.currentData() or ""))
+
+    def set_device_shell(self, shell: str):
+        """回显需求绑定的默认外壳（不动信号，避免回写）。"""
+        key = (shell or "").strip().lower()
+        idx = 0
+        for i in range(self._shell_combo.count()):
+            if str(self._shell_combo.itemData(i)) == key:
+                idx = i
+                break
+        self._shell_combo.blockSignals(True)
+        self._shell_combo.setCurrentIndex(idx)
+        self._shell_combo.blockSignals(False)
 
 
 class DeziBeeWorkspace(QWidget):
@@ -435,12 +483,15 @@ class DeziBeeWorkspace(QWidget):
         if req is None:
             self.chat_log.set_conversation(None)
             self.input_bar.reload_models()
+            self.input_bar.set_device_shell("")
             self.input_bar.set_uploads_root(None)
             return
         conv = req.active_conversation()
         self.chat_log.set_conversation(conv)
         # 模型下拉回显需求绑定模型
         self.input_bar.reload_models((req.provider, req.model_id))
+        # 外壳下拉回显需求默认外壳
+        self.input_bar.set_device_shell(getattr(req, "device_shell", "") or "")
         # 粘贴的附件落到需求目录 uploads/
         self.input_bar.set_uploads_root(req.root / "uploads")
 
