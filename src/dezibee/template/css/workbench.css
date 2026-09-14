@@ -221,6 +221,20 @@ body {
   justify-content: space-between; padding: 0 12px;
   border-bottom: 1px solid var(--border);
 }
+.prd-toc-toggle {
+  width: 34px; height: 28px; padding: 0 !important;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 16px !important; line-height: 1;
+}
+.prd-toc-toggle.is-open {
+  background: #6b7280 !important; color: #fff !important;
+  border-color: #6b7280 !important;
+}
+.prd-toc-toggle.is-closed {
+  background: #fff !important; color: #111827 !important;
+}
+.prd-toc-toggle.is-open:hover { background: #4b5563 !important; color: #fff !important; }
+.prd-toc-toggle.is-closed:hover { background: #fff !important; color: #111827 !important; border-color: var(--accent) !important; }
 .prd-title { font-size: 13px; font-weight: 700; }
 .prd-toc {
   max-height: 32vh; overflow: auto; padding: 8px 0;

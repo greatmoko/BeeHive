@@ -130,14 +130,51 @@ def _sanitize_name(name: str) -> str:
     return n or "attachment"
 
 
+def _open_attachment(item: dict) -> None:
+    """用 Windows 默认程序打开可预览附件；纯粘贴内容先保存到临时文件。"""
+    import os
+    import tempfile
+
+    path = item.get("path")
+    if path:
+        path = Path(str(path))
+    else:
+        data = item.get("data")
+        if not data:
+            return
+        name = _sanitize_name(str(item.get("display_name") or "attachment"))
+        suffix = Path(name).suffix.lower()
+        if not suffix:
+            suffix = ".png" if item.get("kind") == "image" else ".txt"
+        path = Path(tempfile.gettempdir()) / f"wokbee_attachment_{time.time_ns()}{suffix}"
+        try:
+            path.write_bytes(data)
+        except OSError:
+            return
+
+    supported = _IMAGE_EXTS | {".pdf", ".txt", ".md"}
+    if path.suffix.lower() not in supported or not path.exists():
+        return
+    try:
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        # 非 Windows 环境仅作为开发/测试兜底；Windows 始终走系统文件关联。
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
 class _AttachmentChip(QFrame):
-    """输入框上方的附件 chip：图片显示缩略图，文件显示图标+文件名。"""
+    """输入框上方的附件 chip：点击主体打开，图片显示缩略图，文件显示图标+文件名。"""
 
     remove_clicked = Signal(object)
 
     def __init__(self, item: dict, theme: Theme, parent=None):
         super().__init__(parent)
         self.item = item
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("点击打开附件")
         c = theme.colors
         self.setStyleSheet(f"""
             _AttachmentChip {{
@@ -171,6 +208,7 @@ class _AttachmentChip(QFrame):
                 thumb.setText("🖼")
                 thumb.setFixedSize(26, 26)
             thumb.setStyleSheet("background: transparent; border: none;")
+            thumb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             lay.addWidget(thumb)
             elided = name if len(name) <= 18 else name[:8] + "…" + name[-6:]
             name_label = QLabel(elided)
@@ -178,6 +216,7 @@ class _AttachmentChip(QFrame):
             name_label.setStyleSheet(
                 f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
             )
+            name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             lay.addWidget(name_label)
         else:
             try:
@@ -187,6 +226,7 @@ class _AttachmentChip(QFrame):
             icon_label = QLabel()
             icon_label.setPixmap(icon.pixmap(18, 18))
             icon_label.setFixedSize(18, 18)
+            icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             lay.addWidget(icon_label)
             elided = name if len(name) <= 24 else name[:12] + "…" + name[-8:]
             name_label = QLabel(elided)
@@ -194,6 +234,7 @@ class _AttachmentChip(QFrame):
             name_label.setStyleSheet(
                 f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
             )
+            name_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             lay.addWidget(name_label)
 
         rm = QPushButton("×")
@@ -209,6 +250,11 @@ class _AttachmentChip(QFrame):
         """)
         rm.clicked.connect(lambda: self.remove_clicked.emit(self.item))
         lay.addWidget(rm)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            _open_attachment(self.item)
+        super().mousePressEvent(event)
 
 
 class _ActionBar(QFrame):

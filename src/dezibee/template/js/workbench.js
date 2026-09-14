@@ -808,7 +808,16 @@ function init() {
   $('#focusBtn').addEventListener('click', () => {
     if (state.selectedCardId) focusCard(state.selectedCardId);
   });
-  $('#prdTocBtn').addEventListener('click', () => $('#prdToc').classList.toggle('hidden'));
+  $('#prdTocBtn').addEventListener('click', () => {
+    const toc = $('#prdToc');
+    const btn = $('#prdTocBtn');
+    const open = toc.classList.toggle('hidden') === false;
+    btn.classList.toggle('is-open', open);
+    btn.classList.toggle('is-closed', !open);
+    btn.setAttribute('aria-expanded', String(open));
+    btn.setAttribute('aria-label', open ? '收起目录' : '展开目录');
+    btn.title = open ? '收起目录' : '展开目录';
+  });
 
   // PRD 直接编辑 + 单文件导出（仅本机预览服务器下提供；静态产物隐藏入口）
   if (isLocalServer()) {
