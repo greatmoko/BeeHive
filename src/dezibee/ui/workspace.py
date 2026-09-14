@@ -130,14 +130,6 @@ class InputBar(QFrame):
         self._new_conv_btn.clicked.connect(self.new_conversation_clicked.emit)
         row.addWidget(self._new_conv_btn)
 
-        self._preview_btn = QPushButton("🌐")
-        self._preview_btn.setToolTip("预览")
-        self._preview_btn.setFixedSize(34, 34)
-        self._preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._preview_btn.setStyleSheet(self._icon_btn_style)
-        self._preview_btn.clicked.connect(self.preview_clicked.emit)
-        row.addWidget(self._preview_btn)
-
         self._export_btn = QPushButton("📦")
         self._export_btn.setToolTip("导出原型")
         self._export_btn.setFixedSize(34, 34)
@@ -150,7 +142,6 @@ class InputBar(QFrame):
         self._action_btns = [
             self._summarize_btn,
             self._new_conv_btn,
-            self._preview_btn,
             self._export_btn,
         ]
 
@@ -219,6 +210,22 @@ class InputBar(QFrame):
         self._model_combo.currentIndexChanged.connect(self._on_model_selected)
         row.addWidget(self._model_combo)
         self.model_combo = self._model_combo  # 供外部 reload_models / 回显需求模型
+
+        # 预览按钮：与发送按钮同款尺寸，淡黄底黑字
+        self._preview_btn = QPushButton("预览")
+        self._preview_btn.setFixedSize(72, 34)
+        self._preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._preview_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: #fff3bf; color: #1a1a1a;
+                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: #ffe98a; }}
+            QPushButton:pressed {{ background: #fff3bf; }}
+            QPushButton:disabled {{ background: {c['btn_bg']}; color: {c['text_hint']}; }}
+        """)
+        self._preview_btn.clicked.connect(self.preview_clicked.emit)
+        row.addWidget(self._preview_btn)
 
         # 发送/暂停一体按钮（WokBee _EqButton）：运行中播放均衡器动效，再点即暂停
         self._send_btn = _EqButton(
