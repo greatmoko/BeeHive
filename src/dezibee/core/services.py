@@ -303,3 +303,19 @@ def model_options() -> list[tuple[str, tuple[str, str]]]:
         (f"{m.provider_name} / {m.model_id}", (m.provider_id, m.model_id))
         for m in models
     ]
+
+
+def current_model_label(pair: tuple[str, str]) -> str:
+    """当前模型展示名：（默认模型）或「厂商 / model_id」；未知组合回退原始 id。"""
+    provider_id, model_id = (str(p) for p in pair)
+    if not model_id:
+        return "（默认模型）"
+    try:
+        models = ProviderStore().list_selectable_models()
+    except Exception:
+        logger.exception("读取当前模型失败")
+        return model_id
+    for m in models:
+        if m.provider_id == provider_id and m.model_id == model_id:
+            return f"{m.provider_name} / {m.model_id}"
+    return model_id

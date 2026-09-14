@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QEvent, QFileInfo, QIODevice, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QFileInfo, QIODevice, QPoint, Qt, Signal
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -30,7 +31,7 @@ from tokbee.ui.styles.theme import Theme
 from wokbee.ui.action_bar import _EqButton, _AttachmentChip, _is_image_file, _sanitize_name
 
 from dezibee.core.models import Requirement
-from dezibee.core.services import model_options
+from dezibee.core.services import current_model_label, model_options
 from dezibee.ui.info_panel import ReqInfoPanel
 from dezibee.ui.web_chat import DeziBeeChatLog
 
@@ -184,17 +185,11 @@ class InputBar(QFrame):
         )
         row.addWidget(self._status)
 
-        model_lbl = QLabel("AI模型")
-        model_lbl.setStyleSheet(
-            f"font-size: 12px; color: {c['text_secondary']}; background: transparent;"
-        )
-        row.addWidget(model_lbl)
-
-        # 模型下拉：与 WokBee 操作栏同款样式（内联 QSS + popup 委托）
+        # 模型下拉：常显「切换模型」，悬停浮层显示正在使用的模型名；
+        # 弹出列表用 ✓ 标记当前模型（含「（默认模型）」兜底项）
         self._model_combo = QComboBox()
         self._model_combo.setFixedHeight(34)
-        self._model_combo.setMinimumWidth(200)
-        self._model_combo.setMaximumWidth(320)
+        self._model_combo.setFixedWidth(112)
         self._model_combo.setToolTip("切换本需求使用的 AI 模型")
         self._model_combo.setStyleSheet(f"""
             QComboBox {{
@@ -207,7 +202,11 @@ class InputBar(QFrame):
             QComboBox::drop-down {{ border: none; width: 22px; }}
         """)
         apply_combo_popup_style(self._model_combo, c)
-        self._model_combo.currentIndexChanged.connect(self._on_model_selected)
+        self._model_combo.addItem("切换模型", None)  # 常显文案，不是可选项
+        self._current_model_pair: tuple[str, str] = ("", "")
+        self._model_combo.setCurrentIndex(0)
+        self._model_combo.activated.connect(self._on_model_selected)
+        self._model_combo.installEventFilter(self)
         row.addWidget(self._model_combo)
         self.model_combo = self._model_combo  # 供外部 reload_models / 回显需求模型
 
@@ -371,6 +370,14 @@ class InputBar(QFrame):
         return got
 
     def eventFilter(self, obj, event):
+        # 鼠标移入模型框时弹出悬浮提示，显示正在使用的模型名
+        combo = getattr(self, "_model_combo", None)
+        if combo is not None and obj is combo and event.type() == QEvent.Type.HoverEnter:
+            QToolTip.showText(
+                combo.mapToGlobal(QPoint(0, -combo.height() - 6)),
+                f"正在使用：{current_model_label(self._current_model_pair)}",
+                combo,
+            )
         if obj is self._edit:
             if event.type() == QEvent.Type.KeyPress:
                 key_event = event
@@ -420,21 +427,33 @@ class InputBar(QFrame):
 
     # ── 模型选择 ─────────────────────────────────────────
     def reload_models(self, selected: tuple[str, str] | None = None):
-        """刷新模型下拉；selected=(provider_id, model_id) 需保持选中。"""
+        """刷新模型列表；selected=(provider_id, model_id) 为当前使用模型。
+
+        框上常显「切换模型」，不回显选中态；当前模型记录下来供
+        悬停浮层展示、弹窗 ✓ 标记。
+        """
+        if selected is not None:
+            self._current_model_pair = tuple(selected)
         self._model_combo.blockSignals(True)
         self._model_combo.clear()
-        self._model_combo.addItem("（默认模型）", ("", ""))
-        index = 0
-        for i, (label, pair) in enumerate(model_options(), start=1):
-            self._model_combo.addItem(label, pair)
-            if selected and pair == tuple(selected):
-                index = i
-        self._model_combo.setCurrentIndex(index)
+        self._model_combo.addItem("切换模型", None)
+        for label, pair in model_options():
+            self._model_combo.addItem(("✓ " if pair == tuple(self._current_model_pair) else "") + label, pair)
+        # 保持框上常显「切换模型」；blockSignals 避免触发选择信号
+        self._model_combo.setCurrentIndex(0)
         self._model_combo.blockSignals(False)
+        self._model_combo.setToolTip(
+            f"当前模型：{current_model_label(self._current_model_pair)}\n点击切换"
+        )
 
-    def _on_model_selected(self):
-        pair = self._model_combo.currentData() or ("", "")
+    def _on_model_selected(self, index: int):
+        pair = self._model_combo.itemData(index)
+        if pair is None:
+            return  # 「切换模型」占位项
+        self._current_model_pair = tuple(pair)
         self.model_changed.emit(str(pair[0]), str(pair[1]))
+        # 选完回到占位文案，等弹窗重开时再按新当前项打 ✓
+        self.reload_models(self._current_model_pair)
 
     def _on_shell_selected(self):
         self.shell_changed.emit(str(self._shell_combo.currentData() or ""))
