@@ -190,7 +190,6 @@ class InputBar(QFrame):
         self._model_combo = QComboBox()
         self._model_combo.setFixedHeight(34)
         self._model_combo.setFixedWidth(112)
-        self._model_combo.setToolTip("切换本需求使用的 AI 模型")
         self._model_combo.setStyleSheet(f"""
             QComboBox {{
                 background: {c["input_bg"]}; color: {c["text"]};
@@ -442,9 +441,7 @@ class InputBar(QFrame):
         # 保持框上常显「切换模型」；blockSignals 避免触发选择信号
         self._model_combo.setCurrentIndex(0)
         self._model_combo.blockSignals(False)
-        self._model_combo.setToolTip(
-            f"当前模型：{current_model_label(self._current_model_pair)}\n点击切换"
-        )
+        # 当前模型名由 eventFilter 悬停时弹浮层展示，这里不设 setToolTip（避免双提示）
 
     def _on_model_selected(self, index: int):
         pair = self._model_combo.itemData(index)
