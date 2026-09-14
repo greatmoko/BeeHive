@@ -169,7 +169,7 @@ class DeziBeeView(QWidget):
             from wokbee.ui.dialogs import tip
 
             tip(self, self.theme, f"读取需求失败：{e}")
-        self.sidebar.set_reqs(self._reqs)
+        self.sidebar.set_reqs(self._reqs, set(self._workers.keys()))
 
     def select_first(self):
         if self._reqs:
@@ -312,6 +312,8 @@ class DeziBeeView(QWidget):
         worker.ask_user_needed.connect(self._on_ask_user_needed)
         worker.model_error.connect(self._on_model_error)
         self._workers[req.id] = worker
+        # 列表项立刻亮起「运行中」标识
+        self.sidebar.set_running_ids(set(self._workers.keys()))
         worker.start()
 
     def _build_user_message(self, req: Requirement, text: str) -> str:
@@ -375,6 +377,7 @@ class DeziBeeView(QWidget):
             self.workspace.info_panel.set_running(False)
             self.workspace.chat_log.end_stream()
         # 整轮结束后刷新列表与当前需求状态（不改变用户正在查看的需求）
+        self.sidebar.set_running_ids(set(self._workers.keys()))
         self._refresh()
         selected = self._current_req()
         if selected:
@@ -385,6 +388,7 @@ class DeziBeeView(QWidget):
         worker = self._workers.pop(req_id or "", None)
         if worker is not None:
             worker.deleteLater()
+        self.sidebar.set_running_ids(set(self._workers.keys()))
         if self.sidebar.current_selected() == req_id:
             self.workspace.input_bar.set_running(False)
             self.workspace.info_panel.set_running(False)

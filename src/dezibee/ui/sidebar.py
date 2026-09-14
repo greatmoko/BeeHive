@@ -31,11 +31,13 @@ class _ReqItem(QFrame):
     copy_id_requested = Signal(str)
     delete_requested = Signal(str)
 
-    def __init__(self, req: Requirement, theme: Theme, selected: bool = False, parent=None):
+    def __init__(self, req: Requirement, theme: Theme, selected: bool = False,
+                 running: bool = False, parent=None):
         super().__init__(parent)
         self.req = req
         self.theme = theme
         self._selected = selected
+        self._running = running
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(58)
         self._build()
@@ -64,15 +66,23 @@ class _ReqItem(QFrame):
             "background: transparent; border: none;"
         )
         top.addWidget(title, 1)
+        # Agent 运行中标识：一眼看出哪些需求正在生成原型
+        if self._running:
+            run = QLabel("● 运行中")
+            run.setStyleSheet(
+                f"font-size: 11px; font-weight: bold; color: {c['accent']};"
+                "background: transparent; border: none;"
+            )
+            top.addWidget(run)
         layout.addLayout(top)
 
         mid = QHBoxLayout()
-        chip = QLabel(self.req.id)
-        chip.setStyleSheet(
-            f"background: {c['tag_bg']}; color: {c['text_secondary']};"
-            "border-radius: 4px; padding: 1px 6px; font-size: 10px;"
+        hint = QLabel("正在生成原型…" if self._running else "")
+        hint.setStyleSheet(
+            f"font-size: 11px; color: {c['text_hint']};"
+            "background: transparent; border: none;"
         )
-        mid.addWidget(chip)
+        mid.addWidget(hint)
         mid.addStretch()
         layout.addLayout(mid)
 
@@ -114,6 +124,7 @@ class DeziBeeSidebar(QFrame):
         super().__init__(parent)
         self.theme = theme
         self._reqs: list[Requirement] = []
+        self._running_ids: set[str] = set()
         self._selected_id: str | None = None
         self._build()
 
@@ -172,8 +183,14 @@ class DeziBeeSidebar(QFrame):
         scroll.setWidget(self._container)
         layout.addWidget(scroll, stretch=1)
 
-    def set_reqs(self, reqs: list[Requirement]):
+    def set_reqs(self, reqs: list[Requirement], running_ids: set[str] | None = None):
         self._reqs = list(reqs)
+        self._running_ids = running_ids or set()
+        self.refresh()
+
+    def set_running_ids(self, running_ids: set[str]):
+        """仅刷新运行标识（不重建数据）。"""
+        self._running_ids = set(running_ids)
         self.refresh()
 
     def refresh(self):
@@ -205,7 +222,8 @@ class DeziBeeSidebar(QFrame):
         for r in reqs:
             if r.id == self._selected_id:
                 found = True
-            item = _ReqItem(r, self.theme, selected=(r.id == self._selected_id))
+            item = _ReqItem(r, self.theme, selected=(r.id == self._selected_id),
+                            running=(r.id in self._running_ids))
             item.clicked.connect(self._on_select)
             item.pin_requested.connect(self.pin_requested.emit)
             item.rename_requested.connect(self.rename_requested.emit)

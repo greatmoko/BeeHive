@@ -38,14 +38,23 @@ class ReqInfoPanel(QFrame):
         title_row.addWidget(self._status)
         layout.addLayout(title_row)
 
+        # 需求编号：从列表项挪到这里，紧贴标题下方
+        self._req_id = QLabel("")
+        self._req_id.setStyleSheet(
+            f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;"
+        )
+        layout.addWidget(self._req_id)
+
         self.set_running(False, has_req=False)
 
     def set_req(self, req: Requirement | None):
         if req is None:
             self._title.setText("未选择需求")
+            self._req_id.setText("")
             self._status.setText("")
             return
         self._title.setText(req.title)
+        self._req_id.setText(req.id)
         # 运行状态由 set_running 刷新；切需求时按空闲显示
         self.set_running(False, has_req=True)
 
