@@ -156,7 +156,6 @@ class DeziBeeView(QWidget):
         bar.open_folder_clicked.connect(self._on_open_folder)
         bar.pause_clicked.connect(self._on_pause)
         bar.model_changed.connect(self._on_model_changed)
-        bar.shell_changed.connect(self._on_shell_changed)
         bar.send_clicked.connect(self._on_send)
 
     # ── 数据刷新 ─────────────────────────────────────────
@@ -608,14 +607,6 @@ class DeziBeeView(QWidget):
             return
         req.provider = provider_id
         req.model_id = model_id
-        self._persist(req)
-
-    # ── 默认设备外壳切换 ─────────────────────────────────
-    def _on_shell_changed(self, shell: str):
-        req = self._current_req()
-        if req is None:
-            return
-        req.device_shell = (shell or "").strip().lower()
         self._persist(req)
 
     def shutdown(self):
