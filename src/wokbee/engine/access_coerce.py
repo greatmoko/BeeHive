@@ -40,6 +40,7 @@ from deepagents.backends.protocol import (
 
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")  # C:foo / C:\foo（含 drive-relative C:foo）
 _UNC_RE = re.compile(r"^\\\\")          # \\server\share（UNC）
+_JSON_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 _GUIDE_MSG = (
     "错误：你传给文件工具的路径「{path}」看起来是真实主机路径，但该目录未授权。"
@@ -61,6 +62,13 @@ def _is_host_path(p: str | None) -> bool:
     while s.startswith("/"):
         s = s[1:]
     return bool(_DRIVE_RE.match(s) or _UNC_RE.match(s))
+
+
+def _decode_json_unicode_escapes(text: str) -> str:
+    """只解一层 ``\\uXXXX``，供 edit_file 的双重转义兼容回退使用。"""
+    return _JSON_UNICODE_ESCAPE_RE.sub(
+        lambda match: chr(int(match.group(1), 16)), text
+    )
 
 
 # 按 backend 类型缓存 grep 签名，避免每次 grep 都 inspect.signature 内省。
@@ -223,7 +231,33 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         err, use_path = self._prep(file_path)
         if err:
             return EditResult(error=err)
-        return self._inner.edit(use_path, old_string, new_string, replace_all=replace_all)
+        result = self._inner.edit(use_path, old_string, new_string, replace_all=replace_all)
+        error = str(getattr(result, "error", "") or "")
+        if not error or "String not found in file" not in error:
+            return result
+
+        # 部分模型会把已是 JSON 字符串参数的 ``<`` 再编码成 ``\\u003c``。
+        # 仅在原文本未命中、解码后恰好命中一次时回退，绝不做模糊匹配。
+        decoded = _decode_json_unicode_escapes(old_string)
+        if decoded == old_string:
+            return result
+        try:
+            read_result = self._inner.read(use_path, offset=0, limit=100_000_000)
+            data = getattr(read_result, "file_data", None) or {}
+            content = str(data.get("content") or "")
+        except Exception:
+            return result
+        if getattr(read_result, "error", None):
+            return result
+        if content.count(decoded) != 1:
+            return EditResult(
+                error=(
+                    f"{error}\n检测到 old_string 含 JSON Unicode 转义，解码后在文件中出现 "
+                    f"{content.count(decoded)} 次；为避免误改未自动替换。请先用 read_file_range "
+                    "确认当前区域，再用 insert_text 的唯一纯文本锚点操作。"
+                )
+            )
+        return self._inner.edit(use_path, decoded, new_string, replace_all=replace_all)
 
     def delete(self, file_path: str) -> DeleteResult:
         err, use_path = self._prep(file_path)

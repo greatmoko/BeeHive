@@ -34,7 +34,7 @@ uploads/          ← 用户上传的参考材料（只读）
 ```
 
 **修改的唯一入口**：`demo/index.html` 里的 `const WORKBENCH_DATA = {...}`。
-用 read_file / write_file / write_file_chunk 直接编辑它（超过 3000 字用分块写入）。
+新建完整数据可用 read_file / write_file / write_file_chunk（超过 3000 字用分块写入）；修改已有数据时，先用 `read_file_range` 读取当前区域，再用 `insert_text` 的 1–3 行唯一纯文本锚点定位。**不要使用 `edit_file`**，也不要以数组结尾、整段 PRD 或 `\\u003c` 这类转义文本作锚点；锚点找不到时重新读取当前区域，不能盲目重试。
 
 ## 二、数据模型（唯一 ID 是核心）
 
