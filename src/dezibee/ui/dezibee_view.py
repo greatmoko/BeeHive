@@ -306,6 +306,8 @@ class DeziBeeView(QWidget):
             parent=self,
             attachments=attachments,
         )
+        worker.finished.connect(self._on_worker_stopped)
+        worker.finished.connect(worker.deleteLater)
         worker.event_emitted.connect(self._on_agent_event)
         worker.finished_result.connect(self._on_agent_finished)
         worker.ask_user_needed.connect(self._on_ask_user_needed)
@@ -365,11 +367,18 @@ class DeziBeeView(QWidget):
         if worker is not None and worker.isRunning():
             worker.resolve_ask_user(answers)
 
+    def _on_worker_stopped(self):
+        # Custom result/model-error signals can arrive before QThread.run returns.
+        req_id = self._sender_req_id()
+        if req_id is not None:
+            self._workers.pop(req_id, None)
+        self.sidebar.set_running_ids(set(self._workers))
+        if self.sidebar.current_selected() == req_id:
+            self.workspace.input_bar.set_running(False)
+            self.workspace.info_panel.set_running(False)
+
     def _on_agent_finished(self, result):
         req_id = self._sender_req_id()
-        worker = self._workers.pop(req_id or "", None)
-        if worker is not None:
-            worker.deleteLater()
         # 只复位当前查看需求的运行态；后台结束的需求静默收尾
         if self.sidebar.current_selected() == req_id:
             self.workspace.input_bar.set_running(False)
@@ -384,9 +393,6 @@ class DeziBeeView(QWidget):
 
     def _on_model_error(self, msg: str):
         req_id = self._sender_req_id()
-        worker = self._workers.pop(req_id or "", None)
-        if worker is not None:
-            worker.deleteLater()
         self.sidebar.set_running_ids(set(self._workers.keys()))
         if self.sidebar.current_selected() == req_id:
             self.workspace.input_bar.set_running(False)
@@ -614,7 +620,10 @@ class DeziBeeView(QWidget):
             if worker.isRunning():
                 worker.cancel()
                 worker.wait(2000)
+        if any(worker.isRunning() for worker in self._workers.values()):
+            return False
         self._workers.clear()
         from dezibee.core.preview import shutdown_server
 
         shutdown_server()
+        return True

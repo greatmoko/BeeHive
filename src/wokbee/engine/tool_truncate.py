@@ -20,7 +20,12 @@ logger = logging.getLogger("wokbee")
 # 单个工具执行超时：超过时限立即返回失败结果，交给 Agent 接管。
 # 人在环工具（ask_user 在工具体内 interrupt()）与子代理工具（task）不套硬超时，
 # 否则会吞掉 graph interrupt 或误杀长时间合法的子代理运行。
-TOOL_TIMEOUT_EXEMPT = frozenset({"ask_user", "task", "request_access"})
+TOOL_TIMEOUT_EXEMPT = frozenset({
+    "ask_user", "task", "request_access",
+    # Python futures cannot cancel an in-flight filesystem mutation. Reporting
+    # timeout while it keeps writing allows a retry to race the first write.
+    "write_file_chunk", "insert_text",
+})
 
 # AI 逐调用覆盖默认超时的保留参数名：调用工具时传 `timeout_seconds`，未传则用全局默认值。
 PER_CALL_TIMEOUT_KEY = "timeout_seconds"

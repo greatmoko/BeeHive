@@ -1,19 +1,27 @@
 """python -m tokbee 入口。"""
 
-from tokbee.app import Application
-from tokbee.utils.logger import setup_logger
+import sys
+
+from tokbee.utils.logger import setup_crash_reporting, setup_logger
 
 
 def main():
     logger = setup_logger()
+    setup_crash_reporting(logger)
     logger.info("WokBee 启动中...")
 
-    app = Application()
-    exit_code = app.run()
+    try:
+        from tokbee.app import Application
+
+        app = Application()
+        exit_code = app.run()
+    except Exception:
+        logger.exception("WokBee 启动或运行失败")
+        return 1
 
     logger.info("WokBee 已退出")
-    raise SystemExit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

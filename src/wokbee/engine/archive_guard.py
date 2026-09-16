@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import time
+import tempfile
+from threading import RLock
 from pathlib import Path, PurePosixPath
 
 from deepagents.backends import LocalShellBackend
@@ -155,6 +157,10 @@ class ArchiveDeniedBackend(LocalShellBackend):
     不是透传。上游升级时需手工比对同步差异，勿直接覆盖或删除本实现，否则归档守卫失效。
     """
 
+    # Serialize read/modify/write across project backend instances.
+    # ponytail: process-wide lock; use per-path locks if concurrent writes become a bottleneck.
+    _file_lock = RLock()
+
     def _coerce_path(self, path: str | None) -> str | None:
         if path is None:
             return None
@@ -195,7 +201,35 @@ class ArchiveDeniedBackend(LocalShellBackend):
         file_path = self._coerce_path(file_path) or file_path
         if self._archive_hit(file_path):
             return WriteResult(error=_DENY_MSG)
-        return super().write(file_path, content)
+        temporary = None
+        try:
+            with self._file_lock:
+                target = self._resolve_path(file_path)
+                if self._archive_hit(str(target)):
+                    return WriteResult(error=_DENY_MSG)
+                validator = getattr(self, "write_validator", None)
+                if validator is not None:
+                    validator(target, content)
+                # Encode before touching the destination; malformed Unicode must not erase it.
+                payload = content.encode("utf-8")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".wokbee-", delete=False) as f:
+                    temporary = Path(f.name)
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if target.exists():
+                    os.chmod(temporary, target.stat().st_mode)
+                os.replace(temporary, target)
+            return WriteResult(path=file_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return WriteResult(error=f"写入失败，原文件未被截断：{exc}")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Do not turn a successful replace into a reported failure.
 
     def edit(
         self,
@@ -207,7 +241,24 @@ class ArchiveDeniedBackend(LocalShellBackend):
         file_path = self._coerce_path(file_path) or file_path
         if self._archive_hit(file_path):
             return EditResult(error=_DENY_MSG)
-        return super().edit(file_path, old_string, new_string, replace_all=replace_all)
+        from deepagents.backends.utils import perform_string_replacement
+
+        try:
+            with self._file_lock:
+                target = self._resolve_path(file_path)
+                if self._archive_hit(str(target)):
+                    return EditResult(error=_DENY_MSG)
+                content = target.read_text(encoding="utf-8")
+                old_string = old_string.replace("\r\n", "\n").replace("\r", "\n")
+                new_string = new_string.replace("\r\n", "\n").replace("\r", "\n")
+                result = perform_string_replacement(content, old_string, new_string, replace_all)
+                if isinstance(result, str):
+                    return EditResult(error=result)
+                updated, occurrences = result
+                written = self.write(file_path, updated)
+                return EditResult(error=written.error, path=file_path, occurrences=occurrences)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return EditResult(error=f"编辑失败：{exc}")
 
     def delete(self, file_path: str) -> DeleteResult:
         file_path = self._coerce_path(file_path) or file_path

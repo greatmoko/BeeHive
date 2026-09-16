@@ -318,6 +318,13 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentWidget(view)
 
     def closeEvent(self, event):
+        dezibee = self._views.get("dezibee")
+        if dezibee is not None and dezibee.shutdown() is False:
+            # Keep the owner alive while cancellation unwinds the worker.
+            event.ignore()
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, self.close)
+            return
         try:
             self._services.autobee_scheduler.shutdown(wait=False)
         except Exception:

@@ -34,7 +34,7 @@ uploads/          ← 用户上传的参考材料（只读）
 ```
 
 **修改的唯一入口**：`demo/index.html` 里的 `const WORKBENCH_DATA = {...}`。
-新建完整数据可用 read_file / write_file / write_file_chunk（超过 3000 字用分块写入）；修改已有数据时，先用 `read_file_range` 读取当前区域，再用 `insert_text` 的 1–3 行唯一纯文本锚点定位。**不要使用 `edit_file`**，也不要以数组结尾、整段 PRD 或 `\\u003c` 这类转义文本作锚点；锚点找不到时重新读取当前区域，不能盲目重试。
+新建文件优先用 `write_file` 一次写入完整内容，无固定 3000 字限制。修改已有数据先用 `find_in_file` 定位；返回上下文足够时直接用 `edit_file` / `insert_text`，否则只读取相关区域。不要逐页遍历或反复读取整个 index.html。锚点必须是唯一原文，失败后重新定位一次，仍失败则报告原因。只修改 WORKBENCH_DATA，不能用分块覆盖整个网页。确实超过模型输出预算的新文件才用 `write_file_chunk`：首块 overwrite，后续 append、offset 使用返回的 next_offset，最后 final=True 一次提交；未完成的内容不会写入目标文件。完成后检查数据语法与预览。
 
 ## 二、数据模型（唯一 ID 是核心）
 
@@ -167,7 +167,7 @@ WORKBENCH_DATA = {
 `WORKBENCH_DATA.prd`（只替换 prd 字段，pages/links 不受影响）。
 
 对你的要求：
-- 每次改 PRD 前**先 read_file 重新读取** `demo/index.html`，因为用户可能刚手改过，
+- 修改 PRD 前先用 `find_in_file` 确认目标区域当前原文，因为用户可能刚手改过；已有最新上下文就直接编辑，
   不要基于记忆里的旧内容覆盖。
 - 合并时保留用户的手改；确实需要推翻时，在回复里说明改了哪几条，别默默覆盖。
 - 静态部署（OSS / GitHub Pages）或 `file://` 打开时没有保存端点，编辑入口自动隐藏。

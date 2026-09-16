@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from deepagents import create_deep_agent
+from deepagents import FilesystemMiddleware, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphInterrupt
@@ -45,7 +45,7 @@ from wokbee.engine.access_request import (
 )
 from wokbee.engine.access_coerce import AccessCoerceBackend
 from wokbee.engine.readonly_backend import ReadOnlyBackend
-from wokbee.engine.file_tools import build_file_tools
+from wokbee.engine.file_tools import FILESYSTEM_TOOL_DESCRIPTIONS, build_file_tools
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
@@ -884,6 +884,16 @@ class AgentRunner:
         )
         # 暂停按钮与工具超时共用：execute 轮询此 Event，可在命令执行中途杀进程树
         project_inner.cancel_event = self._cancel
+        if design_mode:
+            from dezibee.core.preview import validate_workbench_document
+
+            prototype_path = (req.project_root / "demo" / "index.html").resolve()
+
+            def validate_design_write(path, content):
+                if path == prototype_path:
+                    validate_workbench_document(content)
+
+            project_inner.write_validator = validate_design_write
         project_backend = project_inner
         interrupt_on = build_interrupt_on(req.approval)
         # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
@@ -943,7 +953,8 @@ class AgentRunner:
             )
             if prefix:
                 access_extra_lines.append(
-                    f"- 附加目录虚拟路径：{prefix}（真实路径 {entry['path']}，仅 execute 可用）"
+                    f"- 附加目录虚拟路径：{prefix}（真实路径 {entry['path']}；read/write/grep 等文件工具可用，"
+                    "请优先使用此虚拟路径；真实路径仅 execute 可用）"
                 )
         if access_extra_lines:
             self._emit(
@@ -1218,6 +1229,14 @@ class AgentRunner:
             tools=tools,
             system_prompt=system_prompt,
             backend=backend,
+            # 覆盖 Deep Agents 的通用文件工具说明：项目使用虚拟路径，并提供无需临时脚本的
+            # 定位 → 小范围读取 → 锚点编辑流程。与默认中间件同名，create_deep_agent 会原位替换。
+            middleware=[
+                FilesystemMiddleware(
+                    backend=backend,
+                    custom_tool_descriptions=FILESYSTEM_TOOL_DESCRIPTIONS,
+                )
+            ],
             interrupt_on=interrupt_on or None,
             # 经验只注入首条 user 的【会话上下文】（Reasonix：记忆写盘不改本会话 system），
             # 不再把 memory= 传给 create_deep_agent，避免 MemoryMiddleware 每次请求

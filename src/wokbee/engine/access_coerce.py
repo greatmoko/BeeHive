@@ -41,6 +41,15 @@ from deepagents.backends.protocol import (
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")  # C:foo / C:\foo（含 drive-relative C:foo）
 _UNC_RE = re.compile(r"^\\\\")          # \\server\share（UNC）
 _JSON_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_INLINE_FILE_PROBE_RE = re.compile(
+    r"(?is)(?:node(?:\.exe)?|python(?:\.exe)?|powershell(?:\.exe)?)\b.*?"
+    r"(?:\s-e\s|\s-command\s).*?"
+    r"(?:readFileSync|read_text|Get-Content|open\s*\().*?"
+    r"(?:split\s*\(|readlines\s*\(|Select-Object|for\s*\()"
+)
+_TEMP_FILE_HELPER_RE = re.compile(
+    r"(?i)(?:^|[\\/])_?(?:ln|scan)\d+\.(?:py|js|ps1)\b"
+)
 
 _GUIDE_MSG = (
     "错误：你传给文件工具的路径「{path}」看起来是真实主机路径，但该目录未授权。"
@@ -122,6 +131,12 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         self._project_root = str(Path(project_root).resolve()) if project_root else None
         self._registry = registry
         self.allow_real_paths = bool(allow_real_paths)
+        self._file_tool_failed = False
+        self._file_probe_fallbacks = 0
+
+    def _remember_file_error(self, result) -> None:
+        if getattr(result, "error", None):
+            self._file_tool_failed = True
 
     @property
     def id(self) -> str:
@@ -212,14 +227,20 @@ class AccessCoerceBackend(SandboxBackendProtocol):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         err, use_path = self._prep(file_path)
         if err:
-            return ReadResult(error=err)
-        return self._inner.read(use_path, offset=offset, limit=limit)
+            result = ReadResult(error=err)
+        else:
+            result = self._inner.read(use_path, offset=offset, limit=limit)
+        self._remember_file_error(result)
+        return result
 
     def write(self, file_path: str, content: str) -> WriteResult:
         err, use_path = self._prep(file_path)
         if err:
-            return WriteResult(error=err)
-        return self._inner.write(use_path, content)
+            result = WriteResult(error=err)
+        else:
+            result = self._inner.write(use_path, content)
+        self._remember_file_error(result)
+        return result
 
     def edit(
         self,
@@ -230,34 +251,44 @@ class AccessCoerceBackend(SandboxBackendProtocol):
     ) -> EditResult:
         err, use_path = self._prep(file_path)
         if err:
-            return EditResult(error=err)
+            result = EditResult(error=err)
+            self._remember_file_error(result)
+            return result
         result = self._inner.edit(use_path, old_string, new_string, replace_all=replace_all)
         error = str(getattr(result, "error", "") or "")
         if not error or "String not found in file" not in error:
+            self._remember_file_error(result)
             return result
 
         # 部分模型会把已是 JSON 字符串参数的 ``<`` 再编码成 ``\\u003c``。
         # 仅在原文本未命中、解码后恰好命中一次时回退，绝不做模糊匹配。
         decoded = _decode_json_unicode_escapes(old_string)
         if decoded == old_string:
+            self._remember_file_error(result)
             return result
         try:
             read_result = self._inner.read(use_path, offset=0, limit=100_000_000)
             data = getattr(read_result, "file_data", None) or {}
             content = str(data.get("content") or "")
         except Exception:
+            self._remember_file_error(result)
             return result
         if getattr(read_result, "error", None):
+            self._remember_file_error(result)
             return result
         if content.count(decoded) != 1:
-            return EditResult(
+            result = EditResult(
                 error=(
                     f"{error}\n检测到 old_string 含 JSON Unicode 转义，解码后在文件中出现 "
                     f"{content.count(decoded)} 次；为避免误改未自动替换。请先用 read_file_range "
                     "确认当前区域，再用 insert_text 的唯一纯文本锚点操作。"
                 )
             )
-        return self._inner.edit(use_path, decoded, new_string, replace_all=replace_all)
+            self._remember_file_error(result)
+            return result
+        result = self._inner.edit(use_path, decoded, new_string, replace_all=replace_all)
+        self._remember_file_error(result)
+        return result
 
     def delete(self, file_path: str) -> DeleteResult:
         err, use_path = self._prep(file_path)
@@ -305,6 +336,31 @@ class AccessCoerceBackend(SandboxBackendProtocol):
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return self._inner.download_files(paths)
 
-    # ---- execute：透传（execute 本就接受真实路径）----
+    # ---- execute：真实交付物可运行；文件浏览脚本只在文件工具失败后兜底一次。----
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        is_file_probe = bool(
+            _INLINE_FILE_PROBE_RE.search(command or "")
+            or _TEMP_FILE_HELPER_RE.search(command or "")
+        )
+        if is_file_probe:
+            if not self._file_tool_failed:
+                return ExecuteResponse(
+                    output=(
+                        "已拒绝：不要通过 execute 用 Node/Python/PowerShell 分段读取或搜索文件。"
+                        "请直接使用 find_in_file 定位，再用 read_file 或 read_file_range 读取上下文。"
+                        "只有这些文件工具实际返回错误、重新定位一次仍失败后，才允许一次脚本兜底。"
+                    ),
+                    exit_code=1,
+                    truncated=False,
+                )
+            if self._file_probe_fallbacks >= 1:
+                return ExecuteResponse(
+                    output=(
+                        "已停止重复脚本兜底：本轮已执行过一次文件浏览脚本，继续不会产生新信息。"
+                        "请回到 find_in_file/read_file_range/insert_text；若仍不能完成，应报告具体文件工具错误。"
+                    ),
+                    exit_code=1,
+                    truncated=False,
+                )
+            self._file_probe_fallbacks += 1
         return self._inner.execute(command, timeout=timeout)

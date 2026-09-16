@@ -43,6 +43,42 @@ class _BadRequest(Exception):
 _JS_PAIRS = {"{": "}", "[": "]"}
 
 
+def validate_workbench_document(content: str) -> None:
+    """Reject truncated workbench documents; this is not a full JS syntax checker."""
+    from html.parser import HTMLParser
+
+    class Document(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.ends = set()
+            self.in_script = False
+            self.scripts = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "script":
+                self.in_script = True
+
+        def handle_endtag(self, tag):
+            self.ends.add(tag)
+            if tag == "script":
+                self.in_script = False
+
+        def handle_data(self, data):
+            if self.in_script:
+                self.scripts.append(data)
+
+    document = Document()
+    document.feed(content)
+    document.close()
+    if document.in_script or not {"body", "html"} <= document.ends:
+        raise ValueError("原型 HTML 未完整闭合，拒绝覆盖。请补齐 script/body/html 后重新提交。")
+    for script in document.scripts:
+        match = re.search(r"\bWORKBENCH_DATA\s*=\s*(?:window\.WORKBENCH_DATA\s*=\s*)?\{", script)
+        if match and _match_bracket(script, match.end() - 1) is not None:
+            return
+    raise ValueError("WORKBENCH_DATA 缺失或括号/字符串未闭合，拒绝覆盖原型。")
+
+
 def _skip_js_string(text: str, i: int) -> int:
     """i 位于引号（' " `）处；返回字符串结束后的下标。模板串会跳过 ${...}。"""
     quote = text[i]
