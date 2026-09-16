@@ -855,6 +855,10 @@ class AgentRunner:
                    记忆概述/跨项目记忆召回，不挂经验与跨项目记忆工具；
                    保留 Skills 与对话记忆（load/append）。
         """
+        # This flag is needed while constructing the backend below.  Keep it
+        # at the start of the method so chat/run modes cannot hit an
+        # uninitialized local before the later memory-policy section.
+        design_mode = mode == "design"
         if mode != "design":
             ensure_project_layout(req.project_root)
             workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
@@ -1012,7 +1016,6 @@ class AgentRunner:
         #   design 模式不能创建它。
         pipe_probe = peek_pipeline(req.project_root)
         first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
-        design_mode = mode == "design"
         lesson_store = None if design_mode else LessonStore(req.project_root)
 
         experience_digest = "" if design_mode else lesson_store.prompt_digest()
