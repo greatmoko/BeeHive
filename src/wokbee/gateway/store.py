@@ -61,6 +61,7 @@ class GatewayChannelConfig:
     wechat_account_id: str = ""
     wechat_base_url: str = ""  # 例如 https://ilinkai.weixin.qq.com
     wechat_user_id: str = ""  # 可选
+    wechat_context_token: str = ""  # 扫码创建人的可回复会话上下文
     wechat_cursor_file: str = ""  # 可选覆盖；空 -> default_wechat_cursor_path()
 
     def to_dict(self) -> dict:
@@ -92,6 +93,7 @@ class GatewayChannelConfig:
             wechat_account_id=str(d.get("wechat_account_id") or ""),
             wechat_base_url=str(d.get("wechat_base_url") or ""),
             wechat_user_id=str(d.get("wechat_user_id") or ""),
+            wechat_context_token=str(d.get("wechat_context_token") or ""),
             wechat_cursor_file=str(d.get("wechat_cursor_file") or ""),
         )
 

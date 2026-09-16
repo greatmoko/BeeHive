@@ -1882,6 +1882,7 @@ class AgentRunner:
                         req.project_root,
                         start_phase=phase_idx,
                         prior_context=context_parts,
+                        cancel_event=self._cancel,
                     )
 
                     if not pipe.ran or not pipe.phases:

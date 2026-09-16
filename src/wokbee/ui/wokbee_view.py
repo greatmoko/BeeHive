@@ -221,7 +221,14 @@ class WokBeeView(QWidget):
         if ws._project_id != project_id:
             return
         meta_d = meta if isinstance(meta, dict) else {}
+        if meta_d.get("source") == "autobee" and kind == "user":
+            ws._timeline.begin_run()
+        if kind == "agent_stream":
+            ws._timeline.append_stream(str(meta_d.get("target") or "text"), content)
+            return
         ws._timeline.append_event(ProjectEvent(kind=kind, content=content, meta=meta_d))
+        if meta_d.get("source") == "autobee" and meta_d.get("lifecycle") == "finished":
+            ws._timeline.end_run()
         if kind == "agent":
             ws._timeline._status(
                 "正在思考…" if str(meta_d.get("phase") or "") == "reasoning" else "正在执行…"

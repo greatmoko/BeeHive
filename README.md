@@ -146,10 +146,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 4. 启动应用
 
-**日常推荐**：双击项目根目录的 `启动WokBee.vbs`（或 `启动WokBee.bat`）。  
-使用 `pythonw` 无黑窗后台启动，关掉 CMD 不会退出软件；任务栏显示 WokBee 图标。只能通过关闭软件窗口结束进程。
-
-调试或看控制台输出时，仍可用：
+在项目根目录执行：
 
 ```powershell
 python main.py
@@ -262,7 +259,7 @@ python main.py
 
 - 无前缀的普通消息 → 路由到当前频道的**默认项目**并运行。
 - `@` 专用于切换项目，且**只能按项目 ID**（不再按项目名匹配）。
-- 在面板「允许列表」填写发送者 open_id 后，仅限指定用户可用（空 = 默认放行）。
+- 在面板「执行白名单」填写发送者 open_id 后，仅限指定用户可用；扫码创建人会自动加入，白名单为空时默认拒绝。
 - 个人微信自动化存在 **封号风险**；且 iLink 协议为私聊，群聊不在本通道范围。
 
 ---
@@ -323,13 +320,13 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 
 ```
 ├── main.py                 # 启动入口
-├── 启动WokBee.vbs          # 一键后台启动（推荐）
-├── 启动WokBee.bat          # 同上（调用 vbs）
+├── README.md               # 项目说明
 ├── pyproject.toml
 ├── requirements.txt
+├── WokBee.spec             # PyInstaller 打包配置
 ├── scripts/
-│   ├── make_release.ps1    # 打 src zip 发布包（可选）
-│   └── build_exe.ps1       # 用 PyInstaller 打包 exe（可选）
+│   ├── make_release.ps1    # 制作源码发布包（可选）
+│   └── build_exe.ps1       # 打包 exe（可选）
 └── src/
     ├── tokbee/             # 应用壳 + TokBee 对话 + UI 样式
     ├── wokbee/             # WokBee 项目 Agent 工作流

@@ -34,6 +34,7 @@ const state = {
   dragging: null,        // {cardId, dx, dy}
   panning: null,         // {sx, sy, tx, ty}
   prdEditing: false,     // PRD 直接编辑模式
+  flowFullscreen: false, // 全屏流程原型展示模式
 };
 
 /* 卡片索引：id → {card, page}（全页面共用一个索引，跳转/连线跨页可达）。
@@ -171,6 +172,16 @@ function fitAll() {
 
 function resetOrigin() { state.scale = 1; state.tx = 0; state.ty = 0; applyTransform(); }
 
+function setFlowFullscreen(enabled) {
+  state.flowFullscreen = enabled;
+  document.body.classList.toggle('flow-fullscreen', enabled);
+  const btn = $('#flowFullscreenBtn');
+  btn.textContent = enabled ? '⛶ 退出全屏' : '⛶ 全屏原型';
+  btn.title = enabled ? '退出全屏流程原型展示（Esc）' : '隐藏画布目录和 PRD，进入全屏流程原型展示';
+  btn.setAttribute('aria-pressed', String(enabled));
+  requestAnimationFrame(() => fitAll());
+}
+
 function focusCard(cardId, opts = {}) {
   // 聚焦卡片：切到所属页面（若需要）→ 居中 → 高亮闪烁 → PRD 跳到对应章节
   const rec = cardIndex.get(cardId);
@@ -243,6 +254,7 @@ function bindViewport() {
     }
     if (e.target.matches('input, textarea, select') || e.target.isContentEditable) return;
     if (state.prdEditing) return;
+    if (e.key === 'Escape' && state.flowFullscreen) { setFlowFullscreen(false); return; }
     if (e.key === '0' && !e.ctrlKey && !e.metaKey) resetOrigin();
     if (e.key === '1' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); fitAll(); }
     if (e.key === 'Escape') { state.selectedCardId = null; markSelected(); }
@@ -808,6 +820,7 @@ function init() {
   $('#focusBtn').addEventListener('click', () => {
     if (state.selectedCardId) focusCard(state.selectedCardId);
   });
+  $('#flowFullscreenBtn').addEventListener('click', () => setFlowFullscreen(!state.flowFullscreen));
   $('#prdTocBtn').addEventListener('click', () => {
     const toc = $('#prdToc');
     const btn = $('#prdTocBtn');

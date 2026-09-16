@@ -46,13 +46,13 @@ class MessageRouter:
             return RouteResult(RouteOutcome.EMPTY_MESSAGE,
                                reply="（收到空消息，未处理）")
 
-        # 允许列表空 = 默认放行（个人使用）；仅在用户显式填写了若干发送者时才限流。
+        # 白名单为空也拒绝：扫码创建人会在绑定成功时自动加入，旧配置需用户补录。
         allow = [s for s in (cfg.allow_from or []) if s]
-        if allow and msg.sender_id not in allow:
+        if not allow or msg.sender_id not in allow:
             return RouteResult(
                 RouteOutcome.DENIED_SENDER,
                 reply=(
-                    "你暂未获得网关使用权限：当前允许列表已启用，仅限指定用户。\n"
+                    "你暂未获得网关使用权限：执行白名单仅限指定用户。\n"
                     + (msg.sender_id or "<未知>")
                     + "\n\n如需放行，请到 WokBee「消息网关」的允许列表添加该账号。"
                 ),

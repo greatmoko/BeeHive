@@ -60,7 +60,7 @@ def _render_qr(url: str, size: int = 260) -> QPixmap | None:
 class _ProvisionWorker(QThread):
     qr_ready = Signal(str, int)      # url, expire_in
     status_change = Signal(str)
-    done = Signal(str, str)          # app_id, app_secret
+    done = Signal(str, str, object)  # app_id, app_secret, user_info
     failed = Signal(str)
 
     def __init__(self, name: str = "WokBee", parent=None):
@@ -81,7 +81,11 @@ class _ProvisionWorker(QThread):
         )
         try:
             result = self._provisioner.run()
-            self.done.emit(result.get("client_id", ""), result.get("client_secret", ""))
+            self.done.emit(
+                result.get("client_id", ""),
+                result.get("client_secret", ""),
+                result.get("user_info") or {},
+            )
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
 
@@ -381,6 +385,15 @@ class _ChannelPanelBase(QWidget):
         self._status_lbl = QLabel("未启动")
         self._status_lbl.setStyleSheet(f"color: {c['text_secondary']}; background: transparent; border: none;")
         run.addWidget(self._status_lbl)
+        allow_label = QLabel("执行白名单（每行一个 sender ID；扫码创建人自动加入）")
+        allow_label.setStyleSheet(f"color: {c['text_secondary']}; background: transparent; border: none;")
+        run.addWidget(allow_label)
+        self._allow_from = QPlainTextEdit()
+        self._allow_from.setPlaceholderText("例如 ou_xxx 或微信 userId")
+        self._allow_from.setFixedHeight(58)
+        self._allow_from.setStyleSheet(_textarea(self.theme))
+        self._allow_from.textChanged.connect(self._on_allow_from_changed)
+        run.addWidget(self._allow_from)
         col.addWidget(run_card)
 
         # 项目绑定：默认项目（无前缀消息落点）
@@ -669,6 +682,19 @@ class _ChannelPanelBase(QWidget):
         self._write_default_project(cfg, self._default_project.currentData() or "")
         self.store.save_config(cfg)
 
+    def _on_allow_from_changed(self):
+        if self._syncing:
+            return
+        text = self._allow_from.toPlainText()
+        ids = []
+        for raw in text.replace(",", "\n").splitlines():
+            value = raw.strip()
+            if value and value not in ids:
+                ids.append(value)
+        cfg = self.store.get_config()
+        cfg.allow_from = ids
+        self.store.save_config(cfg)
+
     def _refresh_status(self):
         st = self.manager.status_text(self.channel_key())
         self._status_lbl.setText(st)
@@ -679,6 +705,7 @@ class _ChannelPanelBase(QWidget):
         self._syncing = True
         try:
             self._enabled.setChecked(cfg.channel_enabled(self.channel_key()))
+            self._allow_from.setPlainText("\n".join(cfg.allow_from))
             self._default_project.clear()
             self._default_project.addItem("（未绑定）", "")
             for p in self.manager.project_store.list_projects():
@@ -770,8 +797,15 @@ class _FeishuPanel(_ChannelPanelBase):
     def finish_provision(self, result: tuple) -> None:
         app_id, app_secret = result[0], result[1]
         cfg = self.store.get_config()
+        user_info = result[2] if len(result) > 2 and isinstance(result[2], dict) else {}
+        creator_id = str(
+            user_info.get("open_id") or user_info.get("openId")
+            or user_info.get("user_id") or user_info.get("userId") or ""
+        ).strip()
         cfg.feishu_app_id = app_id
         cfg.feishu_app_secret = app_secret
+        if creator_id and creator_id not in cfg.allow_from:
+            cfg.allow_from.append(creator_id)
         cfg.set_channel_enabled("feishu", True)  # 扫码成功即自动启用本频道（不动微信）
         cfg.channel = "feishu"
         self.store.save_config(cfg)
@@ -864,6 +898,8 @@ class _WeChatPanel(_ChannelPanelBase):
         cfg.wechat_account_id = str(info.get("accountId", "") or "")
         cfg.wechat_base_url = str(info.get("baseUrl", "") or "")
         cfg.wechat_user_id = str(info.get("userId", "") or "")
+        if cfg.wechat_user_id and cfg.wechat_user_id not in cfg.allow_from:
+            cfg.allow_from.append(cfg.wechat_user_id)
         cfg.set_channel_enabled("wechat", True)  # 扫码成功即自动启用本频道（不动飞书）
         self.store.save_config(cfg)
         self._syncing = True

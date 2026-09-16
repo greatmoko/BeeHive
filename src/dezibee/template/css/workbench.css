@@ -26,6 +26,10 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,.26); }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 #app { display: flex; height: 100vh; }
+body.flow-fullscreen #nav,
+body.flow-fullscreen #prdResizer,
+body.flow-fullscreen #prd { display: none; }
+body.flow-fullscreen #canvasWrap { width: 100vw; }
 
 /* ── 左栏：导航 ── */
 #nav {

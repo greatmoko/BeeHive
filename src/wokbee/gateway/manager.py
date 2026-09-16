@@ -20,6 +20,8 @@ import logging
 import queue
 import sys
 import threading
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 from types import SimpleNamespace
@@ -28,6 +30,7 @@ from PySide6.QtCore import QObject, Signal
 
 from wokbee.core.models import ProjectEvent, MAX_PROJECT_TITLE_LEN
 from wokbee.core.project_store import ProjectStore
+from wokbee.core.project_run_queue import project_run_slot
 from wokbee.core.settings import WokBeeSettings
 from tokbee.core.provider_store import ProviderStore
 
@@ -58,6 +61,8 @@ _CHANNEL_DISPLAY = {"feishu": "飞书", "wechat": "微信"}
 #   #run         —— 用当前频道默认项目的「目标」运行 Agent
 #   #help        —— 返回可与 WokBee 交互的系统指令说明
 _COMMAND_TOKENS = frozenset({"#new", "#list", "#run", "#help"})
+_MESSAGE_DEDUP_TTL = 3600.0
+_MESSAGE_DEDUP_MAX = 4096
 
 
 class GatewayNotifier(QObject):
@@ -124,7 +129,8 @@ class GatewayManager(QObject):
         self._channels: dict[str, Channel] = {}  # channel_key -> Channel（多频道并发）
         self._project_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
-        self._in_flight: set[str] = set()
+        # 有界 TTL 去重缓存：保留一段时间避免重放，同时不随进程寿命无限增长。
+        self._in_flight: OrderedDict[str, float] = OrderedDict()
         self._in_flight_guard = threading.Lock()
         # 手机端澄清提问：conversation_key -> {"event": Event, "reply": str|None}
         self._pending_asks: dict[str, dict] = {}
@@ -163,6 +169,7 @@ class GatewayManager(QObject):
             self._stop_channel(key)
             return
         if not self._creds_present(key, cfg):
+            self._stop_channel(key)
             self.notifier.log_line.emit(
                 f"「{disp}」已启用但未配置凭据——请扫码创建/登录，或填写凭据后进入再勾选启用。"
             )
@@ -246,22 +253,82 @@ class GatewayManager(QObject):
             return self._status_text(chan.status, key)
         return "未启动"
 
+    def is_channel_connected(self, key: str) -> bool:
+        """返回频道当前是否已建立连接。"""
+        chan = self._channels.get(key)
+        return chan is not None and chan.status == ChannelStatus.CONNECTED
+
     # ── 消息流 ─────────────────────────────
     def _on_incoming(self, msg: ChannelMessage) -> None:
         """通道收线程回调：只去重 + 入队，快速返回。"""
         self.notifier.log_line.emit(
             f"收到 {msg.channel} 消息（{msg.sender_id}）：{(msg.text or '')[:80]}"
         )
+        if msg.channel == "wechat":
+            self._remember_wechat_creator(msg)
         mid = msg.message_id
-        if mid:
-            with self._in_flight_guard:
-                if mid in self._in_flight:
-                    return
-                self._in_flight.add(mid)
+        if mid and not self._claim_message_id(mid):
+            return
         # 该会话正等着澄清答复：直接在收线程解除阻塞（快），不再入队当新对话处理
         if self._resolve_pending(msg):
             return
         self._inbox.put(msg)
+
+    def _claim_message_id(self, message_id: str) -> bool:
+        now = time.monotonic()
+        with self._in_flight_guard:
+            while self._in_flight:
+                oldest_id, seen_at = next(iter(self._in_flight.items()))
+                if now - seen_at <= _MESSAGE_DEDUP_TTL:
+                    break
+                self._in_flight.pop(oldest_id, None)
+            if message_id in self._in_flight:
+                self._in_flight.move_to_end(message_id)
+                return False
+            self._in_flight[message_id] = now
+            while len(self._in_flight) > _MESSAGE_DEDUP_MAX:
+                self._in_flight.popitem(last=False)
+            return True
+
+    def send_automatic_notification(self, text: str) -> tuple[bool, str]:
+        """向扫码创建人发送 AutoBee 完成通知。"""
+        cfg = self.store.get_config()
+        sender_id = cfg.wechat_user_id
+        if not sender_id:
+            return False, "未记录微信扫码创建人，请重新扫码绑定"
+        chan = self._channels.get("wechat")
+        if chan is None:
+            return False, "微信网关未连接"
+        context_token = cfg.wechat_context_token
+        if not context_token:
+            return False, "等待微信扫码创建人先给机器人发一条消息，以建立通知会话"
+        msg = ChannelMessage(
+            channel="wechat", sender_id=sender_id, text="", conversation_id=sender_id,
+            channel_meta={"context_token": context_token},
+        )
+        try:
+            return chan.send_text(msg, text)
+        except Exception as e:
+            logger.exception("发送 AutoBee 微信通知失败")
+            return False, str(e)
+
+    def _remember_wechat_creator(self, msg: ChannelMessage) -> None:
+        """记录扫码创建人的 ID 与会话上下文，供后台任务定向通知。"""
+        cfg = self.store.get_config()
+        changed = False
+        if not cfg.wechat_user_id:
+            return
+        if cfg.wechat_user_id != msg.sender_id:
+            return
+        if msg.sender_id and msg.sender_id not in cfg.allow_from:
+            cfg.allow_from.append(msg.sender_id)
+            changed = True
+        context_token = (msg.channel_meta or {}).get("context_token", "")
+        if context_token and context_token != cfg.wechat_context_token:
+            cfg.wechat_context_token = context_token
+            changed = True
+        if changed:
+            self.store.save_config(cfg)
 
     def _dispatch_loop(self) -> None:
         while True:
@@ -278,10 +345,10 @@ class GatewayManager(QObject):
         token, rest = MessageRouter.parse_route_prefix(msg.text or "")
         cmd = (token or "").lower()
         if cmd in _COMMAND_TOKENS:
-            # 指令能建项目/跑 Agent，同样受允许列表约束（空列表=默认放行）
+            # 指令能建项目/跑 Agent，同样受执行白名单约束。
             allow = [s for s in (self.store.get_config().allow_from or []) if s]
-            if allow and msg.sender_id not in allow:
-                self._reply(msg, "你暂未获得使用指令的权限：当前允许列表已启用，仅限指定用户。")
+            if not allow or msg.sender_id not in allow:
+                self._reply(msg, "你暂未获得使用指令的权限：执行白名单仅限指定用户。")
                 return
             self._run_command(cmd, rest, msg)
             return
@@ -291,7 +358,7 @@ class GatewayManager(QObject):
         if res.outcome != RouteOutcome.OK:
             if res.reply:
                 self._reply(msg, res.reply)
-            # 允许列表为空=默认放行，DENIED_SENDER 只在用户显式限定发送者时出现
+            # 白名单为空或未命中时均拒绝
             if res.outcome == RouteOutcome.DENIED_SENDER:
                 self.notifier.log_line.emit(
                     f"[限流] 发送者 {msg.sender_id} 未在允许列表 → 请到「消息网关→允许列表」添加"
@@ -323,7 +390,8 @@ class GatewayManager(QObject):
 
     def _run_chat(self, msg: ChannelMessage, project_id: str, content: str) -> None:
         """把清理过的用户输入交给默认项目 Agent 跑一遍，并实时落盘事件/回执。"""
-        with self._project_lock(project_id):
+        # 与桌面 Agent / AutoBee 共用 FIFO 运行槽；同项目不并发写工作区。
+        with project_run_slot(project_id), self._project_lock(project_id):
             self.notifier.log_line.emit(f"开始处理 -> {project_id}: {content[:80]}")
             self._append_event(
                 project_id, ProjectEvent(

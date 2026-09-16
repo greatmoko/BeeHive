@@ -289,6 +289,7 @@ class MainWindow(QMainWindow):
             scheduler=svc.autobee_scheduler,
             provider_store=ProviderStore(),
             project_store=svc.wokbee_store,
+            gateway_manager=svc.gateway_manager,
         )
         dezibee = DeziBeeView(self.theme)
 

@@ -67,8 +67,16 @@ class ServiceRegistry:
                 project_store=self.wokbee_store,
                 provider_store=ProviderStore(),
                 settings=self.wokbee_settings,
+                notification_sender=self._send_wechat_notification,
+                event_sink=self._emit_project_event,
             )
         return self._autobee_executor
+
+    def _send_wechat_notification(self, text: str) -> tuple[bool, str]:
+        return self.gateway_manager.send_automatic_notification(text)
+
+    def _emit_project_event(self, project_id: str, kind: str, content: str, meta: dict) -> None:
+        self.gateway_manager.notifier.event_written.emit(project_id, kind, content, meta)
 
     @property
     def autobee_scheduler(self):

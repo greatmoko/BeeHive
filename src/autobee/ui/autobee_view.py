@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QThread, QSize
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QLineEdit,
     QTextEdit, QComboBox, QScrollArea, QPushButton, QStackedWidget,
-    QSizePolicy, QListWidget, QListWidgetItem, QDialog, QMessageBox,
+    QSizePolicy, QListWidget, QListWidgetItem, QDialog, QMessageBox, QCheckBox,
 )
 
 from apscheduler.triggers.cron import CronTrigger
@@ -16,6 +16,7 @@ from tokbee.ui.combo_style import apply_combo_popup_style, secondary_btn_qss
 from tokbee.core.provider_store import ProviderStore
 
 from wokbee.core.project_store import ProjectStore
+from wokbee.gateway.manager import GatewayManager
 
 from autobee.core.models import JobLog, ScheduledTask, TaskRunStatus, TaskType, new_task_id
 from autobee.core.store import AutoBeeStore, MAX_LOGS_PER_TASK
@@ -200,6 +201,16 @@ class _NLWorker(QThread):
             self.done.emit(e)
 
 
+def _release_nl_worker(worker: _NLWorker):
+    """worker 完成后再删除，避免列表保留已销毁的 Qt 对象。"""
+    owner = worker.parent()
+    if owner is not None:
+        workers = getattr(owner, "_workers", [])
+        if worker in workers:
+            workers.remove(worker)
+    worker.deleteLater()
+
+
 class _TaskItem(QFrame):
     clicked = Signal(str)
     toggle_enabled = Signal(str)
@@ -235,6 +246,7 @@ class _TaskItem(QFrame):
         color = c.get(_STATUS_COLOR.get(status, "text_hint"), c["text_hint"])
         dot = QLabel("●")
         dot.setStyleSheet(f"color: {color}; font-size: 10px; background: transparent; border: none;")
+        self._status_dot = dot
         top.addWidget(dot)
         name = QLabel(t.name)
         name.setWordWrap(False)
@@ -294,7 +306,28 @@ class _TaskItem(QFrame):
         info.setStyleSheet(
             f"font-size: 11px; color: {state}; background: transparent; border: none;"
         )
+        self._status_info = info
         layout.addWidget(info)
+
+    def update_status(self, task: ScheduledTask):
+        """只更新运行状态，保留任务行控件，避免列表闪烁。"""
+        self.task = task
+        status = TaskRunStatus(task.last_status) if task.last_status else None
+        color = self.theme.colors.get(
+            _STATUS_COLOR.get(status, "text_hint"), self.theme.colors["text_hint"]
+        )
+        self._status_dot.setStyleSheet(
+            f"color: {color}; font-size: 10px; background: transparent; border: none;"
+        )
+        state = self.theme.colors["success"] if task.enabled else self.theme.colors["text_hint"]
+        if task.last_status == TaskRunStatus.RUNNING.value:
+            state = self.theme.colors["accent"]
+        self._status_info.setText(
+            f"{'已启用' if task.enabled else '已停用'} · {_status_label(task.last_status)}"
+        )
+        self._status_info.setStyleSheet(
+            f"font-size: 11px; color: {state}; background: transparent; border: none;"
+        )
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -377,6 +410,19 @@ class _TaskList(QFrame):
         self._tasks = list(tasks)
         self.refresh()
 
+    def update_task_status(self, task: ScheduledTask):
+        """更新单个任务项，不重建任务列表。"""
+        for index in range(self._list_layout.count()):
+            item = self._list_layout.itemAt(index)
+            widget = item.widget()
+            if isinstance(widget, _TaskItem) and widget.task.id == task.id:
+                widget.update_status(task)
+                break
+        for index, current in enumerate(getattr(self, "_tasks", [])):
+            if current.id == task.id:
+                self._tasks[index] = task
+                break
+
     def refresh(self):
         while self._list_layout.count():
             item = self._list_layout.takeAt(0)
@@ -446,13 +492,16 @@ class _TaskDetail(QWidget):
     task_deleted = Signal(str)
 
     def __init__(self, theme: Theme, store: AutoBeeStore, scheduler: SchedulerService,
-                 provider_store: ProviderStore, project_store: ProjectStore, parent=None):
+                 provider_store: ProviderStore, project_store: ProjectStore,
+                 gateway_manager: GatewayManager | None = None, parent=None):
         super().__init__(parent)
         self.theme = theme
         self.store = store
         self.scheduler = scheduler
         self.provider_store = provider_store
         self.project_store = project_store
+        self.gateway_manager = gateway_manager
+        self._edit_enabled = True
         self._task_id: str | None = None
         self._current_type = TaskType.WOKBEE
         self._log_cache: dict[str, JobLog] = {}
@@ -646,6 +695,12 @@ class _TaskDetail(QWidget):
         self._webhook.setFixedHeight(34)
         self._webhook.setStyleSheet(self._line_qss)
         outer.addWidget(self._fld("微信推送地址", self._webhook))
+        self._notify_wechat = QCheckBox("任务完成后，通过微信消息网关通知我（仅发送给绑定的微信账号）")
+        self._notify_wechat.setStyleSheet(
+            f"font-size: 12px; color: {c['text_secondary']}; background: transparent;"
+        )
+        self._update_wechat_notify_state()
+        outer.addWidget(self._notify_wechat)
 
         # ⑥ 运行历史（接在推送地址后，随表单滚动；默认最近 10 条）
         hist_lab = QLabel(f"运行历史（最近 {MAX_LOGS_PER_TASK} 条）")
@@ -843,11 +898,24 @@ class _TaskDetail(QWidget):
         self._refill_model_combos()
         self._update_cron_preview()
         self._webhook.clear()
+        self._notify_wechat.setChecked(False)
         self._log_cache.clear()
         self._logs.clear()
         empty = QListWidgetItem("暂无运行历史")
         empty.setFlags(Qt.ItemFlag.NoItemFlags)
         self._logs.addItem(empty)
+
+    def _update_wechat_notify_state(self):
+        connected = bool(
+            self.gateway_manager
+            and self.gateway_manager.is_channel_connected("wechat")
+        )
+        self._notify_wechat.setEnabled(connected and self._edit_enabled)
+        self._notify_wechat.setToolTip(
+            "微信消息网关已连接"
+            if connected
+            else "请先到 AIConfig → 消息网关连接微信"
+        )
 
     def load(self, task: ScheduledTask):
         self._task_id = task.id
@@ -870,6 +938,7 @@ class _TaskDetail(QWidget):
         self._on_script_lang_changed()
         self._project_id.setText(task.project_id or "")
         self._webhook.setText(task.webhook_url)
+        self._notify_wechat.setChecked(bool(getattr(task, "notify_wechat", False)))
 
         self._refill_model_combos()
         if task.gen_provider and task.gen_model_id:
@@ -914,11 +983,14 @@ class _TaskDetail(QWidget):
             self.refresh_logs()
 
     def _set_edit_enabled(self, enabled: bool):
+        self._edit_enabled = enabled
         for w in [self._name, self._nl_input, self._content,
                   self._code, self._script_lang,
                   self._schedule, self._gen_combo, self._exec_combo,
-                  self._type_combo, self._project_id, self._webhook]:
+                  self._type_combo, self._project_id, self._webhook,
+                  self._notify_wechat]:
             w.setEnabled(enabled)
+        self._update_wechat_notify_state()
         if enabled:
             self._update_action_btns()
         else:
@@ -1019,10 +1091,10 @@ class _TaskDetail(QWidget):
         if not model:
             return
         self._update_action_btns(generating=True)
-        self._workers = [x for x in getattr(self, "_workers", []) if x.isRunning()]
+        self._workers = list(getattr(self, "_workers", []))
         w = _NLWorker(NLBuilder(self.provider_store), text, model, self)
         w.done.connect(self._on_nl_done)
-        w.finished.connect(w.deleteLater)
+        w.finished.connect(lambda worker=w: _release_nl_worker(worker))
         self._workers.append(w)
         w.start()
 
@@ -1078,6 +1150,7 @@ class _TaskDetail(QWidget):
             "webhook_url": webhook,
             "msgtype": "text",
             "mention": "",
+            "notify_wechat": self._notify_wechat.isChecked(),
         }
         gd = self._gen_combo.currentData()
         if isinstance(gd, tuple):
@@ -1195,17 +1268,23 @@ class AutoBeeView(QWidget):
     """AutoBee 模块容器：三栏布局 + 2s 轮询刷新。"""
 
     def __init__(self, theme: Theme, store: AutoBeeStore, scheduler: SchedulerService,
-                 provider_store: ProviderStore, project_store: ProjectStore, parent=None):
+                 provider_store: ProviderStore, project_store: ProjectStore,
+                 gateway_manager: GatewayManager | None = None, parent=None):
         super().__init__(parent)
         self.theme = theme
         self.store = store
         self.scheduler = scheduler
         self.provider_store = provider_store
         self.project_store = project_store
+        self.gateway_manager = gateway_manager
         self._tasks: list[ScheduledTask] = []
 
         self._build()
         self._refresh_tasks()
+        if self.gateway_manager:
+            self.gateway_manager.notifier.status_changed.connect(
+                self._on_gateway_status_changed
+            )
         self.scheduler.notifier.task_started.connect(self._on_scheduler_task_started)
         self.scheduler.notifier.task_progress.connect(self._on_scheduler_task_progress)
         self.scheduler.notifier.task_finished.connect(self._on_scheduler_task_finished)
@@ -1213,6 +1292,10 @@ class AutoBeeView(QWidget):
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._on_tick)
         self._timer.start()
+
+    def _on_gateway_status_changed(self, channel: str, _status: str):
+        if channel == "wechat":
+            self.detail._update_wechat_notify_state()
 
     def _build(self):
         self.setStyleSheet(f"background: {self.theme.colors['content_bg']};")
@@ -1230,6 +1313,7 @@ class AutoBeeView(QWidget):
         # 右栏：任务详情
         self.detail = _TaskDetail(
             self.theme, self.store, self.scheduler, self.provider_store, self.project_store,
+            gateway_manager=self.gateway_manager,
         )
         self.detail.task_saved.connect(self._on_saved)
         self.detail.task_deleted.connect(self._on_deleted)
@@ -1285,7 +1369,9 @@ class AutoBeeView(QWidget):
             self.detail.refresh_logs()
 
     def _on_scheduler_task_progress(self, task_id: str, _message: str):
-        self._refresh_tasks()
+        task = self.store.get(task_id)
+        if task:
+            self.task_list.update_task_status(task)
 
     def _on_scheduler_task_finished(self, task_id: str, _status: str, _message: str):
         self._refresh_tasks()
@@ -1301,10 +1387,6 @@ class AutoBeeView(QWidget):
             if task and self.scheduler.running:
                 task.next_run = self.scheduler.next_run_time(curr)
             self.detail.refresh_logs()
-        if self.scheduler.any_task_running():
-            self._refresh_tasks()
-        else:
-            self.task_list.refresh()
 
     def shutdown(self):
         if getattr(self, "_timer", None):

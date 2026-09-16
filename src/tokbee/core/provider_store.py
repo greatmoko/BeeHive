@@ -128,7 +128,7 @@ class ProviderModel:
     stream: bool = True
     reasoning_enabled: bool = True
     reasoning_adapter: str = ""  # "", "openai", "deepseek"
-    reasoning_effort: str = ""
+    reasoning_effort: str = "medium"
 
     @classmethod
     def from_def(cls, d: ProviderModelDef, enabled: bool = False) -> "ProviderModel":
@@ -162,7 +162,7 @@ class ProviderModel:
             stream=bool(d.get("stream", True)),
             reasoning_enabled=bool(d.get("reasoning_enabled", True)),
             reasoning_adapter=_migrate_reasoning_adapter(d),
-            reasoning_effort=_migrate_reasoning_effort(d),
+            reasoning_effort=_migrate_reasoning_effort(d) or "medium",
         )
 
 

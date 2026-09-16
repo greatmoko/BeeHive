@@ -114,6 +114,7 @@ class ScheduledTask:
     webhook_url: str = ""  # 群机器人 webhook
     msgtype: str = "text"  # text | markdown
     mention: str = ""  # @ 内容（账号/手机号/@all）
+    notify_wechat: bool = False  # 通过 WokBee 个人微信网关通知最近联系人
 
     # AI 模型
     gen_provider: str = ""
@@ -169,6 +170,7 @@ class ScheduledTask:
             webhook_url=_clean(data.get("webhook_url")),
             msgtype=_clean(data.get("msgtype") or "") or "text",
             mention=_clean(data.get("mention")),
+            notify_wechat=_as_bool(data.get("notify_wechat"), False),
             gen_provider=_clean(data.get("gen_provider")),
             gen_model_id=_clean(data.get("gen_model_id")),
             gen_model_label=_clean(data.get("gen_model_label")),

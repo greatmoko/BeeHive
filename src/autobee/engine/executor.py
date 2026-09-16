@@ -13,6 +13,7 @@ from tokbee.core.subprocess_util import run_cancellable
 
 from wokbee.core.models import ApprovalFlags, Project, ProjectEvent, ProjectStatus
 from wokbee.core.project_store import ProjectStore
+from wokbee.core.project_run_queue import project_run_slot
 from wokbee.core.settings import WokBeeSettings
 
 from autobee.core.models import ScheduledTask, TaskType
@@ -35,11 +36,15 @@ class TaskExecutor:
         project_store: ProjectStore | None = None,
         provider_store: ProviderStore | None = None,
         settings: WokBeeSettings | None = None,
+        notification_sender: Callable[[str], tuple[bool, str]] | None = None,
+        event_sink: Callable[[str, str, str, dict], None] | None = None,
     ):
         self.store = store or AutoBeeStore()
         self.project_store = project_store or ProjectStore()
         self.provider_store = provider_store or ProviderStore()
         self.settings = settings or WokBeeSettings()
+        self._notification_sender = notification_sender
+        self._event_sink = event_sink
         # 按 project_id 加锁，防两个任务并发跑同一项目、共用 checkpointer 互相覆盖
         self._project_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
@@ -83,7 +88,20 @@ class TaskExecutor:
         else:
             return {"ok": False, "message": "", "error": f"未知任务类型：{ttype}"}
         self._maybe_push(task, result)
+        self._maybe_notify_wechat(task, result)
         return result
+
+    def _maybe_notify_wechat(self, task: ScheduledTask, result: dict) -> None:
+        if not task.notify_wechat or self._notification_sender is None:
+            return
+        status = "执行完成" if result.get("ok") else "执行失败"
+        detail = (result.get("message") or result.get("error") or "（无输出）").strip()
+        try:
+            ok, error = self._notification_sender(f"AutoBee 任务「{task.name}」{status}\n{detail[:3500]}")
+            if not ok:
+                logger.warning("任务 %s 微信完成通知失败：%s", task.id, error)
+        except Exception:
+            logger.exception("任务 %s 微信完成通知异常", task.id)
 
     def _maybe_push(self, task: ScheduledTask, result: dict) -> None:
         """任务结果（成功或失败）按需推送到企业微信。"""
@@ -107,7 +125,7 @@ class TaskExecutor:
         if not task.use_ai:
             return {"ok": True, "message": task.content or "（无内容）", "error": ""}
         try:
-            model = self._resolve_model(task, for_gen=False)
+            model = self._resolve_model(task, for_gen=True)
             client = AIClient(
                 model.api_host, model.api_key, model.model_id,
                 family=model.family, protocol=model.api_protocol,
@@ -184,11 +202,9 @@ class TaskExecutor:
         project = self.project_store.get(pid)
         if project is None:
             return {"ok": False, "message": "", "error": f"WokBee 项目不存在：{pid}"}
-        with self._project_lock(pid):
+        with project_run_slot(pid), self._project_lock(pid):
             try:
-                # 与手动运行一致：有内容则先归档上一轮，再开跑
-                self._archive_before_wokbee_run(pid)
-                project = self.project_store.get(pid) or project
+                # 与手动运行一致：直接在当前会话继续执行，不自动归档
                 resolved = self._resolve_exec_model(task, project)
                 approval = ApprovalFlags(
                     skip_read=True, skip_write=True,
@@ -204,6 +220,10 @@ class TaskExecutor:
                     max_steps=task.max_steps,
                 )
                 runner = AgentRunner(self.settings, self.provider_store)
+                self._append_project_event(
+                    project.id, "user", user_message,
+                    {"source": "autobee", "autobee_task_id": task.id},
+                )
                 self._wire_runner_callbacks(runner, task, project)
                 self.project_store.set_status(
                     project.id, ProjectStatus.RUNNING, current_step="AutoBee 定时触发",
@@ -219,6 +239,10 @@ class TaskExecutor:
 
         self._finalize_wokbee_status(project.id, result)
         outcome = getattr(result, "outcome", "failed")
+        self._append_project_event(
+            project.id, "info", f"AutoBee 任务「{task.name}」运行结束：{outcome}",
+            {"source": "autobee", "autobee_task_id": task.id, "lifecycle": "finished"},
+        )
         if getattr(result, "ok", False):
             message = (result.final_text or "").strip() or result.outcome
             return {"ok": True, "message": message[:4000], "error": ""}
@@ -227,21 +251,6 @@ class TaskExecutor:
             "message": (result.final_text or "").strip() or result.outcome,
             "error": (result.error or "")[:4000],
         }
-
-    def _archive_before_wokbee_run(self, project_id: str) -> None:
-        """定时跑 WokBee 前：与 UI「运行」一致，有内容才归档上一轮。"""
-        try:
-            if not self.project_store.needs_auto_archive(project_id):
-                return
-            dest = self.project_store.archive_session(
-                project_id,
-                include_memory=False,
-                reason="auto_before_run",
-            )
-            if dest:
-                logger.info("AutoBee 运行前已归档项目 %s → %s", project_id, dest)
-        except Exception:
-            logger.exception("AutoBee 运行前归档失败（仍继续执行）: %s", project_id)
 
     def _resolve_exec_model(self, task: ScheduledTask, project: Project) -> ResolvedModel:
         """优先任务约束的 exec 模型，否则回落到项目自身解析链。"""
@@ -257,10 +266,11 @@ class TaskExecutor:
         def _on_event(kind: str, content: str, meta: dict | None):
             m = dict(meta or {})
             m["autobee_task_id"] = task.id
+            if kind == "agent_stream":
+                self._emit_project_event(project.id, kind, content, m)
+                return
             try:
-                self.project_store.append_event(
-                    project.id, ProjectEvent(kind=kind, content=content, meta=m),
-                )
+                self._append_project_event(project.id, kind, content, m)
             except Exception:
                 logger.exception("写入项目事件失败")
             brief = (content or "").replace("\n", " ").strip()
@@ -289,6 +299,18 @@ class TaskExecutor:
         runner.on_event = _on_event
         runner.on_approval_needed = _on_approval
         runner.on_ask_user_needed = _on_ask_user
+
+    def _append_project_event(self, project_id: str, kind: str, content: str, meta: dict) -> None:
+        event = ProjectEvent(kind=kind, content=content, meta=meta)
+        self.project_store.append_event(project_id, event)
+        self._emit_project_event(project_id, kind, content, meta)
+
+    def _emit_project_event(self, project_id: str, kind: str, content: str, meta: dict) -> None:
+        if self._event_sink is not None:
+            try:
+                self._event_sink(project_id, kind, content, meta)
+            except Exception:
+                logger.exception("转发 AutoBee 项目实时事件失败")
 
     def _finalize_wokbee_status(self, project_id: str, result: Any) -> None:
         outcome = getattr(result, "outcome", "failed")

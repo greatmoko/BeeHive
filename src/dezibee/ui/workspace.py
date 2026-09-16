@@ -55,6 +55,8 @@ class InputBar(QFrame):
         self.theme = theme
         self._running = False
         self._attachments: list[dict] = []
+        self._drafts: dict[str, str] = {}
+        self._draft_req_id: str | None = None
         self._uploads_root: Path | None = None  # 由 view 按需求注入（需求目录/uploads）
         c = theme.colors
         self.setStyleSheet(
@@ -207,6 +209,15 @@ class InputBar(QFrame):
     def set_uploads_root(self, root: str | Path | None):
         """由 view 在需求切换时注入：粘贴的图片/文件立即保存到 <需求目录>/uploads/。"""
         self._uploads_root = Path(root) if root else None
+
+    def set_draft_context(self, req_id: str | None):
+        """切换需求时保存当前草稿，并加载目标需求自己的草稿。"""
+        if self._draft_req_id is not None:
+            self._drafts[self._draft_req_id] = self._edit.toPlainText()
+        self._draft_req_id = req_id
+        self._edit.blockSignals(True)
+        self._edit.setPlainText(self._drafts.get(req_id, "") if req_id else "")
+        self._edit.blockSignals(False)
 
     def _add_attachment(self, item: dict):
         # 唯一性：同一个本地文件不重复追加；剪贴板图片无源路径，允许连续粘贴多张
@@ -453,6 +464,7 @@ class DeziBeeWorkspace(QWidget):
     def set_req(self, req: Requirement | None):
         """切换当前需求：更新信息区 + 路由交互记录 + 注入 uploads 根目录。"""
         self._req = req
+        self.input_bar.set_draft_context(req.id if req else None)
         self.info_panel.set_req(req)
         if req is None:
             self.chat_log.set_conversation(None)

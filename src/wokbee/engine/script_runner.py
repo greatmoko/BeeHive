@@ -223,7 +223,19 @@ def run_one_script(
     rel = str(entry.get("path") or "")
     desc = str(entry.get("description") or rel)
     step_id = str(entry.get("id") or "")
-    script_file = root / rel
+    try:
+        root = root.resolve()
+        script_root = (root / "scripts").resolve()
+        script_file = (root / rel).resolve()
+        script_file.relative_to(script_root)
+    except (OSError, ValueError):
+        return ScriptRunItem(
+            path=rel,
+            ok=False,
+            error="脚本路径必须是项目 scripts/ 目录内的相对路径",
+            description=desc,
+            step_id=step_id,
+        )
     if not rel or not script_file.exists():
         return ScriptRunItem(
             path=rel,
@@ -253,7 +265,7 @@ def run_one_script(
         cmd = ["cscript", "//Nologo", str(script_file)]
         use_shell = False
     elif suffix == ".json":
-        # 约定：{"command":"..."} 或 {"argv":[...]}
+        # JSON 脚本只允许 argv；command 会重新进入 shell，不能作为自动管线步骤。
         try:
             data = json.loads(script_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
@@ -267,14 +279,37 @@ def run_one_script(
         if isinstance(data, dict) and isinstance(data.get("argv"), list) and data["argv"]:
             cmd = [str(x) for x in data["argv"]]
             use_shell = False
-        elif isinstance(data, dict) and str(data.get("command") or "").strip():
-            cmd = str(data["command"]).strip()
-            use_shell = True
+            allowed = {
+                "python", "python3", "python.exe", "py",
+                "node", "nodejs", "node.exe", "pwsh", "powershell", "powershell.exe",
+                "cmd", "cmd.exe", "bash", "cscript", "cscript.exe",
+                Path(sys.executable).name.lower(),
+            }
+            if Path(cmd[0]).name.lower() not in allowed:
+                return ScriptRunItem(
+                    path=rel,
+                    ok=False,
+                    error="JSON argv 仅允许 Python、Node、PowerShell、cmd、bash、cscript 解释器",
+                    description=desc,
+                    step_id=step_id,
+                )
+            for arg in cmd[1:]:
+                if re.match(r"^[a-zA-Z]:[/\\]|^[/\\]{1,2}", arg):
+                    try:
+                        Path(arg).resolve().relative_to(root)
+                    except (OSError, ValueError):
+                        return ScriptRunItem(
+                            path=rel,
+                            ok=False,
+                            error="JSON argv 不得引用项目目录之外的绝对路径",
+                            description=desc,
+                            step_id=step_id,
+                        )
         else:
             return ScriptRunItem(
                 path=rel,
                 ok=False,
-                error="JSON 脚本需含 command 或 argv",
+                error="JSON 脚本仅支持非空 argv，不支持 shell command",
                 description=desc,
                 step_id=step_id,
             )

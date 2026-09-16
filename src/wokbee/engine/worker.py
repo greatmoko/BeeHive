@@ -47,6 +47,7 @@ class AgentWorker(QThread):
     def run(self):
         # 在 worker 线程内预热引擎并构造 runner/request：UI 线程绝不 import 重型引擎。
         from wokbee.engine import ensure_engine_warm
+        from wokbee.core.project_run_queue import project_run_slot
 
         ensure_engine_warm()
         from wokbee.engine.runner import (
@@ -62,37 +63,38 @@ class AgentWorker(QThread):
             self.model_error.emit(str(e))
             return
 
-        if self._cancel_requested.is_set():
-            self.finished_result.emit(
-                RunResult(ok=False, outcome="cancelled", error="已取消")
+        with project_run_slot(self._project.id):
+            if self._cancel_requested.is_set():
+                self.finished_result.emit(
+                    RunResult(ok=False, outcome="cancelled", error="已取消")
+                )
+                return
+
+            self.runner = AgentRunner(self._settings)
+            self.request = RunRequest(
+                project=self._project,
+                project_root=self._project_root,
+                user_message=self._user_message,
+                resolved=resolved,
+                approval=self._approval,
+                max_steps=self._max_steps,
+                attachments=self.attachments,
             )
-            return
+            self.runner.on_event = self._on_event
+            self.runner.on_approval_needed = self._on_approval
+            self.runner.on_ask_user_needed = self._on_ask_user
+            if self._cancel_requested.is_set():
+                self.runner.request_cancel()
 
-        self.runner = AgentRunner(self._settings)
-        self.request = RunRequest(
-            project=self._project,
-            project_root=self._project_root,
-            user_message=self._user_message,
-            resolved=resolved,
-            approval=self._approval,
-            max_steps=self._max_steps,
-            attachments=self.attachments,
-        )
-        self.runner.on_event = self._on_event
-        self.runner.on_approval_needed = self._on_approval
-        self.runner.on_ask_user_needed = self._on_ask_user
-        if self._cancel_requested.is_set():
-            self.runner.request_cancel()
-
-        try:
-            if self.mode == "chat":
-                result = self.runner.run_chat(self.request)
-            else:
-                result = self.runner.run(self.request)
-        except Exception as e:
-            # 意外异常兜底为 failed 结果，避免 UI 停在 RUNNING
-            result = RunResult(ok=False, outcome="failed", error=str(e))
-        self.finished_result.emit(result)
+            try:
+                if self.mode == "chat":
+                    result = self.runner.run_chat(self.request)
+                else:
+                    result = self.runner.run(self.request)
+            except Exception as e:
+                # 意外异常兜底为 failed 结果，避免 UI 停在 RUNNING
+                result = RunResult(ok=False, outcome="failed", error=str(e))
+            self.finished_result.emit(result)
 
     def _on_event(self, kind: str, content: str, meta: dict):
         self.event_emitted.emit(kind, content, meta)
@@ -112,8 +114,6 @@ class AgentWorker(QThread):
             if self.runner is not None:
                 # 精确杀本次运行的进程树，不误杀其它并发运行的 execute
                 kill_all_cancellable_runs(cancel_event=self.runner._cancel)
-            else:
-                kill_all_cancellable_runs()
         except Exception:
             pass
         if self.runner is not None:
