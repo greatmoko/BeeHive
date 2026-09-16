@@ -1,7 +1,7 @@
 """DeziBee 工作区（右侧）：需求信息区 + 交互记录区 + 功能及用户输入区。
 
 功能及用户输入区布局与 WokBee 一致：输入框在上，功能按钮行在下方
-（打开文件夹 / 总结上下文 / 另起对话 / 导出 / 预览 | 状态 · AI模型 · 发送）。
+（打开文件夹 / 另起对话 / 导出 / 预览 | 状态 · AI模型 · 发送）。
 发送按钮与 WokBee 同款：空闲=发送，运行中显示均衡器动效、再点一次即暂停。
 支持粘贴/发送图片与文件附件（与 WokBee 同一套 chip UI 与落盘逻辑）。
 """
@@ -46,7 +46,6 @@ class InputBar(QFrame):
     open_folder_clicked = Signal()
     preview_clicked = Signal()
     export_clicked = Signal()
-    summarize_clicked = Signal()
     new_conversation_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
 
@@ -116,14 +115,6 @@ class InputBar(QFrame):
         open_folder.clicked.connect(self.open_folder_clicked.emit)
         row.addWidget(open_folder)
 
-        self._summarize_btn = QPushButton("📝")
-        self._summarize_btn.setToolTip("总结上下文")
-        self._summarize_btn.setFixedSize(34, 34)
-        self._summarize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._summarize_btn.setStyleSheet(self._icon_btn_style)
-        self._summarize_btn.clicked.connect(self.summarize_clicked.emit)
-        row.addWidget(self._summarize_btn)
-
         self._new_conv_btn = QPushButton("💬")
         self._new_conv_btn.setToolTip("另起对话")
         self._new_conv_btn.setFixedSize(34, 34)
@@ -142,7 +133,6 @@ class InputBar(QFrame):
 
         # 运行中需要禁用的功能按钮（打开文件夹保持可用）
         self._action_btns = [
-            self._summarize_btn,
             self._new_conv_btn,
             self._export_btn,
         ]

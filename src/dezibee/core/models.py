@@ -95,7 +95,6 @@ class Conversation:
     title: str = "主对话"
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
-    summary: str = ""  # 最新 Context Summary（markdown），另起对话时注入
     events: list[dict] = field(default_factory=list)  # ProjectEvent.to_dict() 列表
 
     def touch(self) -> None:
@@ -112,7 +111,6 @@ class Conversation:
             title=str(data.get("title") or "对话"),
             created_at=str(data.get("created_at") or _now()),
             updated_at=str(data.get("updated_at") or _now()),
-            summary=str(data.get("summary") or ""),
             events=list(data.get("events") or []),
         )
 
@@ -137,8 +135,6 @@ class Requirement:
     device_shell: str = ""
     # 交互记录
     conversations: list[Conversation] = field(default_factory=list)
-    # 设计上下文摘要（会话间继承）
-    context_summary: str = ""
     # 当前选中的对话 id（UI 状态，不参与来源）
     active_conv_id: str = ""
 
@@ -176,7 +172,6 @@ class Requirement:
             provider_name=str(data.get("provider_name") or ""),
             model_label=str(data.get("model_label") or ""),
             device_shell=str(data.get("device_shell") or ""),
-            context_summary=str(data.get("context_summary") or ""),
             active_conv_id=str(data.get("active_conv_id") or ""),
         )
         req.conversations = [

@@ -181,7 +181,7 @@ def slice_latest_round(events: list | None) -> list:
 
     结束标记（info 事件 + meta.session_end）在每轮运行/对话结束时写入，
     因此最新一轮 = 最后两个标记之间（仅一个标记时取其之前）。
-    供总结经验/对话记忆时过滤旧轮日志，避免把历史轮次塞给 AI 占用 token。
+    供总结经验时过滤旧轮日志，避免把历史轮次塞给 AI 占用 token。
     无标记时返回原列表（首轮或旧格式数据）。
     """
     if not events:

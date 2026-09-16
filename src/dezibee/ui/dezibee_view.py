@@ -151,7 +151,6 @@ class DeziBeeView(QWidget):
         bar = self.workspace.input_bar
         bar.preview_clicked.connect(self._on_preview)
         bar.export_clicked.connect(self._on_export)
-        bar.summarize_clicked.connect(self._on_summarize)
         bar.new_conversation_clicked.connect(self._on_new_conversation)
         bar.open_folder_clicked.connect(self._on_open_folder)
         bar.pause_clicked.connect(self._on_pause)
@@ -318,8 +317,7 @@ class DeziBeeView(QWidget):
         worker.start()
 
     def _build_user_message(self, req: Requirement, text: str) -> str:
-        conv = req.active_conversation()
-        prompt = build_design_prompt(req, conv)
+        prompt = build_design_prompt(req)
         return f"{prompt}\n\n【本轮指令】\n{text}"
 
     # ── Agent 事件回 UI（按需求隔离：落盘归属运行中的需求，渲染跟随当前查看） ──
@@ -542,41 +540,6 @@ class DeziBeeView(QWidget):
             self._append_conv_event(req.active_conversation(), "info", "用户请求暂停：正在终止当前交互。")
             self._persist(req)
 
-    # ── 总结上下文 ───────────────────────────────────────
-    def _on_summarize(self):
-        req = self._current_req()
-        if req is None:
-            return
-        conv = req.active_conversation()
-        if not conv.events:
-            from wokbee.ui.dialogs import tip
-
-            tip(self, self.theme, "当前对话还没有交互记录，暂无可总结内容。")
-            return
-        self.workspace.input_bar.set_running(True)
-        from dezibee.core.services import summarize_context
-
-        try:
-            summary = summarize_context(req, conversation=conv)
-        except Exception as e:
-            from wokbee.ui.dialogs import tip
-
-            tip(self, self.theme, f"总结失败：{e}")
-            self.workspace.input_bar.set_running(False)
-            return
-        req.context_summary = summary
-        conv.summary = summary
-        self._persist(req)
-        self.workspace.input_bar.set_running(False)
-        from wokbee.ui.dialogs import tip
-
-        tip(
-            self,
-            self.theme,
-            "上下文已总结（未删除原始交互记录）。\n"
-            "新的对话会优先使用此 Design Context 继续设计。",
-        )
-
     # ── 另起对话 ─────────────────────────────────────────
     def _on_new_conversation(self):
         req = self._current_req()
@@ -584,14 +547,13 @@ class DeziBeeView(QWidget):
             return
         conv = req.active_conversation()
         # 若当前对话没有任何记录，不重复开空对话
-        if not conv.events and req.context_summary == conv.summary and len(req.conversations) == 1:
+        if not conv.events and len(req.conversations) == 1:
             from wokbee.ui.dialogs import tip
 
             tip(self, self.theme, "当前对话还没有记录，直接在原对话继续即可。")
             return
         new_conv = Conversation(
             title=f"对话 {len(req.conversations) + 1}",
-            summary=req.context_summary or "",
         )
         req.conversations.append(new_conv)
         req.active_conv_id = new_conv.conv_id
@@ -603,7 +565,7 @@ class DeziBeeView(QWidget):
             self,
             self.theme,
             "已另起对话（同一需求）。\n"
-            "新对话将继承需求信息、当前 Demo/PRD 文件与最新上下文摘要。",
+            "新对话将继续使用当前需求信息、Demo/PRD 文件和本轮交互记录。",
         )
 
     # ── 模型切换 ─────────────────────────────────────────

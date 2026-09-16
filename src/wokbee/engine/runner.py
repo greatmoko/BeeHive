@@ -75,17 +75,6 @@ from wokbee.engine.ask_user import (
     is_ask_user_interrupt,
     normalize_ask_user_value,
 )
-from wokbee.engine.chat_memory import (
-    append_chat_memory,
-    build_chat_memory_tools,
-    summarize_chat_with_ai,
-)
-from wokbee.engine.agent_memory import (
-    build_memory_tools,
-    ensure_overview,
-    recall_block_summary,
-    recall_memories,
-)
 from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.credential_tools import build_credential_tools
 from wokbee.engine.autobee_tools import build_autobee_tools
@@ -117,7 +106,7 @@ class RunRequest:
     approval: ApprovalFlags
     max_steps: int = 40
     attachments: list[dict] = field(default_factory=list)
-    # 运行器模式：run（经验管线）| chat（交互）| design（DeziBee 设计，无经验/记忆）
+    # 运行器模式：run（经验管线）| chat（交互）| design（DeziBee 设计）
     runner_mode: str = ""
 
 
@@ -198,21 +187,20 @@ def _reset_run_state(project_id: str) -> InMemorySaver:
         return _CHECKPOINTERS[project_id]
 
 
-def _ensure_memory_files(project_root: Path, project: Project) -> None:
+def _ensure_experience_files(project_root: Path, project: Project) -> None:
     mem = memory_dir(project_root)
     mem.mkdir(parents=True, exist_ok=True)
     (mem / "experiences").mkdir(parents=True, exist_ok=True)
     agents_md = mem / "AGENTS.md"
-    # AGENTS.md 精简为最小项目标识；能力/环境/工具/目录/凭据约定统一由【记忆概述】承载
+    # AGENTS.md 只保留项目标识与项目经验约定，不生成任何记忆库文件。
     content = (
         f"# Project {project.title}\n\n"
         f"- id: `{project.id}`\n"
         f"- goal: {project.goal or '(未设置)'}\n"
         f"- approval: {project.approval.summary()}\n\n"
         "你是 WokBee——运行在用户本机上的工作助手。能力范围、系统环境、可调用工具、"
-        "目录与凭据约定见运行前注入的【记忆概述】；本轮项目态见【会话上下文】。\n"
-        "经验位于 memory/experiences/（只加载最新一份）；对话记忆在 memory/chat_memory.md；"
-        "跨项目记忆库可用 search_memory 检索，用户要求记住的内容用 save_user_memory 保存。\n"
+        "目录与凭据约定见本轮系统提示与【会话上下文】。\n"
+        "项目运行经验位于 memory/experiences/（只加载最新一份）。\n"
         "**禁止**访问 archives/；文件工具只用虚拟路径；凭据只给环境变量名，严禁写出账号密码。\n"
         f"项目名称最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
     )
@@ -851,9 +839,8 @@ class AgentRunner:
         mode=run：按经验管线推进项目目标。
         mode=chat：同等完整能力（文件/联网/execute/MCP/Skills），但不跑经验管线；
                    提问可与目标无关，并可改项目名称/目标。
-        mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验/
-                   记忆概述/跨项目记忆召回，不挂经验与跨项目记忆工具；
-                   保留 Skills 与对话记忆（load/append）。
+        mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验，
+                   不挂项目经验工具；保留 Skills 与当前会话能力。
         """
         # This flag is needed while constructing the backend below.  Keep it
         # at the start of the method so chat/run modes cannot hit an
@@ -862,7 +849,7 @@ class AgentRunner:
         if mode != "design":
             ensure_project_layout(req.project_root)
             workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
-            _ensure_memory_files(req.project_root, req.project)
+            _ensure_experience_files(req.project_root, req.project)
         else:
             # design 模式（DeziBee）：不用 WokBee 目录约定（不建 memory/workspace/
             # deliverables 等管线目录），只要 demo/prd/uploads（demo/index.html 由 store 创建）。
@@ -1007,13 +994,9 @@ class AgentRunner:
             logger.exception("加载 MCP 失败")
             self._emit("error", f"MCP 加载失败：{e}")
 
-        # 记忆/经验注入策略：
-        # - 项目经验（memory/experiences/ 最新一份）与【记忆概述】：首次与非首次运行都自动注入；
-        # - 跨项目相关记忆（search_memory 召回）：仅「首次运行」（执行管线为空）自动查询并注入；
-        #   非首次运行不自动查询，由 AI 按需主动用 search_memory 查询。
-        # - design 模式（DeziBee）：全部跳过——不注入经验/概述/召回，AI 也无需回溯说明。
-        #   注意 LessonStore.__init__ 会 ensure_project_layout（建 memory/ 等目录），
-        #   design 模式不能创建它。
+        # 项目经验注入策略：
+        # - run/chat 模式自动注入项目经验；design 模式跳过经验管线。
+        # - 经验只来自当前项目的 memory/experiences/，不读取全局或对话记忆。
         pipe_probe = peek_pipeline(req.project_root)
         first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
         lesson_store = None if design_mode else LessonStore(req.project_root)
@@ -1033,7 +1016,7 @@ class AgentRunner:
                     "info",
                     f"非首次运行（已有执行管线），仍自动注入项目经验："
                     f"{latest.name if latest else 'experiences/'}"
-                    f"；跨项目相关记忆不自动查询注入，AI 需要时可主动用 search_memory 查询。",
+                    ".",
                 )
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
@@ -1048,40 +1031,6 @@ class AgentRunner:
         context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
-        if mode == "run" and not first_run:
-            # 非首次运行：项目经验/记忆概述已注入；仅不自动查询跨项目相关记忆
-            context_extra.append(
-                "【本轮回溯说明】非首次运行（已有执行管线）：项目经验与【记忆概述】已注入；"
-                "未自动查询注入跨项目相关记忆，如需更多历史/跨项目记忆，请主动用 search_memory "
-                "/ load_conversation_memory 或读取 memory/experiences/ 查询。"
-            )
-
-        # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级。
-        # 仅首次运行自动查询注入；非首次运行不自动查询（由 AI 按需 search_memory）。
-        # design 模式（DeziBee）不做任何跨项目记忆召回。
-        intent_text = (req.user_message or "").strip() or (req.project.goal or "").strip()
-        memory_recall_block = ""
-        if first_run and not design_mode:
-            recall_failed = False
-            if intent_text:
-                try:
-                    memory_recall_block = recall_memories(intent_text, model=model, k=3)
-                except Exception:
-                    recall_failed = True
-                    logger.debug("记忆召回失败，按无召回处理", exc_info=True)
-                if recall_failed:
-                    self._emit("info", "记忆召回失败，已跳过（不影响执行）。")
-                elif memory_recall_block.strip():
-                    summary = recall_block_summary(memory_recall_block)
-                    self._emit(
-                        "info",
-                        "已从记忆库召回相关记忆（已注入本轮上下文）：\n" + summary,
-                    )
-                else:
-                    self._emit("info", "已检索记忆库，但未找到相关记忆（无注入）。")
-            else:
-                self._emit("info", "无用户意图与目标，跳过记忆召回。")
-
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -1090,8 +1039,6 @@ class AgentRunner:
             experience_digest=experience_digest,
             mode=mode,
             runtime_env_block=runtime_env_block,
-            memory_overview_digest="" if design_mode else ensure_overview(),
-            memory_recall_block=memory_recall_block,
             extra_lines=context_extra or None,
         )
 
@@ -1135,7 +1082,6 @@ class AgentRunner:
             + list(build_file_tools(backend=backend, emit=self._emit))
             + list(project_tools)
             + list(build_credential_tools())
-            + list(build_chat_memory_tools(project_root=req.project_root, emit=self._emit))
             + (
                 []
                 if design_mode
@@ -1148,15 +1094,6 @@ class AgentRunner:
                     emit=self._emit,
                     on_written=self._mark_experience_updated,
                     events_provider=self._snapshot_run_events,
-                ))
-            )
-            + (
-                []
-                if design_mode
-                else list(build_memory_tools(
-                    emit=self._emit,
-                    project_id=req.project.id,
-                    project_root=req.project_root,
                 ))
             )
             + [build_ask_user_tool()]
@@ -1241,9 +1178,8 @@ class AgentRunner:
                 )
             ],
             interrupt_on=interrupt_on or None,
-            # 经验只注入首条 user 的【会话上下文】（Reasonix：记忆写盘不改本会话 system），
-            # 不再把 memory= 传给 create_deep_agent，避免 MemoryMiddleware 每次请求
-            # 重新加载经验进 system——经验一变化即破坏 DeepSeek 前缀缓存。
+            # 经验只注入首条 user 的【会话上下文】，不使用外部 MemoryMiddleware，
+            # 避免每次请求重新加载经验进 system，保持前缀缓存稳定。
             skills=skills_paths or None,
             checkpointer=checkpointer,
             name=agent_name,
@@ -1614,7 +1550,7 @@ class AgentRunner:
         self._emit(
             "agent",
             (
-                "设计模式（DeziBee：不跑经验管线，不加载跨项目记忆）。"
+                "设计模式（DeziBee：不跑经验管线，不注入项目经验）。"
                 if chat_mode == "design"
                 else "交互模式（完整能力，不跑经验管线）。"
             )
@@ -1668,8 +1604,6 @@ class AgentRunner:
                 pass
 
             self._emit("info", "本轮回复已完成")
-            # 交互模式：对话结束只记录对话记忆；跨项目记忆/概述由 AI 按需用工具更新
-            self._maybe_record_chat_memory(req, final_text)
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
@@ -1677,62 +1611,11 @@ class AgentRunner:
             self._emit("error", f"交互失败：{err}")
             return RunResult(ok=False, outcome="failed", error=err)
         finally:
-            # 对话结束标记：经验/记忆总结时据此只取最新一轮日志
+            # 对话结束标记：经验总结时据此只取最新一轮日志
             try:
                 self._emit("info", "— 本轮对话结束 —", {"session_end": True})
             except Exception:
                 pass
-
-    def _maybe_record_chat_memory(
-        self,
-        req: RunRequest,
-        final_text: str,
-    ) -> bool:
-        """交互（对话）成功结束后，自动总结一条对话记忆追加到单文件。
-
-        仅成功时记录；失败/取消/待审批不走这里。无可用模型密钥时跳过。返回是否已写入。
-        """
-        if not (
-            getattr(req.resolved, "api_key", None)
-            and getattr(req.resolved, "api_host", None)
-        ):
-            return False
-        try:
-            run_log = collect_events_log(
-                self._snapshot_run_events() or None, max_chars=8000
-            )
-            self._emit(
-                "info",
-                "正在提炼本轮对话记忆（不主动加载；AI 需要时可按需注入）…",
-            )
-            chat = build_chat_model(
-                req.resolved,
-                timeout=self.settings.model_timeout_seconds,
-            )
-            entry = summarize_chat_with_ai(
-                model=chat,
-                goal=req.project.goal or req.user_message,
-                question=(req.user_message or "").strip(),
-                run_log=run_log,
-            )
-            if not entry:
-                self._emit("info", "对话记忆提炼失败，本轮未记录。")
-                return False
-            path = append_chat_memory(req.project_root, entry)
-            try:
-                rel = path.relative_to(req.project_root).as_posix()
-            except ValueError:
-                rel = str(path)
-            kws = (entry.get("keywords") or "").strip()
-            self._emit(
-                "info",
-                f"已记录本轮对话记忆到 `{rel}`"
-                + (f"（关键字：{kws}）" if kws else ""),
-            )
-            return True
-        except Exception:
-            logger.exception("记录对话记忆失败（不影响本次回复）")
-            return False
 
     @staticmethod
     def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:

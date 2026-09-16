@@ -1,4 +1,4 @@
-"""DeziBee 设计服务：Agent 会话桥接、免费上下文工具、上下文总结、模型解析。
+"""DeziBee 设计服务：Agent 会话桥接、模型解析。
 
 复用 WokBee 既有能力（需求文档第二十一节「复用现有能力 > 新增简单能力 > 引入新框架」）：
  - 发起 Agent 回复：AgentRunner.run_chat（完整文件 / execute / Skills 能力），
@@ -6,7 +6,6 @@
  - 需求 = `Project`（id=需求ID），需求目录即 project_root；Demo/PRD 由 Agent
    用现有文件工具直接写入需求目录。
  - 模型选择复用 `ProviderStore`（厂商 / 模型配置不重复实现）。
- - 上下文总结：轻量单轮模型调用（llm 直连），不跑完整 Agent 管线。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from wokbee.core.models import ApprovalFlags, Project
 from wokbee.core.settings import WokBeeSettings
 from tokbee.core.provider_store import ProviderStore
 
-from dezibee.core.models import Conversation, Requirement
+from dezibee.core.models import Requirement
 
 logger = logging.getLogger("dezibee")
 
@@ -154,31 +153,6 @@ class DeziBeeWorker(QThread):
                 logger.exception("请求取消 Agent 运行失败")
 
 
-# ── 上下文总结（轻量单轮） ──────────────────────────────
-
-
-
-def summarize_context(
-    req: Requirement,
-    conversation: Conversation | None = None,
-    model=None,
-) -> str:
-    """用轻量单轮模型调用生成该需求的 Design Context（markdown）。
-
-    材料：需求信息 + 该对话的交互记录 + 剩余对话摘要 + Demo/PRD 文件清单与关键内容。
-    失败时返回含失败原因的空摘要（调用方降级：保留旧摘要、UI 提示）。
-    """
-    from dezibee.core.summarizer import build_summary_material, perform_summarize
-
-    material = build_summary_material(req, conversation=conversation)
-    try:
-        summary = perform_summarize(material, model=model)
-    except Exception as e:
-        logger.exception("DeziBee 上下文总结失败")
-        return f"（上下文总结失败：{e}）"
-    return summary
-
-
 def _shell_directive(req: Requirement) -> str:
     """设备外壳/实际尺寸指令：默认壳取需求设置，AI 可按卡片覆盖。"""
     shell = (getattr(req, "device_shell", "") or "").strip().lower()
@@ -209,7 +183,7 @@ def _shell_directive(req: Requirement) -> str:
     )
 
 
-def build_design_prompt(req: Requirement, conversation: Conversation | None) -> str:
+def build_design_prompt(req: Requirement) -> str:
     """组装 DeziBee Agent 首条系统提示词（目录规则与产出结构）。"""
     parts: list[str] = []
     parts.append(
@@ -267,10 +241,6 @@ def build_design_prompt(req: Requirement, conversation: Conversation | None) -> 
         "用户提到这些称呼时按上述对照确定唯一要改的数据对象；页面改动记得同步其 PRD 章节"
         "（prdId 双向关联）；实在无法确定改哪个对象时用 ask_user 澄清。"
     )
-    if conversation and conversation.summary:
-        parts.append(
-            f"以下为本需求最近的上下文摘要（Design Context），供继续设计时沿用：\n{conversation.summary}"
-        )
     return "\n\n".join(parts)
 
 

@@ -159,7 +159,7 @@ class _CompactWorker(QThread):
 
 
 class _RefineMetaWorker(QThread):
-    """后台调用 AI，根据对话记忆生成新的项目名称与目标。"""
+    """后台调用 AI，根据最近交互记录生成新的项目名称与目标。"""
 
     finished_ok = Signal(str, str)  # title, goal
     failed = Signal(str)
@@ -171,7 +171,7 @@ class _RefineMetaWorker(QThread):
         *,
         current_title: str,
         current_goal: str,
-        memory_context: str,
+        recent_context: str,
         max_title_len: int,
         parent=None,
     ):
@@ -180,7 +180,7 @@ class _RefineMetaWorker(QThread):
         self._project = project
         self._current_title = current_title
         self._current_goal = current_goal
-        self._memory_context = memory_context
+        self._recent_context = recent_context
         self._max_title_len = max_title_len
         self._cancelled = False
         self._client = None
@@ -218,7 +218,7 @@ class _RefineMetaWorker(QThread):
         self._client = client
         client.cancel_check = lambda: self._cancelled
         system = (
-            "你是项目元信息助手。根据当前名称、目标与最近「对话记忆」，"
+            "你是项目元信息助手。根据当前名称、目标与最近交互记录，"
             "生成更贴切的「项目名称」和「项目目标」。\n"
             f"硬性要求：\n"
             f"1. 名称尽量短，不超过 {self._max_title_len} 个字，不要整句目标当名称。\n"
@@ -229,7 +229,7 @@ class _RefineMetaWorker(QThread):
         user = (
             f"当前名称：{self._current_title or '（空）'}\n"
             f"当前目标：{self._current_goal or '（空）'}\n\n"
-            f"最近对话记忆：\n{self._memory_context or '（无）'}"
+            f"最近交互记录：\n{self._recent_context or '（无）'}"
         )
         try:
             resp = self._client.chat(
@@ -729,8 +729,6 @@ class _ProjectWorkspace(QWidget):
         self._status_before_lesson: ProjectStatus | None = None
         self._compact_worker: _CompactWorker | None = None
         self._refine_worker: _RefineMetaWorker | None = None
-        self._memory_worker: MemoryWorker | None = None
-        self._memory_worker_project_id: str | None = None
         self._build()
 
     def _build(self):
@@ -1045,13 +1043,16 @@ class _ProjectWorkspace(QWidget):
         if not project:
             return
 
-        # AI 命名/写目标改为从「对话记忆」总结（默认加载最近 2 轮），不再翻聊天记录
-        from wokbee.engine.chat_memory import read_recent_chat_memory
-
         root = self.store.path_for(self._project_id)
-        memory_context = read_recent_chat_memory(root, rounds=2, max_chars=8000)
-        if not memory_context:
-            memory_context = "（暂无对话记忆；可先进行一次交互再让 AI 提炼名称/目标）"
+        recent_events, _remaining = self.store.events_window(
+            self._project_id, skip_from_end=0, count=20
+        )
+        context_lines = [
+            f"[{ev.kind}] {(ev.content or '').strip()}"
+            for ev in reversed(recent_events)
+            if (ev.content or "").strip()
+        ]
+        recent_context = "\n".join(context_lines)[-8000:] or "（暂无最近交互记录）"
         self._essentials.set_ai_refine_busy(True)
         self._refine_project_id = self._project_id  # 发起时捕获，切换项目不写错
         worker = _RefineMetaWorker(
@@ -1059,7 +1060,7 @@ class _ProjectWorkspace(QWidget):
             project,
             current_title=project.title,
             current_goal=project.goal,
-            memory_context=memory_context,
+            recent_context=recent_context,
             max_title_len=MAX_PROJECT_TITLE_LEN,
             parent=self,
         )
@@ -1782,10 +1783,7 @@ class _ProjectWorkspace(QWidget):
         self.status_changed.emit()
 
     def _on_archive(self):
-        """归档本次会话；历史经验一并归档，仅保留最新一份经验与 scripts/。
-
-        归档完成后在后台线程更新跨项目 Agent 记忆（不阻塞 UI）。
-        """
+        """归档本次会话；历史经验一并归档，仅保留最新一份经验与 scripts/。"""
         if not self._project_id:
             return
         if self._worker and self._worker.isRunning():
@@ -1801,7 +1799,7 @@ class _ProjectWorkspace(QWidget):
             "• 经验文档仅保留**最新一份**，历史经验一并归档\n"
             "• 保留：项目名称、目标、审核策略、uploads/（含参考材料）\n"
             f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n"
-            "• 归档后在后台更新记忆概述与跨项目记忆（不影响继续使用）\n\n"
+            "• 项目运行经验继续保留，记忆概述、跨项目记忆和对话记忆不再使用\n\n"
             "是否继续？",
         )
         if not ok:
@@ -1814,61 +1812,7 @@ class _ProjectWorkspace(QWidget):
         if not dest:
             return
         self._archive_old_experiences(self._project_id, dest)
-        self._start_memory_worker(self._project_id)
         self._refresh()
-
-    def _start_memory_worker(self, project_id: str) -> None:
-        """归档后后台更新跨项目 Agent 记忆（MemoryWorker 线程；已有在跑则跳过）。"""
-        from wokbee.engine.worker import MemoryWorker
-
-        if self._memory_worker and self._memory_worker.isRunning():
-            logger.info("记忆库后台更新已在进行，跳过本次触发")
-            return
-        project = self.store.get(project_id)
-        if not project:
-            return
-        self._memory_worker_project_id = project_id  # 发起时捕获，切项目不串写
-        wk = MemoryWorker(
-            self.store.settings,
-            project,
-            self.store.path_for(project_id),
-            parent=self,
-        )
-        wk.event_emitted.connect(self._on_memory_worker_event)
-        wk.finished_memory.connect(self._on_memory_worker_finished)
-        wk.failed.connect(self._on_memory_worker_failed)
-        self._memory_worker = wk
-        wk.start()
-
-    def _on_memory_worker_event(self, kind: str, content: str, meta: object) -> None:
-        """MemoryWorker 事件写回发起项目（保数据），仅当前可见时刷时间线。"""
-        target = self._memory_worker_project_id or self._project_id
-        if not target:
-            return
-        ev = ProjectEvent(
-            kind=kind if kind in ("info", "error", "agent") else "info",
-            content=content,
-        )
-        self.store.append_event(target, ev)
-        if target == self._project_id:
-            self._timeline.append_event(ev)
-
-    def _on_memory_worker_finished(self) -> None:
-        target = self._memory_worker_project_id or self._project_id
-        self._memory_worker = None
-        self._memory_worker_project_id = None
-        if target:
-            self._schedule_essentials_refresh()
-
-    def _on_memory_worker_failed(self, err: str) -> None:
-        target = self._memory_worker_project_id or self._project_id
-        self._memory_worker = None
-        self._memory_worker_project_id = None
-        if target:
-            ev = ProjectEvent(kind="error", content=f"记忆库后台更新失败：{err}")
-            self.store.append_event(target, ev)
-            if target == self._project_id:
-                self._timeline.append_event(ev)
 
     def _archive_old_experiences(self, project_id: str, dest: Path) -> None:
         """把 memory/experiences/ 下除最新一份外的历史经验归档到 dest，只保留最新。"""
