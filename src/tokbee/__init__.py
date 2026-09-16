@@ -1,4 +1,4 @@
-"""WokBee 应用壳（对话模块品牌为 TokBee）。"""
+"""BeeHive 应用壳（包含 TokBee、WokBee、AutoBee 和 DeziBee）。"""
 
 __version__ = "0.2.2"
-__app_name__ = "WokBee"
+__app_name__ = "BeeHive"

@@ -23,7 +23,7 @@ if sys.platform == "win32":
 # Windows：独立 AppUserModelID，任务栏才显示应用图标而非 python.exe 图标
 if sys.platform == "win32":
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WokBee.App")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BeeHive.App")
     except Exception:
         pass
 
@@ -95,7 +95,7 @@ def _pick_qt_style() -> str:
 
 
 class Application:
-    """WokBee 应用程序入口类。"""
+    """BeeHive 应用程序入口类。"""
 
     def __init__(self):
         self.config = Config()
@@ -113,7 +113,7 @@ class Application:
             existing if isinstance(existing, QApplication) else QApplication(sys.argv)
         )
         self.qt_app.setStyle(_pick_qt_style())
-        self.qt_app.setApplicationName("WokBee")
+        self.qt_app.setApplicationName("BeeHive")
         self.qt_app.setFont(_pick_ui_font())
         app_icon = load_app_icon()
         if not app_icon.isNull():

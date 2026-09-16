@@ -1,14 +1,14 @@
-# WokBee
+# BeeHive
 
 [![GitHub](https://img.shields.io/badge/GitHub-greatmoko%2FWOKBEE__1-blue?logo=github)](https://github.com/greatmoko/WOKBEE_1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.2**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
-在同一套界面中集成四类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**、**消息网关（多 IM 手机遥控本地 Agent）**，统一对接 OpenAI 兼容 API。
+**BeeHive** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.2**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。
+BeeHive 在同一套界面中集成四类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**、**消息网关（多 IM 手机遥控本地 Agent）**，统一对接 OpenAI 兼容 API。
 
 ### 设计思想
 
-与普通「一次性对话式 Agent」不同，WokBee 围绕 **经验沉淀、脚本固化、按项目反复运行** 来设计——越用越省 Token，对模型能力的要求也越低：
+与普通「一次性对话式 Agent」不同，BeeHive 的 WokBee 项目功能围绕 **经验沉淀、脚本固化、按项目反复运行** 来设计——越用越省 Token，对模型能力的要求也越低：
 
 | 机制 | 说明 |
 |------|------|
@@ -20,7 +20,7 @@
 
 > 一句话：**第一次让 AI「探路并记下来」，之后主要靠本机脚本和经验自己跑。**
 
-本项目已在 GitHub 开源，上述机制的实现方式、Prompt、审批策略等均可 Fork 后按你的实际需求自行修改。
+BeeHive 已在 GitHub 开源，上述机制的实现方式、Prompt、审批策略等均可 Fork 后按你的实际需求自行修改。
 
 ---
 
@@ -152,7 +152,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python main.py
 ```
 
-启动成功后，窗口标题显示 **WokBee v0.2.2**。
+启动成功后，窗口标题显示 **BeeHive v0.2.2**。
 
 ---
 
@@ -323,7 +323,7 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 ├── README.md               # 项目说明
 ├── pyproject.toml
 ├── requirements.txt
-├── WokBee.spec             # PyInstaller 打包配置
+├── BeeHive.spec            # PyInstaller 打包配置
 ├── scripts/
 │   ├── make_release.ps1    # 制作源码发布包（可选）
 │   └── build_exe.ps1       # 打包 exe（可选）

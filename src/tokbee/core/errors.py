@@ -1,4 +1,4 @@
-"""WokBee 统一错误类型体系。"""
+"""BeeHive 统一错误类型体系。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 
 class WokBeeError(Exception):
-    """所有 WokBee 业务异常的基类。"""
+    """所有 BeeHive 业务异常的基类。"""
 
 
 class AIError(WokBeeError):

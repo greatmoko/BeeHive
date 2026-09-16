@@ -1,4 +1,4 @@
-# Create forum release zip: WokBee-vX.Y.Z.src.zip
+# Create forum release zip: BeeHive-vX.Y.Z.src.zip
 # Run from repo root: powershell -ExecutionPolicy Bypass -File scripts/make_release.ps1
 
 $ErrorActionPreference = "Stop"
@@ -13,22 +13,22 @@ if (Test-Path $PyProject) {
 }
 
 $ReleaseDir = Join-Path $Root "release"
-$SrcZip = Join-Path $ReleaseDir "WokBee-v$Version.src.zip"
+$SrcZip = Join-Path $ReleaseDir "BeeHive-v$Version.src.zip"
 
-Write-Host "WokBee src release v$Version" -ForegroundColor Cyan
+Write-Host "BeeHive src release v$Version" -ForegroundColor Cyan
 
 $ExcludeNames = @(
     ".venv", "venv", "dist", "build", "release",
     ".git", ".cursor", ".idea", ".vscode",
     ".wokbee", "__pycache__", "artifacts",
     ".learnings", ".agents",
-    "WokBee.spec"
+    "BeeHive.spec"
 )
 
 if (Test-Path $ReleaseDir) { Remove-Item $ReleaseDir -Recurse -Force }
 New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
 
-$TempSrc = Join-Path $env:TEMP "WokBee-src-$Version"
+$TempSrc = Join-Path $env:TEMP "BeeHive-src-$Version"
 if (Test-Path $TempSrc) { Remove-Item $TempSrc -Recurse -Force }
 New-Item -ItemType Directory -Path $TempSrc | Out-Null
 

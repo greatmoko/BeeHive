@@ -46,7 +46,7 @@ COLORS = {
 
 
 class Theme:
-    """WokBee 主题管理器。"""
+    """BeeHive 主题管理器。"""
 
     def __init__(self, **_kw):
         self.colors: dict[str, str] = dict(COLORS)

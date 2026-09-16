@@ -69,7 +69,7 @@ def setup_crash_reporting(logger: logging.Logger) -> Path | None:
         log_dir = default_data_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         _fault_log, path = _open_log_file(log_dir, "fatal.log")
-        _fault_log.write("\n=== WokBee crash diagnostics enabled ===\n")
+        _fault_log.write("\n=== BeeHive crash diagnostics enabled ===\n")
         faulthandler.enable(_fault_log, all_threads=True)
     except OSError:
         logger.exception("无法启用 fatal.log 崩溃诊断")

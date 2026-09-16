@@ -1,4 +1,4 @@
-"""WokBee / TokBee / AutoBee 系统默认 UI 样式（权威入口）。
+"""BeeHive（含 TokBee / WokBee / AutoBee）系统默认 UI 样式（权威入口）。
 
 配色见 ``tokbee.ui.styles.theme.COLORS``。
 控件 QSS / 应用函数见本模块。

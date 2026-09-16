@@ -1,4 +1,4 @@
-# WokBee Windows exe build (PyInstaller)
+# BeeHive Windows exe build (PyInstaller)
 # Run from repo root: powershell -ExecutionPolicy Bypass -File scripts/build_exe.ps1
 
 $ErrorActionPreference = "Stop"
@@ -14,12 +14,12 @@ if (-not (Test-Path $Python)) {
 
 & $Python -m pip install -q pyinstaller
 
-Write-Host "Building WokBee..." -ForegroundColor Cyan
+Write-Host "Building BeeHive..." -ForegroundColor Cyan
 
 & $PyInstaller `
     --noconfirm `
     --clean `
-    --name WokBee `
+    --name BeeHive `
     --windowed `
     --icon "src\tokbee\resources\icon.ico" `
     --paths "src" `
@@ -39,4 +39,4 @@ Write-Host "Building WokBee..." -ForegroundColor Cyan
 
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Done: dist\WokBee\WokBee.exe" -ForegroundColor Green
+Write-Host "Done: dist\BeeHive\BeeHive.exe" -ForegroundColor Green

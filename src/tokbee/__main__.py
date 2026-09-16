@@ -8,7 +8,7 @@ from tokbee.utils.logger import setup_crash_reporting, setup_logger
 def main():
     logger = setup_logger()
     setup_crash_reporting(logger)
-    logger.info("WokBee 启动中...")
+    logger.info("BeeHive 启动中...")
 
     try:
         from tokbee.app import Application
@@ -16,10 +16,10 @@ def main():
         app = Application()
         exit_code = app.run()
     except Exception:
-        logger.exception("WokBee 启动或运行失败")
+        logger.exception("BeeHive 启动或运行失败")
         return 1
 
-    logger.info("WokBee 已退出")
+    logger.info("BeeHive 已退出")
     return exit_code
 
 
