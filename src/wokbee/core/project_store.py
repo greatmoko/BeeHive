@@ -382,11 +382,18 @@ class ProjectStore:
             cached = _event_lines_cache.get(project_id)
             if cached is not None:
                 cached.append(line.rstrip("\n"))
-        # 触碰更新时间（持锁重读，避免覆盖并行中的 title/goal 写入）
-        with _META_LOCK:
-            project = self.get(project_id)
-            if project:
-                self.save(project)
+        # 事件流可能每秒产生大量工具事件，不要为每条事件重写 project.json 和
+        # _index.json；这会与 AutoBee/UI 并发刷新形成高频原子替换。用户事件、错误、
+        # 经验和生命周期终态足以更新项目时间，其余事件由后续状态/元数据保存带上。
+        meta = event.meta if isinstance(event.meta, dict) else {}
+        should_touch = event.kind in {"user", "error", "lesson"} or bool(
+            meta.get("lifecycle") in {"started", "finished"}
+        )
+        if should_touch:
+            with _META_LOCK:
+                project = self.get(project_id)
+                if project:
+                    self.save(project)
 
     def _event_lines(self, project_id: str) -> list[str]:
         """读取项目的 events.jsonl 行列表（不做 json 解析），按 project_id 缓存。"""
