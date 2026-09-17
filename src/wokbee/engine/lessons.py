@@ -654,7 +654,8 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
    - 以时间序「压缩轨迹」为基准；文末无序线索仅作检索辅助。
    - 执行顺序直接体现在编号中（脚本步骤 ↔ AI 环节按真实顺序排），不再单列「执行顺序/可本地脚本步骤/需 AI 完成的步骤」章节。
    - 若后续步骤依赖前置结果（需要前置数据/确认才能选对输入），应按**逻辑依赖**顺序排，勿把历史里「先取数、后补前置确认」的脏顺序原样固化。例如「先用 Get-Date 确认当前日期，再选取对应日期的数据」「先读配置，再跑脚本」。
-   - 剔除所有失败调用、试错、被弃用/重复的尝试、未采用的方案，合并同类步骤。
+    - 剔除所有失败调用、试错、被弃用/未采用的方案；保留每个真实业务步骤的边界，
+      不强制合并相邻的同类型步骤，因为同一脚本的重复执行可能是有意的验证步骤。
    - 每步必须按**固定格式**书写：
      `序号. 执行角色:"{执行内容}";[步骤说明]`
      - **序号**：从 1 开始递增。
@@ -668,8 +669,9 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
 5. 自动化脚本与管线约定（重要）：
    - 可复用本地命令落到项目 `scripts/`；运行输出落到 `workspace/script_callback_*.md`。
    - **只在本次运行日志中确实出现过、且尚未固化的可复用命令才写 script_files**（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
-     禁止凭空发明「预检/校验/回读」等日志里没有的脚本；禁止把同一脚本重复写进多个步骤。
-   - **pipeline_steps 必须基于本次运行日志中实际执行过的步骤，保持简洁**；每一步判定类型：
+      禁止凭空发明「预检/校验/回读」等日志里没有的脚本；同一脚本只有在真实路径确需
+      重复验证时才重复写入步骤。
+    - **pipeline_steps 必须基于本次运行日志中实际执行过的步骤，按真实时间顺序逐步列出**；每一步判定类型：
      - `script`：能够确定性、机械、重复执行的工作（API 请求、文件处理、数据转换、发布复制等）→
        固化为 scripts/ 脚本，后续直接执行、不耗 Token；
      - `ai`：必须依赖 AI 的理解/分析/整理/创意/写作/判断的工作（如“根据收集的材料撰写报告”）→
@@ -684,7 +686,7 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
    - **交付约定**：若目标要求把产物放到 deliverables/，pipeline_steps 必须包含一个
      「发布」脚本步骤——把脚本**实际产出文件**复制/移动到 deliverables/（保留原始文件与
      文件名，**不要合并成 final.md 代替原始产物**）；脚本步骤 path 指向 scripts/ 下真实文件。
-   - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾一路执行——script 步骤自动跑
+    - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾逐步执行——script 步骤自动跑
      （不耗 Token）；ai 步骤调用 LLM 执行已确定的业务任务（按需消耗 Token）。
      **不生成 final_ai**，也不在管线结尾强制再唤一次 AI；如果“总结/写报告/生成内容”本身就是
      用户 Goal 的一部分，它应作为正常的 `ai` 步骤固化在管线中。
@@ -791,6 +793,7 @@ def summarize_lesson_with_ai(
     run_log: str,
     scripts_context: str,
     environment_hint: str = "",
+    phase_states: str = "",
 ) -> dict[str, Any]:
     """调用模型总结经验；失败时抛出异常由调用方回退。
 
@@ -806,6 +809,8 @@ def summarize_lesson_with_ai(
         f"本轮 outcome：{outcome}\n\n"
         f"## 上一份经验（可能为空）\n{previous_experience or '（无）'}\n\n"
         f"## 本次运行日志\n{run_log}\n\n"
+        f"## 本轮阶段状态（按时间顺序；失败时必须据此修正管线）\n"
+        f"{phase_states or '（没有预定义 pipeline 阶段；请从运行日志还原真实步骤）'}\n\n"
         f"## 现有脚本与 pipeline\n{scripts_context}\n\n"
         f"## 环境提示\n{environment_hint or '（无）'}\n\n"
         "请输出符合要求的 JSON。你总结的经验/管线/脚本在后续运行时会被**严格照章执行**，"
@@ -814,11 +819,12 @@ def summarize_lesson_with_ai(
         "success_path 只保留**成功且必要**的有序步骤，每步按固定格式："
         "`序号. 执行角色:\"{执行内容}\";[步骤说明]`（执行角色=AI/工具调用/脚本执行/系统执行；"
         "`{}` 内写详细命令/脚本地址/提示词，`[]` 内写解释性说明），执行顺序直接体现在编号中，"
-        "剔除失败/试错/被弃用尝试并合并同类步骤。notes 用无序列表，每条=**加粗问题**+解决办法。"
+        "剔除失败/试错/被弃用尝试，但不要强制合并相邻的同类型步骤；"
+        "notes 用无序列表，每条=**加粗问题**+解决办法。"
         "若日志里出现可复用"
         "的本地脚本/命令（如 execute 跑 .py/.bat、Skill 脚本），请在 script_files 写出完整源码，"
         "并在 pipeline_steps 明确给出每次执行的脚本地址/命令。"
-        "pipeline_steps 以日志中真实跑过的步骤为准，禁止凭空新增；每步判定类型："
+        "pipeline_steps 以日志中真实跑过的步骤为准，严格保持实际顺序和步骤边界，禁止凭空新增；每步判定类型："
         "`script`=确定性/机械工作（API 请求、文件处理、数据转换、发布复制等，后续自动执行不耗 Token）；"
         "`ai`=必须依赖 AI 的理解/分析/整理/创意/写作/判断的业务任务（如“根据收集的材料撰写报告”，"
         "后续运行照样调 LLM 执行该固定任务，但**禁止重新规划整个 Pipeline**）。"
@@ -831,6 +837,9 @@ def summarize_lesson_with_ai(
         "若目标要求交付文件到 deliverables/，pipeline_steps 必须包含一个发布步骤："
         "把脚本**实际产出文件**复制/移动到 deliverables/（保留原始文件，不要合并成 final.md 代替产物）。"
         "简单任务（执行→发布）通常 2~3 步。"
+        "请逐一判断阶段状态：成功、失败-AI接管后成功、失败-AI接管后失败。"
+        "只要存在失败阶段，就必须直接产出修正后的 pipeline_steps/脚本方案，"
+        "让下一轮按修正版执行并更新项目经验；不要只描述失败而不修正。"
         "若用到了第三方代码/登录/环境参数，"
         "请填到 used_skills 与 reference_materials，供保存到 uploads/references/ 供下次稳定复跑。"
     )
@@ -1037,7 +1046,8 @@ def _normalize_ai_pipeline_steps(raw: Any) -> list[dict[str, Any]]:
             if not step["description"]:
                 step["description"] = "AI 步骤"
         out.append(step)
-    return _dedupe_identical_pipeline_steps(out)
+    # 不去重：同一脚本在不同步骤重复执行可能是经过验证的成功路径。
+    return out
 
 
 def _dedupe_identical_pipeline_steps(steps: list[dict]) -> list[dict]:
@@ -1308,8 +1318,8 @@ def merge_pipeline_steps(
 
     AI 引用的 script 路径若在磁盘上不存在，尝试按文件名/label 匹配轨迹固化或
     AI 手写产生的真实脚本；仍匹配不上则保留原条目（由写入后的幽灵清理兜底移除）。
-    轨迹固化出的、AI 管线完全没覆盖的脚本步骤追加到管线开头（执行顺序上取数类
-    脚本通常先行），保证「跑过的可复用命令」不丢失。
+    AI 明确给出 pipeline_steps 时完全尊重其顺序，不再把未覆盖脚本前插，避免
+    改变无 pipeline 探索出的真实脚本/AI 交错路径。AI 未给清单时才使用轨迹顺序。
     """
     merged: list[dict[str, Any]] = []
     for raw in ai_steps or []:
@@ -1334,22 +1344,19 @@ def merge_pipeline_steps(
         covered.add(base)
         covered.add(str(step.get("path") or "").replace("\\", "/").strip().lower())
 
-    prefix: list[dict[str, Any]] = []
-    for st in list(solid_steps or []):
-        rel = str(getattr(st, "rel_path", "") or "")
-        if not rel or rel.lower() in covered:
-            continue
-        prefix.append(
-            {
-                "type": "script",
-                "path": rel,
-                "tool": getattr(st, "tool", "") or "script",
-                "description": (getattr(st, "description", "") or "轨迹固化脚本")[:200],
-                "args": getattr(st, "args", {}) or {},
-            }
-        )
-        covered.add(rel.lower())
-    return prefix + merged
+    if merged:
+        return merged
+    return [
+        {
+            "type": "script",
+            "path": getattr(st, "rel_path", "") or "",
+            "tool": getattr(st, "tool", "") or "script",
+            "description": (getattr(st, "description", "") or "轨迹固化脚本")[:200],
+            "args": getattr(st, "args", {}) or {},
+        }
+        for st in list(solid_steps or [])
+        if getattr(st, "rel_path", "")
+    ]
 
 
 def write_ai_lesson(

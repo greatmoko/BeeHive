@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -32,7 +34,7 @@ class ScriptRunItem:
 
 @dataclass
 class PhaseResult:
-    """一个连续阶段（若干同类型步骤）的执行结果。"""
+    """单个有序步骤的执行结果。"""
 
     type: str  # script | ai
     ok: bool = True
@@ -53,13 +55,14 @@ class PipelineRunResult:
     ai_steps: list[dict] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
     phases: list[dict] = field(default_factory=list)
+    phase_results: list[PhaseResult] = field(default_factory=list)
     combined_output: str = ""
     error_summary: str = ""
     pipeline_path: Path | None = None
     need_ai: bool = True
     reason: str = ""
-    # 交错执行：当前停在第几个 phase（0-based），后续由 runner 继续
-    # （phase = 连续同 type 步骤合并后的阶段；整体仍是有序一路执行）
+    # 交错执行：当前停在第几个 phase（0-based），后续由 runner 继续。
+    # 每个 pipeline step 都是一个 phase，保留原始步骤边界，便于状态追踪。
     next_phase_index: int = 0
     context_parts: list[str] = field(default_factory=list)
 
@@ -142,15 +145,12 @@ def normalize_steps(data: dict, *, keep_ai: bool = True) -> list[dict]:
 
 
 def group_phases(steps: list[dict]) -> list[dict]:
-    """将同类型连续步骤合并为阶段，例如 script→ai→script。"""
-    phases: list[dict] = []
-    for step in steps:
-        t = step.get("type")
-        if not phases or phases[-1]["type"] != t:
-            phases.append({"type": t, "steps": [step]})
-        else:
-            phases[-1]["steps"].append(step)
-    return phases
+    """按 pipeline 数组保留逐步边界，不把连续 script/ai 合并。"""
+    return [
+        {"type": step.get("type"), "steps": [step]}
+        for step in steps
+        if isinstance(step, dict)
+    ]
 
 
 def _persist_script_callback(project_root: Path, script_rel: str, body: str) -> str | None:
@@ -187,6 +187,47 @@ def _persist_script_callback(project_root: Path, script_rel: str, body: str) -> 
         return out.relative_to(root).as_posix()
     except ValueError:
         return str(out)
+
+
+def publish_pipeline_outputs(project_root: Path, *, recent_minutes: int = 15) -> list[str]:
+    """Copy actual pipeline outputs to deliverables without converting them to Markdown."""
+    root = Path(project_root)
+    ws = root / "workspace"
+    target = root / "deliverables"
+    target.mkdir(parents=True, exist_ok=True)
+    published: list[str] = []
+    infra = {
+        ".git", ".vscode", "__pycache__", "scripts", "memory", "uploads",
+        "deliverables", "workspace", "archives",
+    }
+
+    def copy_to(src: Path, rel: Path) -> None:
+        try:
+            dst = target / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            published.append(rel.as_posix())
+        except OSError:
+            pass
+
+    if ws.exists():
+        for path in sorted(ws.rglob("*")):
+            if path.is_file() and not (
+                path.name.startswith("script_callback_") and path.suffix.lower() == ".md"
+            ):
+                copy_to(path, path.relative_to(ws))
+
+    cutoff = time.time() - max(1, int(recent_minutes)) * 60
+    top_level = root.iterdir() if root.exists() else []
+    for path in top_level:
+        if not path.is_file() or path.name in infra:
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff:
+                copy_to(path, Path(path.name))
+        except OSError:
+            continue
+    return published
 
 
 def _script_touches_archives(cmd, script_file: Path) -> bool:
@@ -425,7 +466,7 @@ def peek_pipeline(project_root: Path) -> PipelineRunResult:
         result.need_ai = True
         result.ok = True
         return result
-    result.reason = f"有序管线共 {len(steps)} 步、{len(result.phases)} 个阶段"
+    result.reason = f"有序管线共 {len(steps)} 步（逐步执行，不合并相邻步骤）"
     result.need_ai = any(s.get("type") == "ai" for s in steps)
     result.ok = True
     return result
@@ -439,7 +480,7 @@ def run_pipeline_until_ai_or_end(
     prior_context: list[str] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> PipelineRunResult:
-    """从 start_phase 起执行：连续脚本阶段会跑完；遇到 AI 阶段则暂停并 need_ai。
+    """从 start_phase 起执行脚本；遇到 AI 步骤则暂停并 need_ai。
 
     若整段均为脚本且成功，则 need_ai=False。
     """
@@ -459,6 +500,8 @@ def run_pipeline_until_ai_or_end(
                 project_root, phase["steps"],
                 timeout_sec=timeout_sec, cancel_event=cancel_event,
             )
+            pr.index = i
+            result.phase_results.append(pr)
             all_items.extend(pr.items)
             if pr.output:
                 context.append(
@@ -476,14 +519,14 @@ def run_pipeline_until_ai_or_end(
                 result.next_phase_index = i
                 result.ai_steps = []  # 本阶段失败，交给 AI 补救本步
                 result.reason = (
-                    f"管线第 {i+1} 阶段（脚本）失败，暂停；"
+                    f"管线第 {i+1} 步（脚本）失败，暂停；"
                     "请 AI 补救后再继续后续步骤"
                 )
                 return result
             i += 1
             continue
 
-        # AI 阶段：暂停，把本阶段 AI 步骤交给模型
+        # AI 步骤：暂停，把当前业务任务交给模型
         result.items = all_items
         result.ok = True
         result.combined_output = "\n\n".join(context)
@@ -496,7 +539,7 @@ def run_pipeline_until_ai_or_end(
         tail = ""
         if remaining:
             tail = "；本阶段完成后主机将继续执行后续脚本/AI 阶段，请勿越权执行后续脚本步骤"
-        result.reason = f"按管线进入第 {i+1} 阶段（AI）{tail}"
+        result.reason = f"按管线进入第 {i+1} 步（AI）{tail}"
         return result
 
     # 全部阶段完成（script/ai 均已完成）
@@ -532,7 +575,8 @@ def build_user_message_for_ai_phase(
             "【有序执行管线 — AI 步骤】",
             f"说明：{pipeline.reason}",
             "请**只执行下面列出的 AI 业务任务**：不要重新规划整个 Pipeline，"
-            "不要重复执行已成功的脚本步骤，不要自行添加目标里没有的任务。",
+            "不要自行添加目标里没有的任务；如需验证当前输入，可以重复执行之前的脚本，"
+            "但不得越权执行后续步骤。",
         ]
         if pipeline.context_parts or pipeline.combined_output:
             parts.extend(
@@ -563,8 +607,10 @@ def build_user_message_for_ai_phase(
             "",
             "【有序执行管线 — 异常接管】",
             f"说明：{pipeline.reason}",
-            "请只处理当前异常并完成剩余目标；不要重新规划已确定的流程，"
-            "不要重复执行已成功的脚本步骤。",
+            "请只处理当前异常并修复当前步骤；不要执行后续步骤。"
+            "允许重复执行之前的脚本来验证修复结果。"
+            "如需调整管线，只提交当前失败步骤的最小修正版，"
+            "并通过 update_project_experience 固化，不要包办后续阶段。",
         ]
         if pipeline.context_parts or pipeline.combined_output:
             parts.extend(

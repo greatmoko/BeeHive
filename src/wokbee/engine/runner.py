@@ -16,7 +16,7 @@ from typing import Any
 from deepagents import FilesystemMiddleware, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.errors import GraphInterrupt
+from langgraph.errors import GraphInterrupt, GraphRecursionError
 from langgraph.types import Command
 
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
@@ -86,6 +86,7 @@ from wokbee.engine.script_factory import (
 from wokbee.engine.script_runner import (
     build_user_message_for_ai_phase,
     peek_pipeline,
+    publish_pipeline_outputs,
     run_pipeline_until_ai_or_end,
 )
 from wokbee.core.skills_store import SkillsStore
@@ -113,11 +114,42 @@ class RunRequest:
 @dataclass
 class RunResult:
     ok: bool
-    outcome: str  # success | failed | cancelled | awaiting_approval
+    outcome: str  # success | failed | cancelled | awaiting_approval | incomplete
     final_text: str = ""
     error: str = ""
     lesson_id: str = ""
     pending_actions: list[dict] = field(default_factory=list)
+
+
+class StepLimitExceeded(RuntimeError):
+    """Raised when one Agent run exhausts its logical step budget."""
+
+    def __init__(self, limit: int, used: int, kind: str) -> None:
+        self.limit = limit
+        self.used = used
+        self.kind = kind
+        super().__init__(
+            f"Agent 执行未完成：已达到 max_steps={limit} 的硬上限 "
+            f"（已用 {used} 步，最后计数类型：{kind}）。"
+            "已停止继续调用模型或工具，请提高 max_steps 或拆分任务。"
+        )
+
+
+class _StepBudget:
+    """Thread-safe logical budget for Agent turns and tool updates."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def consume(self, kind: str, amount: int = 1) -> None:
+        amount = max(1, int(amount))
+        with self._lock:
+            if self.used + amount > self.limit:
+                self.used = self.limit
+                raise StepLimitExceeded(self.limit, self.used, kind)
+            self.used += amount
 
 
 # 进程内 checkpointer，保证同一项目可 resume
@@ -715,6 +747,9 @@ class AgentRunner:
         self._context_injected: bool = False
         # 本轮是否已由 Agent 用 update_project_experience 工具更新过经验（结束兜底据此跳过）
         self._experience_updated_by_tool: bool = False
+        self._step_budget: _StepBudget | None = None
+        self._seen_tool_update_ids: set[str] = set()
+        self._phase_states: list[dict[str, Any]] = []
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
         self.on_ask_user_needed: Callable[[dict], None] | None = None
@@ -735,6 +770,79 @@ class AgentRunner:
         """工具成功写入经验后标记，结束兜底据此跳过自动总结。"""
         self._experience_updated_by_tool = True
 
+    @staticmethod
+    def _graph_recursion_limit(max_steps: int) -> int:
+        """Deep Agents usually consume one graph tick for model and one for tools."""
+        return max(4, max(1, int(max_steps)) * 2 + 1)
+
+    def _configure_step_budget(self, req: RunRequest) -> None:
+        self._step_budget = _StepBudget(req.max_steps)
+        self._seen_tool_update_ids = set()
+        self._phase_states = []
+
+    def _graph_config(self, thread_id: str, req: RunRequest) -> dict:
+        # recursion_limit is the graph-level hard stop; _StepBudget is the
+        # user-facing logical limit that also counts tool updates.
+        return {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": self._graph_recursion_limit(req.max_steps),
+        }
+
+    def _consume_tool_updates(self, messages: list[Any]) -> None:
+        if self._step_budget is None:
+            return
+        new_count = 0
+        for msg in messages or []:
+            tool_calls = _tool_calls_of(msg)
+            if tool_calls:
+                for index, call in enumerate(tool_calls):
+                    key = _tool_call_id(call) or f"{_msg_fingerprint(msg)}:{index}"
+                    if key not in self._seen_tool_update_ids:
+                        self._seen_tool_update_ids.add(key)
+                        new_count += 1
+                continue
+            cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type") or "")
+            role = getattr(msg, "type", None) or (
+                msg.get("role") if isinstance(msg, dict) else ""
+            ) or cls
+            if "Tool" in cls or role in ("tool", "ToolMessage"):
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                if not tool_call_id and isinstance(msg, dict):
+                    tool_call_id = msg.get("tool_call_id")
+                key = str(tool_call_id or _msg_fingerprint(msg))
+                if key not in self._seen_tool_update_ids:
+                    self._seen_tool_update_ids.add(key)
+                    new_count += 1
+        if new_count:
+            self._step_budget.consume("tool_update", new_count)
+
+    def _record_phase_state(
+        self,
+        *,
+        phase_index: int,
+        phase_type: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        state = {
+            "step": phase_index + 1,
+            "type": phase_type,
+            "status": status,
+            "detail": detail[:500],
+        }
+        self._phase_states.append(state)
+        self._emit(
+            "info",
+            f"管线第 {phase_index + 1} 步已结束：{status}"
+            + (f"（{detail[:300]}）" if detail else ""),
+            {
+                "pipeline_step": phase_index,
+                "pipeline_type": phase_type,
+                "pipeline_status": status,
+                "phase_end": True,
+            },
+        )
+
     def _cancelled_result(
         self, req: RunRequest, allow_auto_lesson: bool
     ) -> RunResult:
@@ -743,6 +851,33 @@ class AgentRunner:
             outcome="cancelled",
             error="已取消",
         )
+
+    def _finalize_early_failure(
+        self, req: RunRequest, result: RunResult, agent: Any, config: dict
+    ) -> None:
+        """Do not skip experience repair when a pipeline AI turn exits early."""
+        if result.outcome not in ("failed", "incomplete"):
+            return
+        err = result.error or f"AI 阶段未完成（{result.outcome}）"
+        self._emit("error", f"AI 阶段未完成：{err}", {"outcome": result.outcome})
+        path = ""
+        try:
+            state = agent.get_state(config)
+            values = getattr(state, "values", None) or {}
+            messages = values.get("messages") if isinstance(values, dict) else None
+            if messages:
+                path = build_success_path_from_messages(list(messages))
+        except Exception:
+            pass
+        lesson = self._ensure_lesson_written(
+            req,
+            "partial" if result.outcome == "incomplete" else "failed",
+            "AI 阶段未完成",
+            err,
+            success_path=path,
+        )
+        if lesson and not result.lesson_id:
+            result.lesson_id = lesson.id
 
     def resolve_approval(self, decisions: list[dict]) -> None:
         self._approval_decisions = decisions
@@ -1113,6 +1248,7 @@ class AgentRunner:
             tools,
             project_root=req.project_root,
             tool_timeout=self.settings.tool_timeout_seconds,
+            max_parallel_tools=self.settings.max_parallel_tools,
         )
         tool_names = [tool_name_of(t) for t in tools]
         fp = prefix_fingerprint(system_prompt, tool_names)
@@ -1271,6 +1407,8 @@ class AgentRunner:
         """
         if self._cancel.is_set():
             return
+        if self._step_budget is not None:
+            self._step_budget.consume("agent_turn")
 
         from tokbee.core.subprocess_util import kill_all_cancellable_runs
 
@@ -1316,7 +1454,9 @@ class AgentRunner:
                             _flush()
                     else:
                         _flush(force=True)
-                        for msg in _collect_messages_from_update(payload):
+                        messages = _collect_messages_from_update(payload)
+                        self._consume_tool_updates(messages)
+                        for msg in messages:
                             _emit_message_events(
                                 self._emit,
                                 msg,
@@ -1326,6 +1466,21 @@ class AgentRunner:
                 _flush(force=True)
             except GraphInterrupt:
                 pass
+            except StepLimitExceeded as e:
+                stream_error.append(e)
+            except GraphRecursionError:
+                if self._step_budget is not None:
+                    stream_error.append(
+                        StepLimitExceeded(
+                            self._step_budget.limit,
+                            self._step_budget.used,
+                            "graph_recursion",
+                        )
+                    )
+                else:
+                    stream_error.append(
+                        RuntimeError("Deep Agents graph recursion limit reached")
+                    )
             except Exception as e:  # noqa: BLE001
                 stream_error.append(e)
 
@@ -1527,7 +1682,8 @@ class AgentRunner:
             self._run_events = []
         self._context_injected = False
         thread_id = f"wokbee-chat-{req.project.id}"
-        config = {"configurable": {"thread_id": thread_id}}
+        self._configure_step_budget(req)
+        config = self._graph_config(thread_id, req)
         seen_msg_ids: set[str] = set()
 
         question = (req.user_message or "").strip()
@@ -1605,6 +1761,10 @@ class AgentRunner:
 
             self._emit("info", "本轮回复已完成")
             return RunResult(ok=True, outcome="success", final_text=final_text)
+        except StepLimitExceeded as e:
+            err = str(e)
+            self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+            return RunResult(ok=False, outcome="incomplete", error=err)
         except Exception as e:
             logger.exception("交互失败")
             err = _format_engine_error(e)
@@ -1675,7 +1835,8 @@ class AgentRunner:
         self._context_injected = False
         self._experience_updated_by_tool = False
         thread_id = f"wokbee-{req.project.id}"
-        config = {"configurable": {"thread_id": thread_id}}
+        self._configure_step_budget(req)
+        config = self._graph_config(thread_id, req)
         seen_msg_ids: set[str] = set()
 
         base_message = (
@@ -1708,6 +1869,8 @@ class AgentRunner:
 
         final_text = ""
         trajectory_messages: list = []
+        current_phase_index: int | None = None
+        current_phase_type = ""
 
         # ── design 模式（DeziBee）：单轮对话式执行，无 pipeline / 经验兜底 ──
         # DeziBee 需求没有 pipeline.json（不走 ensure memory/experience），
@@ -1736,6 +1899,10 @@ class AgentRunner:
                     pass
                 self._emit("info", "本轮设计已完成")
                 return RunResult(ok=True, outcome="success", final_text=final_text)
+            except StepLimitExceeded as e:
+                err = str(e)
+                self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+                return RunResult(ok=False, outcome="incomplete", error=err)
             except Exception as e:
                 logger.exception("DeziBee 设计执行失败")
                 err = _format_engine_error(e)
@@ -1765,9 +1932,10 @@ class AgentRunner:
                     first=True,
                 )
                 if early:
+                    self._finalize_early_failure(req, early, agent, config)
                     return early
             else:
-                # ── 有序管线：按 pipeline.json steps 顺序推进（可为连续脚本/连续 AI）──
+                # ── 有序管线：按 pipeline.json steps 顺序逐步推进 ──
                 phase_idx = 0
                 context_parts: list[str] = []
                 ai_turn = 0
@@ -1777,7 +1945,7 @@ class AgentRunner:
                     "info",
                     "按 scripts/pipeline.json 的 steps 顺序推进"
                     "（script 自动执行不耗 Token；ai 步骤执行固定业务任务；"
-                    f"阶段上限 {max_phases}）…",
+                    f"步骤上限 {max_phases}）…",
                 )
 
                 for _ in range(max_phases):
@@ -1805,6 +1973,7 @@ class AgentRunner:
                             first=True,
                         )
                         if early:
+                            self._finalize_early_failure(req, early, agent, config)
                             return early
                         break
 
@@ -1820,23 +1989,48 @@ class AgentRunner:
                         )
                         self._emit_script_items(pipe.items)
 
+                    failed_phase = next(
+                        (phase for phase in pipe.phase_results if not phase.ok),
+                        None,
+                    )
+                    for phase in pipe.phase_results:
+                        if phase.ok:
+                            self._record_phase_state(
+                                phase_index=phase.index,
+                                phase_type="script",
+                                status="success",
+                            )
+
+                    current_phase_index = (
+                        failed_phase.index
+                        if failed_phase is not None
+                        else pipe.next_phase_index if pipe.ai_steps else None
+                    )
+                    current_phase_type = (
+                        "script" if failed_phase is not None else "ai"
+                    ) if current_phase_index is not None else ""
+
                     context_parts = list(pipe.context_parts or [])
 
                     if pipe.ok and not pipe.need_ai:
                         # 全部为 script 步骤且成功：0 Token 完成（无 ai 步骤的纯脚本管线）
-                        art_dir = Path(req.project_root) / "deliverables"
-                        art_dir.mkdir(parents=True, exist_ok=True)
-                        out_file = art_dir / "script_result.md"
-                        body = (
-                            f"# 有序脚本执行结果\n\n"
-                            f"目标：{req.project.goal or base_message}\n\n"
-                            f"{pipe.combined_output or '（无输出）'}\n"
-                        )
-                        out_file.write_text(body, encoding="utf-8")
+                        published: list[str] = []
+                        try:
+                            from wokbee.engine.script_factory import goal_wants_deliverables
+
+                            if goal_wants_deliverables(req.project.goal or base_message):
+                                published = publish_pipeline_outputs(req.project_root)
+                        except Exception:
+                            logger.exception("发布纯脚本管线产物失败")
                         self._emit(
                             "agent",
                             "有序管线均为脚本且已成功，0 Token 完成。\n"
-                            f"结果已写入 `deliverables/{out_file.name}`。",
+                            + (
+                                "脚本原始产物已复制到 deliverables/："
+                                + ", ".join(published[:20])
+                                if published
+                                else "保留脚本原始输出格式，未强制转换为 Markdown。"
+                            ),
                         )
                         self._emit("info", "运行结束：成功（纯脚本有序管线，未调用 LLM）")
                         return RunResult(
@@ -1864,7 +2058,38 @@ class AgentRunner:
                         first=True,
                     )
                     if early:
+                        if failed_phase is not None:
+                            self._record_phase_state(
+                                phase_index=failed_phase.index,
+                                phase_type="script",
+                                status="失败-AI接管后失败",
+                                detail=failed_phase.error,
+                            )
+                        else:
+                            self._record_phase_state(
+                                phase_index=pipe.next_phase_index,
+                                phase_type="ai",
+                                status="失败-AI接管后失败",
+                                detail=early.error or early.outcome,
+                            )
+                        self._finalize_early_failure(req, early, agent, config)
                         return early
+
+                    if failed_phase is not None:
+                        self._record_phase_state(
+                            phase_index=failed_phase.index,
+                            phase_type="script",
+                            status="失败-AI接管后成功",
+                            detail="AI 已完成当前异常接管",
+                        )
+                    else:
+                        self._record_phase_state(
+                            phase_index=pipe.next_phase_index,
+                            phase_type="ai",
+                            status="success",
+                        )
+                    current_phase_index = None
+                    current_phase_type = ""
 
                     segment_text = ""
                     try:
@@ -1923,10 +2148,50 @@ class AgentRunner:
                 lesson_id=lesson.id if lesson else "",
             )
 
+        except StepLimitExceeded as e:
+            logger.warning("Agent 达到 max_steps 硬上限：%s", e)
+            err = str(e)
+            self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+            if current_phase_index is not None:
+                self._record_phase_state(
+                    phase_index=current_phase_index,
+                    phase_type=current_phase_type or "ai",
+                    status="失败-AI接管后失败",
+                    detail=err,
+                )
+            fail_path = ""
+            try:
+                state = agent.get_state(config)
+                values = getattr(state, "values", None) or {}
+                messages = values.get("messages") if isinstance(values, dict) else None
+                if messages:
+                    fail_path = build_success_path_from_messages(list(messages))
+            except Exception:
+                pass
+            lesson = self._ensure_lesson_written(
+                req,
+                "partial",
+                "执行未完成：已达到 max_steps 硬上限",
+                err,
+                success_path=fail_path,
+            )
+            return RunResult(
+                ok=False,
+                outcome="incomplete",
+                error=err,
+                lesson_id=lesson.id if lesson else "",
+            )
         except Exception as e:
             logger.exception("Agent 运行失败")
             err = _format_engine_error(e)
             self._emit("error", f"执行失败：{err}")
+            if current_phase_index is not None:
+                self._record_phase_state(
+                    phase_index=current_phase_index,
+                    phase_type=current_phase_type or "ai",
+                    status="失败-AI接管后失败",
+                    detail=err,
+                )
             fail_path = ""
             try:
                 state = agent.get_state(config)
@@ -1993,7 +2258,8 @@ class AgentRunner:
 
         仅两种情况由系统补写（走 AI 总结管线）：
         1. 首次运行（经验库为空）且 Agent 未写过——保底固化管线；
-        2. 本轮出现异常且 Agent 未更新经验——保底记录修正方法。
+        2. 本轮出现异常——经验总结阶段必须复核每个阶段状态；即使 Agent 已经用工具
+           更新过，也要让总结 AI 判断并直接修正 pipeline/经验。
         其余情况（非首次成功、Agent 已更新、取消）不写。
         """
         store = LessonStore(req.project_root)
@@ -2004,15 +2270,16 @@ class AgentRunner:
             else:
                 self._emit("info", "已取消；未更新经验。")
             return None
-        if self._experience_updated_by_tool:
+        had_exception = self._run_had_exception()
+        if self._experience_updated_by_tool and not had_exception:
             return None
-        if not first_run and not self._run_had_exception():
+        if not first_run and not had_exception:
             return None
-        if not first_run:
+        if not first_run and had_exception:
             self._emit(
                 "info",
-                "本轮出现异常但 Agent 未用 update_project_experience 更新经验；"
-                "系统兜底总结修正经验（含 pipeline/脚本）。",
+                "本轮出现异常；经验总结 AI 将复核每个阶段状态并直接修正经验"
+                "（含 pipeline/脚本）。",
             )
         return self._write_lesson(
             req,
@@ -2121,7 +2388,8 @@ class AgentRunner:
                 f"- 上一份经验：{len(previous_text or '')} 字\n"
                 f"- 运行日志：{len(run_log or '')} 字"
                 f"（事件约 {len(events or [])} 条）\n"
-                f"- 脚本/pipeline：{len(scripts_ctx or '')} 字",
+                f"- 脚本/pipeline：{len(scripts_ctx or '')} 字\n"
+                f"- 阶段状态：{len(self._phase_states)} 条",
             )
 
             ai_fields: dict[str, str] = {}
@@ -2152,6 +2420,10 @@ class AgentRunner:
                             run_log=run_log or summary,
                             scripts_context=scripts_ctx,
                             environment_hint=env,
+                            phase_states=json.dumps(
+                                self._phase_states,
+                                ensure_ascii=False,
+                            ),
                         )
                         # 结束后再展示完整结果（生成过程不刷进度气泡）
                         preview_parts = []

@@ -239,6 +239,19 @@ class TaskExecutor:
 
         self._finalize_wokbee_status(project.id, result)
         outcome = getattr(result, "outcome", "failed")
+        if getattr(result, "ok", False):
+            # 与桌面端 WokBee 运行保持一致：AutoBee 完成后也在项目时间线
+            # 追加可点击的 deliverables/ 气泡；事件先落盘，再由 event_sink 推送到 UI。
+            self._append_project_event(
+                project.id,
+                "deliverables",
+                "交付物目录",
+                {
+                    "project_id": project.id,
+                    "source": "autobee",
+                    "autobee_task_id": task.id,
+                },
+            )
         self._append_project_event(
             project.id, "info", f"AutoBee 任务「{task.name}」运行结束：{outcome}",
             {"source": "autobee", "autobee_task_id": task.id, "lifecycle": "finished"},

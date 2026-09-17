@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 from pathlib import Path
@@ -35,6 +36,26 @@ _TOOL_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(8, min(16, (os.cpu_count() or 2) + 4)),
     thread_name_prefix="wokbee-tool",
 )
+
+
+class ToolConcurrencyLimiter:
+    """Limit concurrent tool bodies for one Agent execution graph."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self._semaphore = threading.BoundedSemaphore(self.limit)
+
+    def acquire(self) -> None:
+        self._semaphore.acquire()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    async def acquire_async(self) -> None:
+        # Do not block LangGraph's event loop while another tool is running;
+        # polling also keeps cancellation from leaking a semaphore permit.
+        while not self._semaphore.acquire(blocking=False):
+            await asyncio.sleep(0.01)
 
 
 def _run_async_fn_sync(async_fn: Callable, *args, **kwargs):
@@ -232,11 +253,17 @@ def wrap_tools_truncate_results(
     project_root: Path | None = None,
     max_chars: int = TOOL_RESULT_MAX_CHARS,
     tool_timeout: float | None = None,
+    max_parallel_tools: int | None = None,
 ) -> list:
-    """包装工具返回值：超长截断 + 单工具超时。"""
+    """包装工具返回值：超长截断 + 单工具超时 + 并发上限。"""
     dump_dir = None
     if project_root is not None:
         dump_dir = Path(project_root) / "workspace"
+    limiter = (
+        ToolConcurrencyLimiter(max_parallel_tools)
+        if max_parallel_tools is not None and int(max_parallel_tools) > 0
+        else None
+    )
 
     wrapped: list = []
     for tool in tools or []:
@@ -247,6 +274,7 @@ def wrap_tools_truncate_results(
                     dump_dir=dump_dir,
                     max_chars=max_chars,
                     tool_timeout=tool_timeout,
+                    limiter=limiter,
                 )
             )
         except Exception:
@@ -261,6 +289,7 @@ def _wrap_one_tool(
     dump_dir: Path | None,
     max_chars: int,
     tool_timeout: float | None = None,
+    limiter: ToolConcurrencyLimiter | None = None,
 ) -> Any:
     name = tool_name_of(tool)
     # 往 tools schema 注入可选 `timeout_seconds`，让模型能控制该调用超时；
@@ -306,13 +335,25 @@ def _wrap_one_tool(
 
         if inspect.iscoroutinefunction(fn):
             async def _ahooked(*args, **kwargs):
-                ai_throttle.wait()
-                return _truncate(await fn(*args, **kwargs))
+                if limiter is not None:
+                    await limiter.acquire_async()
+                try:
+                    ai_throttle.wait()
+                    return _truncate(await fn(*args, **kwargs))
+                finally:
+                    if limiter is not None:
+                        limiter.release()
             return _ahooked
 
         def _hooked(*args, **kwargs):
-            ai_throttle.wait()
-            return _truncate(fn(*args, **kwargs))
+            if limiter is not None:
+                limiter.acquire()
+            try:
+                ai_throttle.wait()
+                return _truncate(fn(*args, **kwargs))
+            finally:
+                if limiter is not None:
+                    limiter.release()
         return _hooked
 
     # 异步入口（async @tool / MCP 等）必须一并包装，否则 ainvoke 走 coroutine 时绕过截断

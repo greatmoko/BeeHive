@@ -33,7 +33,7 @@ SCROLL_STICK_THRESHOLD = 48
 SCROLL_TOP_LOAD_THRESHOLD = 24
 # 时间线虚拟化：初始只实例化**最近** N 条成行，避免一次性物化整条时间线
 # 卡顿首屏/切项目；更早的记录在用户上翻到顶时按批前置加载。
-INITIAL_RENDER = 15
+INITIAL_RENDER = 50
 LOAD_OLDER_BATCH = 50
 # 前置加载后滚动补偿：插入更早行后，气泡高度/滚动条 range 要等事件循环跑过才稳定。
 # 补偿挂在 rangeChanged 信号上，等 maximum 真正变化的那一帧按「当前 range 增量」做
