@@ -107,13 +107,13 @@ def render_lesson_md(lesson: Lesson) -> str:
             "## 成功实现路径",
             "",
             "> 只保留**成功且必要**的有序步骤，后续运行将**严格照此执行**；"
-            "每步按固定格式：`序号. 执行角色:\"{执行内容}\";[步骤说明]`——"
+            "每步按固定格式：`序号. 执行角色: \"{执行内容}\"; 【步骤说明】`——"
             "执行角色为 AI / 工具调用 / 脚本执行 / 系统执行；`{}` 内写明详细命令/脚本地址/提示词，"
-            "`[]` 内为解释性说明；一律用虚拟路径，禁止 Windows 绝对路径。失败/试错/被弃用的尝试不写入。",
+            "`【】` 内为解释性说明；一律用虚拟路径，禁止 Windows 绝对路径。失败/试错/被弃用的尝试不写入。",
             "",
             (
                 lesson.success_path.strip()
-                or "（未记录具体步骤；请在下次运行中补充工具调用与关键决策。）"
+                or "（未记录具体步骤。）"
             ),
             "",
             "## 注意事项",
@@ -638,34 +638,37 @@ def build_lesson_digest(events: list | None, *, max_chars: int = 50000) -> str:
 
 
 _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上一份经验 + 本次运行日志 + 现有脚本」总结可复用的流程经验。
-「本次运行日志」可能是结构化压缩轨迹：以时间序「压缩轨迹」为主；文末「关键线索」无序且勿当执行顺序。勿假设含网页全文。
+不要输出实现过程、压缩轨迹、关键线索或问题与解决方案章节。
 
 ⚠️ 首要提醒（最重要）：你总结的**经验文档 / pipeline.json 步骤 / 脚本**，在后续项目运行时会被**严格照章执行**——
 错误、含糊、不严谨的路径（脚本地址、命令、数据源）将直接导致后续运行失败，代价远高于本次修正。因此必须：
 - 只总结**真实验证过、有效、可复用**的内容，且**尽量简短**；剔除一切失败、试错、被弃用或重复的尝试。
-- 每条路径、脚本名、命令都必须来自本次运行日志，**禁止编造**；脚本路径须与 scripts/ 下真实文件一致。
+- 每条路径、脚本名、命令都必须来自本次运行日志，**禁止编造**；脚本路径须与项目下真实文件一致。
+- 用户已上传到 uploads/ 的脚本必须直接运行原文件；禁止 Copy-Item 到项目根目录，禁止再次包装已有 scripts/ 脚本。
 - 一律使用虚拟路径（scripts/、workspace/、deliverables/、uploads/、memory/…），**禁止 Windows 绝对路径**（如 C:\\Users\\…）。
 
 硬性要求：
-1. 经验只含四部分：**摘要**（概要介绍经验的主要作用）/ **成功实现路径**（有序步骤，执行顺序直接体现其中）/ **注意事项**（问题与处理）/ pipeline.json（脚本与命令地址）。
+1. 经验只包含：**摘要**、**成功实现路径**、**注意事项**；其中成功实现路径必须与 pipeline.json 对齐。
 2. 禁止写入：最终结果数值、交付产物内容、报告正文、截图描述、成功产出的具体文案；不记录运行环境（系统每次自动注入）。
 3. 不要引用或依赖 archives/ 归档数据。
-4. **success_path（成功实现路径）只保留真正成功且必要的有序步骤，步骤尽量精简**：
-   - 以时间序「压缩轨迹」为基准；文末无序线索仅作检索辅助。
+4. **success_path（成功实现路径）必须与 pipeline_steps 一一对应**：
+   - pipeline_steps 是机器执行顺序的唯一事实来源；success_path 只能解释这些步骤，不能另行增加目录查看、文件搜索、验证或 Agent 内部思考步骤。
+   - 最终落盘时系统会再次从实际写入的 pipeline 生成 success_path，因此不要编造 pipeline 之外的路径。
+   - 在 pipeline_steps 尚未确定前，只保留真正成功且必要的有序步骤，步骤尽量精简：
    - 执行顺序直接体现在编号中（脚本步骤 ↔ AI 环节按真实顺序排），不再单列「执行顺序/可本地脚本步骤/需 AI 完成的步骤」章节。
    - 若后续步骤依赖前置结果（需要前置数据/确认才能选对输入），应按**逻辑依赖**顺序排，勿把历史里「先取数、后补前置确认」的脏顺序原样固化。例如「先用 Get-Date 确认当前日期，再选取对应日期的数据」「先读配置，再跑脚本」。
     - 剔除所有失败调用、试错、被弃用/未采用的方案；保留每个真实业务步骤的边界，
       不强制合并相邻的同类型步骤，因为同一脚本的重复执行可能是有意的验证步骤。
    - 每步必须按**固定格式**书写：
-     `序号. 执行角色:"{执行内容}";[步骤说明]`
+     `序号. 执行角色: "{执行内容}"; 【步骤说明】`
      - **序号**：从 1 开始递增。
      - **执行角色**：AI / 工具调用 / 脚本执行 / 系统执行 等——AI 判断加工标 `AI`，文件/联网等工具标 `工具调用`，本地脚本步骤标 `脚本执行`（自动执行，AI 不介入），系统自动过程标 `系统执行`。
-     - **执行内容**：用 `{}` 包起来，写明**详细且明确**的执行命令 / 提示词 / 脚本名称与路径（脚本步骤必须给出 `scripts/` 下真实脚本地址或完整命令）。
-     - **步骤说明**：用 `[]` 包起来，是对执行内容的解释性描述（做什么 × 达成什么目的）。
+     - **执行内容**：用 `{}` 包起来，写明**详细且明确**的执行命令 / 提示词 / 脚本名称与路径（脚本步骤可直接引用 `uploads/` 用户脚本，或引用 `scripts/` 下真实脚本）。
+     - **步骤说明**：用 `【】` 包起来，是对执行内容的解释性描述（做什么 × 达成什么目的）。
      - 示例：
-       `1. 工具调用:"{cmd: 读取 workspace/script_callback_*.md}";[查看上一步脚本回调，确认产物完整]`
-       `2. 脚本执行:"{cmd: execute scripts/query_weather.bat}";[运行天气查询脚本（自动执行），原始数据落 workspace/]`
-       `3. AI:"{提示词: 依据 callback 数据提炼要点并成文，写入 deliverables/}";[AI 环节：成文交付]`
+       `1. 工具调用: "{cmd: 读取 workspace/script_callback_*.md}"; 【查看上一步脚本回调，确认产物完整】`
+       `2. 脚本执行: "{cmd: execute scripts/query_weather.bat}"; 【运行天气查询脚本（自动执行），原始数据落 workspace/】`
+       `3. AI: "{提示词: 依据 callback 数据提炼要点并成文，写入 deliverables/}"; 【AI 环节：成文交付】`
 5. 自动化脚本与管线约定（重要）：
    - 可复用本地命令落到项目 `scripts/`；运行输出落到 `workspace/script_callback_*.md`。
    - **只在本次运行日志中确实出现过、且尚未固化的可复用命令才写 script_files**（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
@@ -673,7 +676,7 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
       重复验证时才重复写入步骤。
     - **pipeline_steps 必须基于本次运行日志中实际执行过的步骤，按真实时间顺序逐步列出**；每一步判定类型：
      - `script`：能够确定性、机械、重复执行的工作（API 请求、文件处理、数据转换、发布复制等）→
-       固化为 scripts/ 脚本，后续直接执行、不耗 Token；
+       用户上传脚本直接引用 `uploads/...`，其他新脚本才固化为 `scripts/...`，后续直接执行、不耗 Token；
      - `ai`：必须依赖 AI 的理解/分析/整理/创意/写作/判断的工作（如“根据收集的材料撰写报告”）→
        固化为**明确的业务任务**（description + prompt_hint），后续运行仍调用 LLM 执行该固定任务，
        但**禁止重新规划整个 Pipeline**；
@@ -685,10 +688,11 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
      复杂任务按实际执行可以有更多步骤。
    - **交付约定**：若目标要求把产物放到 deliverables/，pipeline_steps 必须包含一个
      「发布」脚本步骤——把脚本**实际产出文件**复制/移动到 deliverables/（保留原始文件与
-     文件名，**不要合并成 final.md 代替原始产物**）；脚本步骤 path 指向 scripts/ 下真实文件。
+     文件名，**不要合并成 final.md 代替原始产物**）；脚本步骤 path 指向项目内真实文件。
     - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾逐步执行——script 步骤自动跑
      （不耗 Token）；ai 步骤调用 LLM 执行已确定的业务任务（按需消耗 Token）。
-     **不生成 final_ai**，也不在管线结尾强制再唤一次 AI；如果“总结/写报告/生成内容”本身就是
+       **所有 script path 必须是项目相对虚拟路径**（仅允许 `scripts/...` 或 `uploads/...`，禁止 Windows 绝对路径）；提交前先用文件工具确认文件存在且可访问，写入后系统会重新读取 pipeline 并用同一规则复核，失败则拒绝保存。
+       **不生成 final_ai**，也不在管线结尾强制再唤一次 AI；如果“总结/写报告/生成内容”本身就是
      用户 Goal 的一部分，它应作为正常的 `ai` 步骤固化在管线中。
 6. **注意事项（notes）写作规范**：
    - 采用**无序列表**（每项以 `-` 开头），不要按「问题1/处理1」编号排序。
@@ -700,7 +704,7 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
 7. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
 {
   "summary": "摘要：概要介绍经验的主要作用（一两段，非结果）",
-  "success_path": "仅成功且必要的有序步骤（按固定格式：序号. 执行角色:\"{执行内容}\";[步骤说明]，每步=操作+目的，执行顺序直接体现在编号中）",
+  "success_path": "仅成功且必要的有序步骤（按固定格式：序号. 执行角色: \"{执行内容}\"; 【步骤说明】，每步=操作+目的，执行顺序直接体现在编号中）",
   "notes": "注意事项：无序列表（- 开头），每条 = **加粗问题** + 解决办法（具体做法）",
   "used_skills": ["skill-folder-name"],
   "reference_materials": [
@@ -759,6 +763,62 @@ def _extract_json_object(text: str) -> str | None:
             if depth == 0:
                 return text[start : i + 1]
     return None
+
+
+def build_success_path_from_pipeline(steps: list[dict] | None) -> str:
+    """把最终 pipeline 渲染成人和 AI 可读的成功路径。
+
+    pipeline 是执行顺序的唯一事实来源；经验只负责解释同一组步骤，不能再独立
+    从运行轨迹推导另一套顺序。
+    """
+    lines: list[str] = []
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        kind = str(step.get("type") or "").lower().strip()
+        description = " ".join(str(step.get("description") or "").split())[:300]
+        if kind == "script":
+            path = str(step.get("path") or "").replace("\\", "/").strip()
+            if not path:
+                continue
+            tool = str(step.get("tool") or "script").strip()
+            action = f"脚本: {path}"
+            if tool and tool != "script":
+                action = f"脚本: {path}; 工具: {tool}"
+            lines.append(
+                f'{len(lines) + 1}. 脚本执行: "{{{action}}}"; '
+                f"【{description or '执行确定性脚本步骤'}】"
+            )
+        elif kind == "ai":
+            hint = " ".join(str(step.get("prompt_hint") or "").split())[:300]
+            action = f"业务任务: {description or '执行已确定的 AI 业务任务'}"
+            if hint:
+                action += f"; 提示: {hint}"
+            lines.append(
+                f'{len(lines) + 1}. AI: "{{{action}}}"; '
+                f"【{description or '执行已确定的 AI 业务任务'}】"
+            )
+    return "\n".join(lines)
+
+
+def sync_lesson_from_pipeline(lesson: Lesson, project_root: Path) -> bool:
+    """从最终 pipeline 同步经验的执行主线和脚本清单。"""
+    from wokbee.engine.script_runner import load_pipeline
+
+    data = load_pipeline(Path(project_root))
+    steps = data.get("steps") if isinstance(data, dict) else None
+    if not isinstance(steps, list):
+        return False
+    lesson.success_path = build_success_path_from_pipeline(steps)
+    lesson.scripts = [
+        str(step.get("path") or "").replace("\\", "/").strip()
+        for step in steps
+        if isinstance(step, dict)
+        and str(step.get("type") or "").lower() == "script"
+        and str(step.get("path") or "").strip()
+    ]
+    lesson.pipeline = "scripts/pipeline.json"
+    return True
 
 
 def _parse_ai_summary_json(text: str) -> dict | None:
@@ -1316,8 +1376,8 @@ def merge_pipeline_steps(
 ) -> list[dict[str, Any]]:
     """合并「轨迹固化脚本」「AI 手写脚本」与 AI 给出的 pipeline_steps。
 
-    AI 引用的 script 路径若在磁盘上不存在，尝试按文件名/label 匹配轨迹固化或
-    AI 手写产生的真实脚本；仍匹配不上则保留原条目（由写入后的幽灵清理兜底移除）。
+    AI 引用的 script 路径若在磁盘上不存在，尝试按文件名匹配轨迹固化或
+    AI 手写产生的真实脚本；仍匹配不上时由 pipeline 固化层拒绝整条提案。
     AI 明确给出 pipeline_steps 时完全尊重其顺序，不再把未覆盖脚本前插，避免
     改变无 pipeline 探索出的真实脚本/AI 交错路径。AI 未给清单时才使用轨迹顺序。
     """
@@ -1388,6 +1448,7 @@ def write_ai_lesson(
         apply_ai_authored_scripts,
         apply_ai_pipeline_steps,
         solidify_scripts,
+        drop_missing_pipeline_scripts,
     )
 
     root = Path(project_root)
@@ -1447,6 +1508,8 @@ def write_ai_lesson(
                 uniq.append(p)
         lesson.scripts = uniq
         lesson.pipeline = solid.pipeline_rel
+        drop_missing_pipeline_scripts(root)
+        sync_lesson_from_pipeline(lesson, root)
         _ = applied_order
     except Exception:
         import logging
@@ -1495,7 +1558,8 @@ def build_experience_tools(
     on_written: 工具成功写入后回调（无参），runner 用它标记「本轮经验已由 Agent 更新」，
     结束兜底据此跳过自动总结。
     events_provider: 返回本轮运行事件快照的可调用对象；solidify 需要真实执行轨迹
-    才能把已跑过的命令固化成 scripts/ 下的脚本文件——缺失时 AI 又未给 script_files，
+    才能识别已跑过的命令；用户上传脚本优先直接引用 uploads/，不复制到项目根目录，
+    其他可复用命令才固化成 scripts/ 下的脚本文件——缺失时 AI 又未给 script_files，
     pipeline 就会引用幽灵脚本，二次运行报「文件不存在」。
     """
 
@@ -1530,16 +1594,16 @@ def build_experience_tools(
 
         字段要求（后续运行会**严格照章执行**，务必只写真实验证过、可复用、尽量精简的内容）：
         - summary: 经验摘要（概要介绍经验作用，非结果正文）
-        - success_path: 有序成功步骤，每步格式 `序号. 执行角色:"{执行内容}";[步骤说明]`
+        - success_path: 有序成功步骤，每步格式 `序号. 执行角色: "{执行内容}"; 【步骤说明】`
           （执行角色=AI/工具调用/脚本执行/系统执行；剔除失败/试错步骤）
         - notes: 注意事项，无序列表，每条 `- **问题**：解决办法`
         - outcome: success | failed
         - script_files: 需固化的脚本 [{"filename","content","description","in_pipeline"}]——
           **每个可复用命令/脚本都要在这里给出完整源码**（.py/.bat/.ps1 等），没有则省略
-        - pipeline_steps: 有序步骤 [{"type":"script","path":"scripts/...","description"} 或
+        - pipeline_steps: 有序步骤 [{"type":"script","path":"uploads/..." 或 "scripts/...","description"} 或
           {"type":"ai","description":"明确业务任务","prompt_hint":"..."}]，无则省略。
-          **每个 script 步骤的 path 必须对应真实脚本文件**（来自 script_files 或 scripts/ 已有文件），
-          引用不存在脚本的步骤会被自动移除，导致下次运行缺步骤
+          **每个 script 步骤的 path 必须对应真实脚本文件**（来自 uploads/、script_files 或 scripts/ 已有文件），
+          且必须是 `scripts/...` 或 `uploads/...` 相对虚拟路径；系统写入后会重新读取并验证，失败则拒绝保存。
         - used_skills: 用到的全局 Skill 目录名；reference_materials: 需存 uploads/references/ 的材料
         """
         if not (summary or "").strip():

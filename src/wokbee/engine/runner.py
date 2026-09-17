@@ -55,6 +55,7 @@ from wokbee.engine.lessons import (
     collect_scripts_context,
     slice_latest_round,
     summarize_lesson_with_ai,
+    sync_lesson_from_pipeline,
 )
 from wokbee.engine.runtime_env import build_runtime_env_block
 from wokbee.engine.model_factory import build_chat_model
@@ -81,6 +82,7 @@ from wokbee.engine.autobee_tools import build_autobee_tools
 from wokbee.engine.script_factory import (
     apply_ai_authored_scripts,
     apply_ai_pipeline_steps,
+    drop_missing_pipeline_scripts,
     solidify_scripts,
 )
 from wokbee.engine.script_runner import (
@@ -1859,7 +1861,7 @@ class AgentRunner:
             "agent",
             f"引擎已启动（Deep Agents + 联网工具）。"
             f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
-            f"策略：{req.approval.summary()}；目录：{req.project_root}\n"
+            f"策略：{req.approval.summary()}；Agent 工作目录：{req.project_root}\n"
             "可用：web_search / http_get / http_request / 文件工具 / execute\n"
             "执行策略：已有 pipeline.json 时按 steps 顺序一路执行——"
             "script 步骤自动执行（不耗 Token）；ai 步骤执行已确定的业务任务（按需调 LLM，"
@@ -2571,6 +2573,9 @@ class AgentRunner:
                         uniq_scripts.append(p)
                 lesson.scripts = uniq_scripts
                 lesson.pipeline = solid.pipeline_rel
+                # pipeline 是执行事实来源：清理旧/幽灵引用后重新同步经验主线。
+                drop_missing_pipeline_scripts(req.project_root)
+                sync_lesson_from_pipeline(lesson, req.project_root)
                 total_scripts = len(lesson.scripts)
                 if total_scripts or applied_order:
                     order_note = (

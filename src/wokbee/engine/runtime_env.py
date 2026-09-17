@@ -58,7 +58,11 @@ _probe_lock = threading.Lock()
 
 @dataclass
 class RuntimeEnv:
-    """本机环境快照（不含项目目录；项目目录在 Agent 运行时叠加）。"""
+    """本机环境快照。
+
+    ``cwd`` 是软件进程的启动目录；项目目录在 Agent 运行时通过
+    ``project_root`` 叠加，二者语义不同，不能把 ``cwd`` 当成 Agent 工作目录。
+    """
 
     os_name: str = ""
     os_release: str = ""
@@ -418,8 +422,9 @@ def format_runtime_env_block(
     policy: str = "",
     extra: str = "",
     design_mode: bool = False,
+    for_agent: bool = False,
 ) -> str:
-    """将 RuntimeEnv 格式化为 Agent 可读块（design_mode 用 DeziBee 目录约定）。"""
+    """格式化运行环境；Agent 上下文不暴露软件启动目录。"""
     lines = [
         "【运行环境】（WokBee 本机实测；execute 与 scripts 均在此环境执行）",
     ]
@@ -430,11 +435,19 @@ def format_runtime_env_block(
             "- **平台：Windows（非 Linux/macOS）** — execute 勿用 head/tail/awk/sed/bash 语法；"
             "列目录用 ls 工具，或 pwsh 的 Get-ChildItem / Select-Object"
         )
+    agent_root = rt.project_root or project_root or "（未知）"
     lines.extend([
         f"- OS：{rt.os_name} {rt.os_release} ({rt.machine})",
-        f"- 项目目录（真实路径，**仅供 execute**）：{rt.project_root or project_root or '（未知）'}",
-        f"- 当前工作目录：{rt.cwd}",
+        f"- Agent 工作目录（文件工具与项目文件的基准）：{agent_root}",
+        f"- execute 工作目录（脚本和相对路径命令的基准）：{agent_root}",
     ])
+    if for_agent:
+        lines.extend([
+            "- 目录规则：软件运行目录与 Agent 工作目录无关；禁止用软件运行目录搜索项目文件。",
+            "- Get-Location 只能验证 execute 当前目录，不能据此推断 uploads/、scripts/ 或 deliverables/ 的位置。",
+        ])
+    elif rt.cwd:
+        lines.append(f"- 应用运行目录（仅系统内部，不是 Agent 工作目录）：{rt.cwd}")
     if design_mode:
         lines.extend([
             "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
@@ -538,6 +551,7 @@ def build_runtime_env_block(
         policy=policy,
         extra=extra,
         design_mode=design_mode,
+        for_agent=True,
     )
 
 

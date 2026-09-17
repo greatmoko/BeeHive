@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import sys
 import threading
@@ -77,6 +78,44 @@ def load_pipeline(project_root: Path) -> dict | None:
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("读取 pipeline.json 失败: %s", e)
         return None
+
+
+def resolve_pipeline_script_path(project_root: Path, rel_path: str) -> Path | None:
+    """按 Pipeline 合同解析脚本：仅接受项目内 scripts/ 或 uploads/ 相对路径。"""
+    root = Path(project_root).resolve()
+    raw = str(rel_path or "").replace("\\", "/").strip()
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw):
+        return None
+    parts = raw.split("/")
+    if ".." in parts or parts[0].lower() not in {"scripts", "uploads"}:
+        return None
+    candidate = (root / "/".join(parts)).resolve()
+    allowed = (root / parts[0]).resolve()
+    try:
+        candidate.relative_to(allowed)
+    except (OSError, ValueError):
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def validate_pipeline_script_paths(
+    project_root: Path,
+    steps: list[dict] | None = None,
+) -> list[str]:
+    """返回 pipeline 中缺失或越界的脚本路径，不执行任何脚本。"""
+    root = Path(project_root).resolve()
+    if steps is None:
+        data = load_pipeline(root)
+        steps = data.get("steps") if isinstance(data, dict) else []
+    missing: list[str] = []
+    for step in steps or []:
+        if not isinstance(step, dict) or str(step.get("type") or "").lower() != "script":
+            continue
+        rel = str(step.get("path") or "").replace("\\", "/").strip()
+        valid = resolve_pipeline_script_path(root, rel) is not None
+        if not valid:
+            missing.append(rel or "（空路径步骤）")
+    return missing
 
 
 def normalize_steps(data: dict, *, keep_ai: bool = True) -> list[dict]:
@@ -264,24 +303,16 @@ def run_one_script(
     rel = str(entry.get("path") or "")
     desc = str(entry.get("description") or rel)
     step_id = str(entry.get("id") or "")
-    try:
-        root = root.resolve()
-        script_root = (root / "scripts").resolve()
-        script_file = (root / rel).resolve()
-        script_file.relative_to(script_root)
-    except (OSError, ValueError):
+    root = root.resolve()
+    script_file = resolve_pipeline_script_path(root, rel)
+    if script_file is None:
         return ScriptRunItem(
             path=rel,
             ok=False,
-            error="脚本路径必须是项目 scripts/ 目录内的相对路径",
-            description=desc,
-            step_id=step_id,
-        )
-    if not rel or not script_file.exists():
-        return ScriptRunItem(
-            path=rel,
-            ok=False,
-            error=f"文件不存在：{rel}",
+            error=(
+                "脚本路径必须是项目 scripts/ 或 uploads/ 目录内的相对路径，"
+                "且文件必须真实存在"
+            ),
             description=desc,
             step_id=step_id,
         )
@@ -486,6 +517,45 @@ def run_pipeline_until_ai_or_end(
     """
     result = peek_pipeline(project_root)
     if not result.ran or not result.phases:
+        return result
+
+    missing = validate_pipeline_script_paths(project_root, result.steps)
+    if missing:
+        first_missing = next(
+            (
+                i
+                for i, step in enumerate(result.steps)
+                if isinstance(step, dict)
+                and str(step.get("type") or "").lower() == "script"
+                and str(step.get("path") or "").replace("\\", "/").strip()
+                in missing
+            ),
+            0,
+        )
+        bad = result.steps[first_missing] if result.steps else {}
+        item = ScriptRunItem(
+            path=str(bad.get("path") or missing[0]),
+            ok=False,
+            error="pipeline 引用了不存在或越界的脚本：" + "、".join(missing),
+            description=str(bad.get("description") or "脚本路径检查"),
+            step_id=str(bad.get("id") or ""),
+        )
+        phase = PhaseResult(
+            type="script",
+            ok=False,
+            items=[item],
+            error=item.error,
+            index=first_missing,
+        )
+        result.phase_results.append(phase)
+        result.items = [item]
+        result.next_phase_index = first_missing
+        result.error_summary = item.error
+        result.need_ai = True
+        result.reason = (
+            f"管线第 {first_missing + 1} 步脚本路径检查失败，已暂停；"
+            "请先修复 pipeline 脚本引用，再进行异常接管"
+        )
         return result
 
     context = list(prior_context or [])

@@ -323,10 +323,8 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 ├── README.md               # 项目说明
 ├── pyproject.toml
 ├── requirements.txt
-├── BeeHive.spec            # PyInstaller 打包配置
 ├── scripts/
-│   ├── make_release.ps1    # 制作源码发布包（可选）
-│   └── build_exe.ps1       # 打包 exe（可选）
+│   └── make_release.ps1    # 制作源码发布包（可选）
 └── src/
     ├── tokbee/             # 应用壳 + TokBee 对话 + UI 样式
     ├── wokbee/             # WokBee 项目 Agent 工作流

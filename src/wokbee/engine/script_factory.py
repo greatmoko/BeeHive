@@ -335,6 +335,35 @@ def _script_tokens(cmd: str) -> list[str]:
     return out
 
 
+def _project_script_path_from_command(
+    project_root: Path,
+    command: str,
+    folder: str,
+) -> str | None:
+    """从命令中找当前项目下的 uploads/ 或 scripts/ 脚本。"""
+    root = Path(project_root).resolve()
+    marker = f"/{folder.lower()}/"
+    base_root = (root / folder).resolve()
+    for token in _script_tokens(command):
+        raw = token.strip("\"'").replace("\\", "/")
+        low = raw.lower()
+        if low.startswith(f"{folder.lower()}/"):
+            rel = f"{folder}/{raw.split('/', 1)[1]}"
+        else:
+            idx = low.find(marker)
+            if idx < 0:
+                continue
+            rel = f"{folder}/{raw[idx + len(marker):]}"
+        try:
+            candidate = (root / rel).resolve()
+            candidate.relative_to(base_root)
+            if candidate.is_file():
+                return candidate.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _execute_script_label(cmd: str) -> str:
     toks = _script_tokens(cmd)
     if not toks:
@@ -831,7 +860,7 @@ def solidify_scripts(
     success_path: str = "",
     events: list | None = None,
 ) -> SolidifyResult:
-    """根据轨迹生成 scripts/*.py 与有序 pipeline.json（按 steps 顺序，非强制交错）。"""
+    """根据轨迹固化脚本引用与有序 pipeline.json（按 steps 顺序，非强制交错）。"""
     from wokbee.engine.script_runner import format_order_markdown
 
     ensure_project_layout(project_root)
@@ -866,7 +895,50 @@ def solidify_scripts(
             n += 1
         return cand.name
 
+    direct_upload_paths: set[str] = set()
+    for step in scriptable:
+        if step.tool == "execute":
+            direct = _project_script_path_from_command(
+                project_root,
+                str((step.args or {}).get("command") or ""),
+                "uploads",
+            )
+            if direct:
+                direct_upload_paths.add(direct.lower())
+
     for i, step in enumerate(scriptable, 1):
+        if step.tool == "execute":
+            command = str((step.args or {}).get("command") or "")
+            direct = _project_script_path_from_command(project_root, command, "uploads")
+            if direct:
+                if direct.lower() in {s.rel_path.lower() for s in written}:
+                    continue
+                step.rel_path = direct
+                step.args = {"source": "uploaded_script", "path": direct}
+                step.description = f"直接运行上传脚本：{direct}"
+                written.append(step)
+                ordered_steps.append(
+                    {
+                        "id": f"script_{i}",
+                        "type": "script",
+                        "path": direct,
+                        "tool": "script",
+                        "description": step.description,
+                        "args": {},
+                    }
+                )
+                continue
+
+            generated = _project_script_path_from_command(project_root, command, "scripts")
+            has_scripts_ref = any(
+                "/scripts/" in token.replace("\\", "/").lower()
+                or token.replace("\\", "/").lower().startswith("scripts/")
+                for token in _script_tokens(command)
+            )
+            if direct_upload_paths and (generated or has_scripts_ref):
+                # 已识别到上传脚本时，忽略旧的 scripts/ 包装脚本，避免脚本套娃。
+                continue
+
         src = _render_script(step)
         if not src:
             continue
@@ -1064,6 +1136,29 @@ def apply_ai_authored_scripts(
         content = str(item.get("content") or "")
         if not src_fname or not content.strip():
             continue
+        uploaded = (Path(project_root) / "uploads" / src_fname).resolve()
+        if uploaded.is_file():
+            rel = uploaded.relative_to(Path(project_root).resolve()).as_posix()
+            desc = str(item.get("description") or "").strip() or f"直接运行上传脚本：{rel}"
+            step = ScriptStep(
+                tool="script",
+                args={"source": "uploaded_script", "path": rel},
+                description=desc[:200],
+                rel_path=rel,
+            )
+            written.append(step)
+            if bool(item.get("in_pipeline", True)):
+                pipeline_entries.append(
+                    {
+                        "id": f"script_upload_{i}",
+                        "type": "script",
+                        "path": rel,
+                        "tool": "script",
+                        "description": desc[:200],
+                        "args": {},
+                    }
+                )
+            continue
         ext = Path(src_fname).suffix.lower() or ".py"
         purpose = str(item.get("description") or "").strip() or Path(src_fname).stem
         fname = make_script_name(pid, purpose, ext)
@@ -1179,6 +1274,40 @@ def apply_ai_authored_scripts(
     return written
 
 
+def _resolve_pipeline_script_path(
+    root: Path,
+    sdir: Path,
+    raw_path: str,
+    *,
+    rename_map: dict[str, str] | None = None,
+) -> str | None:
+    """解析 AI 脚本引用，只接受项目 scripts/ 或 uploads/ 相对路径。"""
+    from wokbee.engine.script_runner import resolve_pipeline_script_path
+
+    raw = (raw_path or "").replace("\\", "/").strip()
+    if not raw:
+        return None
+    mapped = {
+        Path(str(k).replace("\\", "/")).name.lower(): Path(
+            str(v).replace("\\", "/")
+        ).name
+        for k, v in (rename_map or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
+    parts = raw.split("/")
+    if len(parts) < 2 or parts[0].lower() not in {"scripts", "uploads"}:
+        return None
+    base = mapped.get(parts[-1].lower(), parts[-1])
+    candidate_rel = "/".join(parts[:-1] + [base])
+    candidate = resolve_pipeline_script_path(root, candidate_rel)
+    if candidate is None:
+        return None
+    try:
+        return candidate.relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
 def apply_ai_pipeline_steps(
     project_root: Path,
     *,
@@ -1197,7 +1326,11 @@ def apply_ai_pipeline_steps(
     不生成任何 final_ai。rename_map：{AI 原始文件名 → 规范化后的 scripts/ 文件名}。
     返回是否成功应用。
     """
-    from wokbee.engine.script_runner import format_order_markdown, load_pipeline
+    from wokbee.engine.script_runner import (
+        format_order_markdown,
+        load_pipeline,
+        validate_pipeline_script_paths,
+    )
 
     steps_in = pipeline_steps or []
     if not steps_in:
@@ -1209,6 +1342,7 @@ def apply_ai_pipeline_steps(
     root = Path(project_root)
 
     normalized: list[dict[str, Any]] = []
+    missing_script_paths: list[str] = []
     for i, raw in enumerate(steps_in):
         if not isinstance(raw, dict):
             continue
@@ -1217,21 +1351,18 @@ def apply_ai_pipeline_steps(
             continue
         if t == "script":
             path = str(raw.get("path") or "").replace("\\", "/").strip()
-            base = Path(path).name if path else ""
-            if rename_map and base and base in rename_map:
-                base = str(rename_map[base] or "")
-                path = f"scripts/{base}"
-            if path and not path.startswith("scripts/"):
-                path = f"scripts/{Path(path).name}"
             if not path:
                 continue
-            # 允许总结时尚未落盘的短暂窗口：仍写入管线，运行时再报错
-            abs_path = root / path
-            if not abs_path.exists():
-                # 尝试仅文件名匹配 scripts/
-                cand = sdir / Path(path).name
-                if cand.exists():
-                    path = f"scripts/{cand.name}"
+            resolved_path = _resolve_pipeline_script_path(
+                root,
+                sdir,
+                path,
+                rename_map=rename_map,
+            )
+            if not resolved_path:
+                missing_script_paths.append(path)
+                continue
+            path = resolved_path
             step = {
                 "id": str(raw.get("id") or f"script_{i+1}"),
                 "type": "script",
@@ -1259,6 +1390,11 @@ def apply_ai_pipeline_steps(
             }
         normalized.append(step)
 
+    # pipeline 是系统的执行事实来源，绝不落盘无法执行的脚本引用。
+    # 整条 AI 提案只要含幽灵脚本就拒绝，调用方可继续使用本轮真实固化的 pipeline。
+    if missing_script_paths:
+        return False
+
     if not normalized:
         return False
 
@@ -1285,7 +1421,8 @@ def apply_ai_pipeline_steps(
             }
         )
 
-    data = load_pipeline(project_root) or {
+    previous_pipeline = load_pipeline(project_root)
+    data = previous_pipeline or {
         "version": 3,
         "scripts": [],
         "ai_steps": [],
@@ -1334,6 +1471,18 @@ def apply_ai_pipeline_steps(
         sdir / "pipeline.json",
         json.dumps(data, ensure_ascii=False, indent=2),
     )
+    final_pipeline = load_pipeline(project_root) or {}
+    invalid = validate_pipeline_script_paths(
+        root,
+        final_pipeline.get("steps") if isinstance(final_pipeline, dict) else [],
+    )
+    if invalid:
+        if previous_pipeline is not None:
+            safe_write_text(
+                sdir / "pipeline.json",
+                json.dumps(previous_pipeline, ensure_ascii=False, indent=2),
+            )
+        return False
     return True
 
 
@@ -1343,7 +1492,11 @@ def drop_missing_pipeline_scripts(project_root: Path) -> list[str]:
     经验写入（尤其工具路径 AI 未给 script_files 时）可能产出引用幽灵脚本的管线；
     写入后立即清理，保证下次运行不会因「文件不存在」中断。仅当确有移除时才重写文件。
     """
-    from wokbee.engine.script_runner import format_order_markdown, load_pipeline
+    from wokbee.engine.script_runner import (
+        format_order_markdown,
+        load_pipeline,
+        resolve_pipeline_script_path,
+    )
 
     root = Path(project_root)
     data = load_pipeline(root)
@@ -1359,7 +1512,7 @@ def drop_missing_pipeline_scripts(project_root: Path) -> list[str]:
             kept.append(s)
             continue
         rel = str(s.get("path") or "").replace("\\", "/").strip()
-        if rel and (root / rel).exists():
+        if rel and resolve_pipeline_script_path(root, rel) is not None:
             kept.append(s)
         else:
             dropped.append(rel or "（空路径步骤）")
