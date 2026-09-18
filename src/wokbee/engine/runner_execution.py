@@ -24,10 +24,6 @@ from wokbee.core.timeline_format import (
     format_tool_callback_for_timeline,
 )
 from wokbee.core.credential_store import redact_obj, redact_text
-from wokbee.core.paths import (
-    ensure_project_layout,
-    workspace_sandbox,
-)
 from wokbee.core.settings import WokBeeSettings
 from wokbee.engine.approval_policy import (
     build_interrupt_on,
@@ -92,10 +88,19 @@ from wokbee.core.mcp_store import McpStore
 from wokbee.engine.runner_events import EventCallback, ExecutionEventLog
 from wokbee.engine.runner_models import RunRequest, RunResult, StepBudget, StepLimitExceeded
 from wokbee.engine.runner_sessions import (
-    ensure_experience_files as _ensure_experience_files,
     get_checkpointer as _get_checkpointer,
     remember_agent,
     reset_run_state as _reset_run_state,
+)
+from wokbee.engine.runner_assembly import (
+    configure_design_write_validator,
+    prepare_project_root,
+    resolve_model_for_project,
+)
+from wokbee.engine.runner_experience import (
+    fallback_notes,
+    fallback_success_path,
+    load_latest_round_events,
 )
 
 logger = logging.getLogger("wokbee")
@@ -867,20 +872,7 @@ class AgentRunner:
         mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验，
                    不挂项目经验工具；保留 Skills 与当前会话能力。
         """
-        # This flag is needed while constructing the backend below.  Keep it
-        # at the start of the method so chat/run modes cannot hit an
-        # uninitialized local before the later memory-policy section.
-        design_mode = mode == "design"
-        if mode != "design":
-            ensure_project_layout(req.project_root)
-            workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
-            _ensure_experience_files(req.project_root, req.project)
-        else:
-            # design 模式（DeziBee）：不用 WokBee 目录约定（不建 memory/workspace/
-            # deliverables 等管线目录），只要 demo/prd/uploads（demo/index.html 由 store 创建）。
-            req.project_root.mkdir(parents=True, exist_ok=True)
-            for sub in ("demo", "prd", "uploads"):
-                (req.project_root / sub).mkdir(parents=True, exist_ok=True)
+        design_mode = prepare_project_root(req, mode)
 
         # Windows：容忍 resolve() 偶发返回的 \\?\ 扩展路径，避免并发写文件时误判越界
         from wokbee.engine.backend_paths import install_extended_path_tolerance
@@ -900,26 +892,7 @@ class AgentRunner:
         )
         # 暂停按钮与工具超时共用：execute 轮询此 Event，可在命令执行中途杀进程树
         project_inner.cancel_event = self._cancel
-        if design_mode:
-            from dezibee.core.preview import validate_workbench_document
-
-            prototype_path = (req.project_root / "demo" / "index.html").resolve()
-
-            def validate_design_write(path, content):
-                if path == prototype_path:
-                    try:
-                        validate_workbench_document(content)
-                    except ValueError as exc:
-                        detail = str(exc).replace("，拒绝覆盖原型", "").replace(
-                            "拒绝覆盖原型。", ""
-                        )
-                        return (
-                            "WORKBENCH_DATA 可能不完整："
-                            f"{detail}。文件已写入，请继续读取当前文件并补全后再校验。"
-                        )
-                return None
-
-            project_inner.write_validator = validate_design_write
+        configure_design_write_validator(project_inner, req, design_mode)
         project_backend = project_inner
         interrupt_on = build_interrupt_on(req.approval)
         # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
@@ -2242,25 +2215,8 @@ class AgentRunner:
                 events = mem_events if mem_events else None
             if not events:
                 try:
-                    from wokbee.core.models import ProjectEvent
-                    from wokbee.core.paths import events_path
-
-                    ep = events_path(req.project_root)
-                    loaded: list = []
-                    if ep.exists():
-                        with ep.open("r", encoding="utf-8") as f:
-                            for line in f:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    loaded.append(ProjectEvent.from_dict(json.loads(line)))
-                                except (json.JSONDecodeError, TypeError, KeyError):
-                                    continue
-                    # 只取最新一轮（上一个「会话结束」标记之后），旧日志不上传占用 token
-                    events = slice_latest_round(loaded)[-400:] if loaded else []
-                except Exception:
-                    logger.exception("读取运行日志失败，AI 总结将缺少日志上下文")
+                    events = load_latest_round_events(req.project_root)
+                except OSError:
                     events = []
             # 内存缓冲有工具调用时并入（补磁盘竞态缺口）
             mem_events = self._snapshot_run_events()
@@ -2368,36 +2324,10 @@ class AgentRunner:
             notes_f = (ai_fields.get("notes") or notes or "").strip()
 
             if not path_f:
-                if outcome == "success":
-                    path_f = (
-                        "1. AI:\"{提示词: 明确目标与约束，制定执行方案}\";[AI 环节：理解任务并规划]\n"
-                        "2. 工具调用:\"{cmd: 联网获取或读取 uploads/ 获取真实数据}\";[获取真实数据，禁止用 archives/；同名或相近文件以最新修改时间为准]\n"
-                        "3. 工具调用:\"{cmd: 在 workspace/ 起草，最终写入 deliverables/}\";[在沙箱起草并交付]\n"
-                        "4. AI:\"{提示词: 用中文说明过程与数据来源}\";[AI 环节：交代过程与数据来源（经验中不记录结果正文）]"
-                    )
-                else:
-                    path_f = (
-                        "本次未形成完整成功路径。建议下次：\n"
-                        "- 先读最新 memory/experiences/exp_*.md\n"
-                        "- 优先复用已验证数据源、本地脚本与工具顺序\n"
-                        f"- 关注失败原因：{errors or summary_f}"
-                    )
+                path_f = fallback_success_path(outcome, errors, summary_f)
 
             if not notes_f:
-                notes_parts = []
-                if errors:
-                    notes_parts.append(
-                        f"- **本次运行报错**：复跑前先核对环境与脚本——{errors[:300]}；"
-                        "可固化步骤已写入 scripts/ 与 pipeline.json，脚本报错时 AI 介入补救。"
-                    )
-                notes_parts.append(
-                    "- **需要实时数据**：必须联网获取，禁止凭记忆编造；禁止访问 archives/ 归档数据。"
-                )
-                notes_parts.append(
-                    "- **脚本 callback 需留痕**：脚本执行后把 callback 写入 workspace/script_callback_*.md，"
-                    "AI 环节先读再写，禁止编造。"
-                )
-                notes_f = "\n".join(notes_parts)
+                notes_f = fallback_notes(errors)
 
             if not summary_f:
                 summary_f = "本轮流程经验（方法向，不含结果/产物）。"
@@ -2561,34 +2491,3 @@ class AgentRunner:
         except Exception:
             logger.exception("写入 lesson 失败")
             return None
-
-
-def resolve_model_for_project(
-    project: Project,
-    settings: WokBeeSettings,
-    provider_store: ProviderStore | None = None,
-) -> ResolvedModel:
-    """解析项目模型：项目绑定 → 厂商默认模型 → WokBee 设置默认 → 列表第一个。"""
-    store = provider_store or ProviderStore()
-    # 1) 项目已绑定
-    provider = (project.provider or "").strip()
-    model_id = (project.model_id or "").strip()
-    if provider and model_id:
-        resolved = store.resolve(provider, model_id)
-        if resolved:
-            return resolved
-    # 2) 厂商设置里的「默认」徽章（用户认知上的默认模型）
-    default = store.resolve_default()
-    if default:
-        return default
-    # 3) WokBee 设置页可选覆盖
-    wp = (settings.default_provider or "").strip()
-    wm = (settings.default_model_id or "").strip()
-    if wp and wm:
-        resolved = store.resolve(wp, wm)
-        if resolved:
-            return resolved
-    first = store.first_resolved()
-    if not first:
-        raise ValueError("没有可用模型，请先在「AI配置 → 厂商设置」中启用模型并填写 Key/Host。")
-    return first
