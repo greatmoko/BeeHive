@@ -85,6 +85,13 @@ def path_touches_archives(path: str | None, project_root=None) -> bool:
     return _ARCHIVES_RE.search(norm) is not None
 
 
+def _write_result_path(file_path: str, warning: str | None) -> str:
+    """把写入后的非阻断告警附加到成功结果，供文件工具返回给 Agent。"""
+    if not warning:
+        return file_path
+    return f"{file_path}（已写入；警告：{warning}）"
+
+
 def _iter_command_tokens(command: str) -> list[str]:
     """粗切 shell 命令为 token：引号内容作整体（含空格路径），其余按空白切。"""
     tokens: list[str] = []
@@ -202,6 +209,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
         if self._archive_hit(file_path):
             return WriteResult(error=_DENY_MSG)
         temporary = None
+        warning = None
         try:
             with self._file_lock:
                 target = self._resolve_path(file_path)
@@ -209,7 +217,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
                     return WriteResult(error=_DENY_MSG)
                 validator = getattr(self, "write_validator", None)
                 if validator is not None:
-                    validator(target, content)
+                    warning = validator(target, content)
                 # Encode before touching the destination; malformed Unicode must not erase it.
                 payload = content.encode("utf-8")
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -221,7 +229,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
                 if target.exists():
                     os.chmod(temporary, target.stat().st_mode)
                 os.replace(temporary, target)
-            return WriteResult(path=file_path)
+            return WriteResult(path=_write_result_path(file_path, warning))
         except (OSError, ValueError, RuntimeError) as exc:
             return WriteResult(error=f"写入失败，原文件未被截断：{exc}")
         finally:
@@ -256,7 +264,11 @@ class ArchiveDeniedBackend(LocalShellBackend):
                     return EditResult(error=result)
                 updated, occurrences = result
                 written = self.write(file_path, updated)
-                return EditResult(error=written.error, path=file_path, occurrences=occurrences)
+                return EditResult(
+                    error=written.error,
+                    path=written.path or file_path,
+                    occurrences=occurrences,
+                )
         except (OSError, ValueError, RuntimeError) as exc:
             return EditResult(error=f"编辑失败：{exc}")
 

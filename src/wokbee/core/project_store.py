@@ -39,6 +39,29 @@ _META_LOCK = threading.RLock()
 _EVENTS_LOCK = threading.RLock()
 _event_lines_cache: dict[str, list[str]] = {}
 
+# 工具结果对 Agent 保持完整；仅限制落盘事件，避免 runs/events.jsonl 无限膨胀。
+EVENT_LOG_MAX_CHARS = 32_000
+
+
+def _event_for_log(event: ProjectEvent) -> dict:
+    """返回用于 JSONL 的事件副本，不修改实时事件对象。"""
+    data = event.to_dict()
+    content = str(data.get("content") or "")
+    if len(content) <= EVENT_LOG_MAX_CHARS:
+        return data
+
+    marker = (
+        f"\n…（日志内容已截断，原始 {len(content)} 字符，"
+        f"上限 {EVENT_LOG_MAX_CHARS} 字符）"
+    )
+    head_size = max(0, EVENT_LOG_MAX_CHARS - len(marker))
+    data["content"] = content[:head_size] + marker
+    meta = dict(data.get("meta") or {})
+    meta["log_truncated"] = True
+    meta["original_content_length"] = len(content)
+    data["meta"] = meta
+    return data
+
 # 回收站保留天数（超时永久删除）
 TRASH_RETENTION_DAYS = 7
 _TRASHED_AT_NAME = "_trashed_at"
@@ -371,7 +394,7 @@ class ProjectStore:
         ensure_project_layout(root)
         path = events_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event.to_dict(), ensure_ascii=False) + "\n"
+        line = json.dumps(_event_for_log(event), ensure_ascii=False) + "\n"
         if path.exists():
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)

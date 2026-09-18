@@ -196,24 +196,24 @@ class WokBeeSettings:
     @property
     def max_steps(self) -> int:
         try:
-            return max(1, int(self.get("max_steps", 40)))
+            return max(1, min(500, int(self.get("max_steps", 40))))
         except (TypeError, ValueError):
             return 40
 
     @max_steps.setter
     def max_steps(self, value: int) -> None:
-        self.set("max_steps", max(1, int(value)))
+        self.set("max_steps", max(1, min(500, int(value))))
 
     @property
     def max_parallel_tools(self) -> int:
         try:
-            return max(1, int(self.get("max_parallel_tools", 4)))
+            return max(1, min(16, int(self.get("max_parallel_tools", 4))))
         except (TypeError, ValueError):
             return 4
 
     @max_parallel_tools.setter
     def max_parallel_tools(self, value: int) -> None:
-        self.set("max_parallel_tools", max(1, int(value)))
+        self.set("max_parallel_tools", max(1, min(16, int(value))))
 
     @property
     def max_pipeline_phases(self) -> int:
@@ -356,13 +356,13 @@ class WokBeeSettings:
     @property
     def ai_interval_ms(self) -> int:
         try:
-            return max(0, int(self.get("ai_interval_ms", 0) or 0))
+            return max(0, min(60000, int(self.get("ai_interval_ms", 0) or 0)))
         except (TypeError, ValueError):
             return 0
 
     @ai_interval_ms.setter
     def ai_interval_ms(self, value: int) -> None:
-        self.set("ai_interval_ms", max(0, int(value or 0)))
+        self.set("ai_interval_ms", max(0, min(60000, int(value or 0))))
 
     @property
     def tool_timeout_seconds(self) -> int:

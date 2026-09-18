@@ -9,15 +9,20 @@ _POSITIONS = ("before", "after", "replace")
 
 
 FILESYSTEM_TOOL_DESCRIPTIONS = {
-    "read_file": """读取文件，使用项目虚拟路径。小文件一次读取；已有上下文足够就直接编辑，勿反复读取。
-大文件先 find_in_file/grep 定位，只读相关区域；不要从头到尾连续翻页。offset 从 0 起。
-只在确有需要时继续读取 next_offset；到文件末尾即停止。""",
-    "write_file": """创建或完整替换文件，使用项目虚拟路径。优先一次写入完整内容，无固定 3000 字限制。
-局部修改用 edit_file/insert_text，勿重写整个网页。仅当完整内容超过模型单次输出预算时，
-使用 write_file_chunk 暂存分块并在最后 final=True 提交，禁止把未完成的网页作为交付物。""",
-    "edit_file": """对已有文件执行精确文本替换。已掌握当前原文可直接编辑，否则先 find_in_file/grep 定位。
-old_string 使用唯一原文，保留缩进，不带行号。失败后重新定位一次；仍失败则报告错误，不盲目循环。
-支持删除局部内容（new_string 为空）；删除整个文件使用 delete。""",
+    "read_file": """读取文件，使用项目虚拟路径。可按需全文读取；大文件分窗口读取并继续到目标上下文完整。
+修改前必须读取目标文件的最新内容；PRD 修改尤其必须先读取当前目标章节，不得使用旧对话文本覆盖用户手改。
+读取结果带 L042 形式的行号，行号只用于定位，不要复制进 anchor、old_string 或写回内容。""",
+    "write_file": """创建或完整替换新文件，使用项目虚拟路径。已有 demo/index.html 或 PRD 的局部修改不得使用此工具。
+	局部修改优先用 edit_file_lines；需要精确文本替换时用 edit_file/insert_text。PRD-only 请求禁止重写整个入口文件。仅当用户明确要求全文重写，或创建新文件时才完整写入。
+	工作台校验发现 WORKBENCH_DATA 不完整时，文件仍会先写入，工具会返回非阻断告警；继续读取当前文件并补全，不要把它当作写入失败。""",
+    "edit_file": """对已有文件执行精确文本替换。修改前必须先读取当前原文；已掌握当前原文可直接编辑，否则先 find_in_file/grep 定位。
+	old_string 使用唯一原文，保留缩进，不带行号。失败后重新定位一次；仍失败则报告错误，不盲目循环。
+	支持删除局部内容（new_string 为空）；删除整个文件使用 delete。
+	整段连续行的小范围编辑优先使用 edit_file_lines；本工具保留给按精确文本替换的场景。""",
+    "edit_file_lines": """按行号替换已有文件中的一段连续内容。start_line/end_line 使用 1-based 且包含首尾行；先用 read_file_range 或 find_in_file 确认行号。
+这是整段小范围编辑的首选工具：只接受 file_path、start_line、end_line、new_string，不需要也不接受 old_string。new_string 为空表示删除该行范围；start_line=end_line=文件末行+1 可在文件末尾插入。
+如果请求包含 old_string，请改用 edit_file；如果缺少 start_line/end_line，请先调用 read_file_range 或 find_in_file。
+只替换指定行，其他内容保持不变；写入后若工作台校验发现 WORKBENCH_DATA 不完整，文件仍已写入，请继续读取并修复。""",
 }
 
 
@@ -55,6 +60,30 @@ def _write_all(backend: Any, file_path: str, content: str) -> str | None:
     return str(err) if err else None
 
 
+def _replace_line_range(
+    existing: str, start_line: int, end_line: int, new_string: str
+) -> str:
+    """按 1-based 闭区间替换行；允许在 EOF 的下一行插入。"""
+    start = int(start_line)
+    end = int(end_line)
+    if start < 1 or end < start:
+        raise ValueError("start_line/end_line 必须是有效的 1-based 闭区间")
+    lines = existing.splitlines(keepends=True)
+    count = len(lines)
+    if start > count + 1 or end > count + 1:
+        raise ValueError(f"行号越界：文件共 {count} 行")
+    if start == count + 1 and end != start:
+        raise ValueError("文件末尾插入时 start_line 与 end_line 必须相同")
+
+    left = start - 1
+    right = end if start <= count else count
+    replacement = str(new_string or "")
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    if replacement and right < count and not replacement.endswith(("\n", "\r")):
+        replacement += newline
+    return "".join(lines[:left]) + replacement + "".join(lines[right:])
+
+
 def build_file_tools(*, backend: Any, emit=None):
     """构造文件写入辅助工具（backend 为 runner 里的 CompositeBackend）。"""
     from langchain_core.tools import tool
@@ -64,10 +93,11 @@ def build_file_tools(*, backend: Any, emit=None):
 
     @tool
     def read_file_range(file_path: str, offset: int = 0, limit: int = 500, char_offset: int = 0) -> str:
-        """按行窗口读取文件片段（0 起始行号），用于修改前确认锚点与上下文。
+        """按行窗口读取文件片段（0 起始 offset），用于修改前确认最新锚点与上下文。
 
-        已有最新上下文时不必重复读取。需要确认时读取目标位置附近，
-        锚点文本必须与文件实际内容（含缩进、全半角）完全一致。
+        可连续分页全文读取；PRD 修改前必须先读取当前目标章节。返回内容的每行带绝对行号（如 L042 |），
+        行号只供定位，不能复制到 anchor、old_string 或写回内容。锚点文本必须与文件实际内容
+        （含缩进、全半角）完全一致。
         超长单行可保持 offset/limit 不变，按返回的 next_char_offset 设置 char_offset。
         未知位置时先用 find_in_file 获取行号；只有文件工具已报错且重新定位仍失败时，才可用临时脚本兜底。
         """
@@ -81,6 +111,7 @@ def build_file_tools(*, backend: Any, emit=None):
         data = getattr(res, "file_data", None) or {}
         content = str(data.get("content") or "")
         start = getattr(res, "start_line", None)
+        start_line = int(start or 1)
         next_off = getattr(res, "next_offset", None)
         total = getattr(res, "total_lines", None)
         # Explicit EOF prevents the model from treating every result as another page.
@@ -93,9 +124,18 @@ def build_file_tools(*, backend: Any, emit=None):
             return "错误：char_offset 超过该窗口字符数；不要继续翻页。"
         if len(content) - char_offset > 10000:
             ending = f"；窗口内文本未读完，next_char_offset={char_offset + 10000}（保持 offset/limit 不变）；优先搜索所需区域"
+        # char_offset may continue a very long physical line. Keep the absolute
+        # source line number on that continuation instead of resetting to the window start.
+        display_start = start_line + content[:char_offset].count("\n")
         content = content[char_offset:char_offset + 10000]
+        numbered: list[str] = []
+        for index, line in enumerate(content.splitlines(keepends=True)):
+            numbered.append(f"L{display_start + index:03d} | {line}")
+        if content and not numbered:
+            numbered.append(f"L{display_start:03d} | {content}")
+        content = "".join(numbered)
         head = (
-            f"[第 {start} 行起"
+            f"[第 {display_start} 行起"
             + (f"，共 {total} 行" if total is not None else "")
             + ending
             + "]"
@@ -159,7 +199,7 @@ def build_file_tools(*, backend: Any, emit=None):
 
         首块 mode=overwrite, offset=0；后续 mode=append, offset=上次返回的 next_offset（字符数）。
         最后一块必须 final=True；也可用空 content、final=True 提交。未提交时目标文件不变。
-        同一文件必须顺序调用；中断会丢弃本轮暂存内容。局部编辑用 edit_file/insert_text。
+        同一文件必须顺序调用；中断会丢弃本轮暂存内容。局部编辑优先用 edit_file_lines；需要精确文本替换时用 edit_file/insert_text。
         """
         if mode not in ("overwrite", "append") or offset < 0:
             return "错误：mode 仅支持 overwrite/append，offset 必须非负。"
@@ -262,4 +302,42 @@ def build_file_tools(*, backend: Any, emit=None):
         _notify(emit, f"已在 {file_path} 锚点{action}文本（{len(text)} 字）")
         return f"已在 {file_path} 完成锚点{action}（{len(text)} 字，全文 {len(final)} 字）。"
 
-    return [read_file_range, find_in_file, write_file_chunk, insert_text]
+    @tool
+    def edit_file_lines(
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        new_string: str,
+    ) -> str:
+        """按 1-based 闭区间替换连续行；整段小范围编辑优先使用本工具。
+
+        本工具只接受 file_path、start_line、end_line、new_string。
+        缺少行号时先调用 read_file_range 或 find_in_file；需要 old_string 时改用 edit_file。
+        """
+        existing = _read_all(backend, file_path)
+        if existing is None:
+            return f"错误：无法读取 {file_path}（可能不存在），先用 read_file_range 确认。"
+        try:
+            final = _replace_line_range(existing, start_line, end_line, new_string)
+        except (TypeError, ValueError) as exc:
+            return f"错误：无法按行编辑 {file_path}——{exc}"
+        if final == existing:
+            return "提示：内容无变化，未写入。"
+        try:
+            result = backend.edit(file_path, existing, final, replace_all=False)
+            err = getattr(result, "error", None)
+        except Exception as exc:
+            err = str(exc)
+            result = None
+        if err:
+            return f"错误：写入失败——{err}"
+        detail = getattr(result, "path", None) if result is not None else None
+        warning = ""
+        if detail and str(detail) != file_path:
+            warning = f"；{detail}"
+        return (
+            f"已按行编辑 {file_path}（第 {start_line}-{end_line} 行，"
+            f"写入 {len(new_string or '')} 字，全文 {len(final)} 字）{warning}"
+        )
+
+    return [read_file_range, find_in_file, write_file_chunk, insert_text, edit_file_lines]

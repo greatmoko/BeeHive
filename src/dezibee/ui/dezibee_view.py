@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from tokbee.ui.styles.theme import Theme
 
 from wokbee.ui.ask_user_dialog import AskUserDialog
+from wokbee.core.settings import WokBeeSettings
 
 from dezibee.core.models import Conversation, Requirement
 from dezibee.core.store import DeziBeeStore
@@ -304,6 +305,8 @@ class DeziBeeView(QWidget):
             self._build_user_message(req, text),
             parent=self,
             attachments=attachments,
+            conversation_id=req.active_conversation().conv_id,
+            settings=WokBeeSettings(),
         )
         worker.finished.connect(self._on_worker_stopped)
         worker.finished.connect(worker.deleteLater)
@@ -565,7 +568,7 @@ class DeziBeeView(QWidget):
             self,
             self.theme,
             "已另起对话（同一需求）。\n"
-            "新对话将继续使用当前需求信息、Demo/PRD 文件和本轮交互记录。",
+            "新对话不会继承旧聊天上下文，但仍可读取当前需求信息、Demo 和最新 PRD 文件。",
         )
 
     # ── 模型切换 ─────────────────────────────────────────

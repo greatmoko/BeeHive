@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 from tokbee.ui.combo_style import (
     hint_label_qss,
     rounded_lineedit_qss,
+    rounded_spin_qss,
     secondary_btn_qss,
     section_label_qss,
 )
@@ -118,6 +120,38 @@ class DeziBeeSettingsWorkspace(QWidget):
         terminal_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(terminal_hint)
 
+        bl.addWidget(self._section_label("Agent 执行限制"))
+        limit_hint = QLabel("修改后对下一轮执行生效；正在运行的 Agent 保持本轮启动时的限制。")
+        limit_hint.setWordWrap(True)
+        limit_hint.setStyleSheet(hint_label_qss(c))
+        bl.addWidget(limit_hint)
+        self._limit_fields = {}
+        for key, label, unit, description, minimum, maximum in (
+            ("max_steps", "max_steps", "步", "单轮 Agent 最大逻辑步数，包含工具调用更新。", 1, 500),
+            ("max_parallel_tools", "max_parallel_tools", "个", "同时运行的工具数量。", 1, 16),
+            ("ai_interval_ms", "ai_interval_ms", "毫秒", "模型或工具调用之间的等待时间，0 表示不等待。", 0, 60000),
+            ("tool_timeout_seconds", "tool_timeout_seconds", "秒", "单个工具执行超时时间。", 5, 3600),
+            ("model_timeout_seconds", "model_timeout_seconds", "秒", "单次模型请求超时时间。", 10, 3600),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            title = QLabel(f"{label}（{unit}）")
+            title.setMinimumWidth(190)
+            title.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+            row.addWidget(title)
+            spin = QSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setFixedWidth(120)
+            spin.setStyleSheet(rounded_spin_qss(c))
+            spin.setToolTip(f"推荐范围：{minimum}–{maximum}")
+            row.addWidget(spin)
+            detail = QLabel(f"{description} 推荐范围：{minimum}–{maximum}。")
+            detail.setWordWrap(True)
+            detail.setStyleSheet(hint_label_qss(c))
+            row.addWidget(detail, 1)
+            bl.addLayout(row)
+            self._limit_fields[key] = (spin, minimum, maximum)
+
         bl.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
@@ -172,6 +206,15 @@ class DeziBeeSettingsWorkspace(QWidget):
         self._path_edit.setText(str(self.settings.dezibee_work_root))
         self._update_stat()
         self._reload_terminals()
+        values = {
+            "max_steps": self.settings.max_steps,
+            "max_parallel_tools": self.settings.max_parallel_tools,
+            "ai_interval_ms": self.settings.ai_interval_ms,
+            "tool_timeout_seconds": self.settings.tool_timeout_seconds,
+            "model_timeout_seconds": self.settings.model_timeout_seconds,
+        }
+        for key, value in values.items():
+            self._limit_fields[key][0].setValue(value)
 
     def _reload_terminals(self):
         """填充终端下拉框：系统内可用命令行工具 + 未选中时默认 cmd。"""
@@ -196,6 +239,18 @@ class DeziBeeSettingsWorkspace(QWidget):
         self._load()
 
     def _on_save(self):
+        values = {}
+        for key, (spin, minimum, maximum) in self._limit_fields.items():
+            raw = spin.text().strip().replace(",", "")
+            try:
+                value = int(raw)
+            except ValueError:
+                _tip(self, self.theme, f"{key} 必须是整数，范围为 {minimum}–{maximum}。")
+                return
+            if not minimum <= value <= maximum:
+                _tip(self, self.theme, f"{key} 超出范围，请输入 {minimum}–{maximum}。")
+                return
+            values[key] = value
         raw = self._path_edit.text().strip()
         if not raw:
             _tip(self, self.theme, "请设置 DeziBee 需求工作文件夹。")
@@ -208,7 +263,12 @@ class DeziBeeSettingsWorkspace(QWidget):
             return
         self.settings.dezibee_work_root = path
         self.settings.terminal_app = str(self._terminal_combo.currentData() or "cmd")
+        self.settings.max_steps = values["max_steps"]
+        self.settings.max_parallel_tools = values["max_parallel_tools"]
+        self.settings.ai_interval_ms = values["ai_interval_ms"]
+        self.settings.tool_timeout_seconds = values["tool_timeout_seconds"]
+        self.settings.model_timeout_seconds = values["model_timeout_seconds"]
         self.settings.save()
         self._path_edit.setText(str(path))
         self._update_stat()
-        _tip(self, self.theme, "DeziBee 设置已保存。")
+        _tip(self, self.theme, "DeziBee 设置已保存，修改后对下一轮执行生效。")

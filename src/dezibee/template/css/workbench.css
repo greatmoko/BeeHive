@@ -185,7 +185,7 @@ body.flow-fullscreen #canvasWrap { width: 100vw; }
   z-index: 1;
 }
 .shell-browser::after {
-  content: ""; position: absolute; top: 8px; left: 52px; right: 14px; height: 19px;
+  content: ""; position: absolute; top: 8px; left: 60px; right: 14px; height: 19px;
   background: #fff; border: 1px solid #dde1e6; border-radius: 10px; z-index: 1;
 }
 .shell-browser .dots {

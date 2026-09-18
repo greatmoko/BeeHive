@@ -255,7 +255,7 @@ def wrap_tools_truncate_results(
     tool_timeout: float | None = None,
     max_parallel_tools: int | None = None,
 ) -> list:
-    """包装工具返回值：超长截断 + 单工具超时 + 并发上限。"""
+    """包装工具运行控制：保留原始结果 + 单工具超时 + 并发上限。"""
     dump_dir = None
     if project_root is not None:
         dump_dir = Path(project_root) / "workspace"
@@ -303,21 +303,9 @@ def _wrap_one_tool(
     response_format = getattr(tool, "response_format", "content") or "content"
 
     def _truncate_payload(result: Any) -> Any:
-        if result is None:
-            return result
-        if isinstance(result, (dict, list)):
-            import json
-
-            text = json.dumps(result, ensure_ascii=False)
-            if len(text) <= max_chars:
-                return result
-            return truncate_tool_result(
-                text, max_chars=max_chars, dump_dir=dump_dir, tool_name=name
-            )
-        text = result if isinstance(result, str) else str(result)
-        return truncate_tool_result(
-            text, max_chars=max_chars, dump_dir=dump_dir, tool_name=name
-        )
+        # 工具结果必须原样返回给 Agent；长度管理属于日志持久化层。
+        # 保留此内部函数名以避免改动超时/并发包装的调用结构。
+        return result
 
     def _truncate(result: Any) -> Any:
         # MCP 工具 response_format=content_and_artifact，必须保持 (content, artifact)
@@ -356,7 +344,7 @@ def _wrap_one_tool(
                     limiter.release()
         return _hooked
 
-    # 异步入口（async @tool / MCP 等）必须一并包装，否则 ainvoke 走 coroutine 时绕过截断
+    # 异步入口（async @tool / MCP 等）必须一并包装，否则 ainvoke 走 coroutine 时会绕过运行控制
     coro = getattr(tool, "coroutine", None)
     if inspect.iscoroutinefunction(coro):
         aw = _hook(_callable_with_timeout(coro, name, tool_timeout))
@@ -437,7 +425,7 @@ def _wrap_one_tool(
                 return tool
 
         # 同步 _run 分支同样包装配套的异步 _arun：ainvoke 优先走 _arun，
-        # 若只包 _run，自定义 async 工具经 ainvoke 会绕过截断，把前缀撑大、命中率掉。
+        # 若只包 _run，自定义 async 工具经 ainvoke 会绕过超时/并发控制。
         arun = getattr(tool, "_arun", None)
         if inspect.iscoroutinefunction(arun):
             aw = _hook(_callable_with_timeout(arun, name, tool_timeout))

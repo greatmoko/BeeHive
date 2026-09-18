@@ -1,0 +1,2711 @@
+"""Deep Agents 运行器：目标 → 执行 → 审批门 → lesson。"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from deepagents import FilesystemMiddleware, create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphInterrupt, GraphRecursionError
+from langgraph.types import Command
+
+from tokbee.core.provider_store import ProviderStore, ResolvedModel
+
+from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN, _now
+from wokbee.core.timeline_format import (
+    format_tool_call_for_timeline,
+    format_tool_callback_for_timeline,
+)
+from wokbee.core.credential_store import redact_obj, redact_text
+from wokbee.core.paths import (
+    ensure_project_layout,
+    memory_dir,
+    workspace_sandbox,
+)
+from wokbee.core.settings import WokBeeSettings
+from wokbee.engine.approval_policy import (
+    build_interrupt_on,
+    risk_label_for_tool,
+)
+from wokbee.engine.archive_guard import ArchiveDeniedBackend, attach_execute_watch
+from wokbee.engine.access_request import (
+    ApprovedDirRegistry,
+    build_access_request_tool,
+    mount_dir,
+)
+from wokbee.engine.access_coerce import AccessCoerceBackend
+from wokbee.engine.readonly_backend import ReadOnlyBackend
+from wokbee.engine.file_tools import FILESYSTEM_TOOL_DESCRIPTIONS, build_file_tools
+from wokbee.engine.lessons import (
+    Lesson,
+    LessonStore,
+    build_lesson_digest,
+    build_experience_tools,
+    collect_events_log,
+    collect_scripts_context,
+    slice_latest_round,
+    summarize_lesson_with_ai,
+    sync_lesson_from_pipeline,
+)
+from wokbee.engine.runtime_env import build_runtime_env_block
+from wokbee.engine.model_factory import build_chat_model
+from wokbee.engine.network_tools import NETWORK_TOOLS
+from wokbee.engine.cache_prefix import (
+    CacheHitTracker,
+    PrefixGuard,
+    build_session_context_block,
+    compose_user_with_context,
+    prefix_fingerprint,
+    sort_tools_by_name,
+    static_system_prompt,
+    tool_name_of,
+    wrap_tools_truncate_results,
+)
+from wokbee.engine.ask_user import (
+    build_ask_user_tool,
+    is_ask_user_interrupt,
+    normalize_ask_user_value,
+)
+from wokbee.engine.project_tools import build_project_meta_tools
+from wokbee.engine.credential_tools import build_credential_tools
+from wokbee.engine.autobee_tools import build_autobee_tools
+from wokbee.engine.script_factory import (
+    apply_ai_authored_scripts,
+    apply_ai_pipeline_steps,
+    drop_missing_pipeline_scripts,
+    solidify_scripts,
+)
+from wokbee.engine.script_runner import (
+    build_user_message_for_ai_phase,
+    peek_pipeline,
+    publish_pipeline_outputs,
+    run_pipeline_until_ai_or_end,
+)
+from wokbee.core.skills_store import SkillsStore
+from wokbee.core.mcp_store import McpStore
+
+logger = logging.getLogger("wokbee")
+
+EventCallback = Callable[[str, str, dict], None]  # kind, content, meta
+ApprovalCallback = Callable[[list[dict]], None]  # pending action summaries
+
+
+@dataclass
+class RunRequest:
+    project: Project
+    project_root: Path
+    user_message: str
+    resolved: ResolvedModel
+    approval: ApprovalFlags
+    max_steps: int = 40
+    attachments: list[dict] = field(default_factory=list)
+    # 运行器模式：run（经验管线）| chat（交互）| design（DeziBee 设计）
+    runner_mode: str = ""
+    # 可选的对话隔离键；为空时保持按项目复用旧 chat thread 的兼容行为。
+    chat_thread_id: str = ""
+
+
+@dataclass
+class RunResult:
+    ok: bool
+    outcome: str  # success | failed | cancelled | awaiting_approval | incomplete
+    final_text: str = ""
+    error: str = ""
+    lesson_id: str = ""
+    pending_actions: list[dict] = field(default_factory=list)
+
+
+class StepLimitExceeded(RuntimeError):
+    """Raised when one Agent run exhausts its logical step budget."""
+
+    def __init__(self, limit: int, used: int, kind: str) -> None:
+        self.limit = limit
+        self.used = used
+        self.kind = kind
+        super().__init__(
+            f"Agent 执行未完成：已达到 max_steps={limit} 的硬上限 "
+            f"（已用 {used} 步，最后计数类型：{kind}）。"
+            "已停止继续调用模型或工具，请提高 max_steps 或拆分任务。"
+        )
+
+
+class _StepBudget:
+    """Thread-safe logical budget for Agent turns and tool updates."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def consume(self, kind: str, amount: int = 1) -> None:
+        amount = max(1, int(amount))
+        with self._lock:
+            if self.used + amount > self.limit:
+                self.used = self.limit
+                raise StepLimitExceeded(self.limit, self.used, kind)
+            self.used += amount
+
+
+# 进程内 checkpointer，保证同一项目可 resume
+_CHECKPOINTERS: dict[str, InMemorySaver] = {}
+_AGENTS: dict[str, Any] = {}
+_LOCK = threading.Lock()
+
+# 【会话上下文】块的固定首行，用作「是否已注入」的稳定哨兵（内容可随项目变更，
+# 但首行字面量恒定）。判定已注入时以此为准，不依赖 project.title/goal 等易变内容。
+_CONTEXT_SENTINEL = "【会话上下文】"
+
+
+def _format_engine_error(exc: BaseException) -> str:
+    """把厂商网关错误翻成可读说明，避免和本机 MCP 调用失败混在一起。"""
+    text = str(exc)
+    low = text.lower()
+
+    # 已有明确可读原始信息时优先（网关/MCP 特判），避免被分类覆盖。
+    if (
+        "do_request_failed" in low
+        or "upstream error" in low
+        or ("error code: 500" in low and "new_api" in low)
+    ):
+        return (
+            "模型网关返回 500（上游请求失败）。这是厂商把请求转到 DeepSeek 时失败，"
+            "发生在模型 HTTP 调用阶段，不是 MCP 工具执行失败。"
+            "请稍后重试；若连续出现，可暂时关掉部分 MCP 减少 tools 数量，"
+            "或到网关后台用 request id 查日志。"
+            f"\n原始信息：{text}"
+        )
+    if "does not support sync invocation" in low:
+        return (
+            "MCP 工具缺少同步入口。请确认已更新并重启应用后再试。"
+            f"\n原始信息：{text}"
+        )
+
+    # 统一分类兜底：命中已知类时给出针对性诊断/建议。
+    try:
+        from wokbee.engine.ai_errors import (
+            AIErrorKind,
+            classify_error,
+            display_message,
+        )
+
+        kind = classify_error(exc)
+        if kind is not AIErrorKind.UNKNOWN:
+            # 可自动重试类：deepagents / max_retries 已做底层重试，提示稍后重试；
+            # 不可重试类：给出定位与修正建议。
+            return display_message(kind, text)
+    except Exception:
+        pass
+    return text
+
+
+def _get_checkpointer(project_id: str) -> InMemorySaver:
+    with _LOCK:
+        if project_id not in _CHECKPOINTERS:
+            _CHECKPOINTERS[project_id] = InMemorySaver()
+        return _CHECKPOINTERS[project_id]
+
+
+def _reset_run_state(project_id: str) -> InMemorySaver:
+    """新开「运行」时清空线程状态，避免继承上次卡死的空 AIMessage / 半截对话。"""
+    with _LOCK:
+        _CHECKPOINTERS[project_id] = InMemorySaver()
+        _AGENTS.pop(project_id, None)
+        return _CHECKPOINTERS[project_id]
+
+
+def _ensure_experience_files(project_root: Path, project: Project) -> None:
+    mem = memory_dir(project_root)
+    mem.mkdir(parents=True, exist_ok=True)
+    (mem / "experiences").mkdir(parents=True, exist_ok=True)
+    agents_md = mem / "AGENTS.md"
+    # AGENTS.md 只保留项目标识与项目经验约定，不生成任何记忆库文件。
+    content = (
+        f"# Project {project.title}\n\n"
+        f"- id: `{project.id}`\n"
+        f"- goal: {project.goal or '(未设置)'}\n"
+        f"- approval: {project.approval.summary()}\n\n"
+        "你是 WokBee——运行在用户本机上的工作助手。能力范围、系统环境、可调用工具、"
+        "目录与凭据约定见本轮系统提示与【会话上下文】。\n"
+        "项目运行经验位于 memory/experiences/（只加载最新一份）。\n"
+        "**禁止**访问 archives/；文件工具只用虚拟路径；凭据只给环境变量名，严禁写出账号密码。\n"
+        f"项目名称最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
+    )
+    agents_md.write_text(content, encoding="utf-8")
+    from wokbee.engine.lessons import LessonStore
+
+    LessonStore(project_root).rebuild_index()
+
+
+def _attachment_content(text: str, attachments: list[dict] | None) -> Any:
+    """将上传附件附加到用户消息；图片使用 OpenAI image_url，多媒体文件给出 uploads 路径。"""
+    attachments = attachments or []
+    images: list[dict] = []
+    files: list[dict] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        path = Path(str(item.get("path") or ""))
+        if not path.exists() or not path.is_file():
+            continue
+        if str(item.get("kind") or "") == "image":
+            images.append(item)
+        else:
+            files.append(item)
+
+    file_note = ""
+    if files:
+        names = []
+        for item in files:
+            path = Path(str(item.get("path") or ""))
+            names.append(f"uploads/{path.name}")
+        file_note = "\n\n[附加文件（已保存到项目 uploads/，可用文件工具读取）]\n" + "\n".join(
+            f"- {name}" for name in names
+        )
+
+    text = (text or "") + file_note
+    if not images:
+        return text
+
+    parts: list[dict] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for item in images:
+        path = Path(str(item.get("path") or ""))
+        try:
+            raw = path.read_bytes()
+            mime = str(item.get("mime") or "")
+            if not mime:
+                import mimetypes
+                mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded = base64.b64encode(raw).decode("ascii")
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{encoded}"},
+            })
+        except OSError:
+            parts.append({"type": "text", "text": f"[无法读取图片附件：{path.name}]"})
+    return parts or text
+
+
+def _message_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                # 兼容 text / output_text 等块
+                if block.get("type") in ("text", "output_text", "input_text") or "text" in block:
+                    parts.append(str(block.get("text") or ""))
+                elif block.get("type") == "reasoning":
+                    continue
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts).strip()
+    return str(content).strip()
+
+
+def _reasoning_text(msg: Any) -> str:
+    """读取厂商附带的思考/推理文本（如 DeepSeek 的 reasoning_content）。
+
+    标准 ChatOpenAI 解析流式 delta 时丢弃该字段，须先经模型层保留才有值；否则恒空。
+    """
+    ak = getattr(msg, "additional_kwargs", None)
+    if isinstance(msg, dict):
+        ak = msg.get("additional_kwargs")
+    if not isinstance(ak, dict):
+        return ""
+    rc = ak.get("reasoning_content") or ""
+    if isinstance(rc, list):
+        rc = "".join(str(x) for x in rc)
+    return str(rc).strip()
+
+
+def _raw_text(content: Any) -> str:
+    """保留空白地抽取消息文本增量（流式 delta 用，勿 strip 以免吞词间空格）。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") in ("text", "output_text", "input_text") or "text" in b:
+                    parts.append(str(b.get("text") or ""))
+                elif b.get("type") == "reasoning":
+                    continue
+            elif isinstance(b, str):
+                parts.append(b)
+        return "".join(parts)
+    return str(content)
+
+
+def _raw_reasoning(chunk: Any) -> str:
+    """读取厂商附带的思考 delta（保留空白）。"""
+    ak = getattr(chunk, "additional_kwargs", None)
+    if isinstance(chunk, dict):
+        ak = chunk.get("additional_kwargs")
+    if not isinstance(ak, dict):
+        return ""
+    rc = ak.get("reasoning_content") or ""
+    if isinstance(rc, list):
+        rc = "".join(str(x) for x in rc)
+    return str(rc)
+
+
+def _stream_delta_parts(chunk: Any) -> tuple[str, str]:
+    """把单个流式消息块拆成 (reasoning_delta, text_delta)。"""
+    try:
+        return _raw_reasoning(chunk), _raw_text(
+            getattr(chunk, "content", None) if not isinstance(chunk, dict) else chunk.get("content")
+        )
+    except Exception:
+        return "", ""
+
+
+def _is_ai_message(msg: Any) -> bool:
+    cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type") or "")
+    role = getattr(msg, "type", None) or (
+        msg.get("role") if isinstance(msg, dict) else None
+    ) or cls
+    role_s = str(role or "")
+    return "AI" in cls or role_s in ("ai", "assistant", "AIMessage")
+
+
+def _extract_text(messages: list) -> str:
+    """取最近一条**非空** AI 正文（跳过空 content / Tool / Human）。"""
+    if not messages:
+        return ""
+    for msg in reversed(list(messages)):
+        if not _is_ai_message(msg):
+            continue
+        content = (
+            getattr(msg, "content", None)
+            if not isinstance(msg, dict)
+            else msg.get("content")
+        )
+        text = _message_text(content)
+        if text:
+            return text
+        rc = _reasoning_text(msg)
+        if rc:
+            return rc
+    return ""
+
+
+def _msg_id(msg: Any) -> str:
+    mid = getattr(msg, "id", None)
+    if mid:
+        return str(mid)
+    if isinstance(msg, dict) and msg.get("id"):
+        return str(msg["id"])
+    return ""
+
+
+def _msg_fingerprint(msg: Any) -> str:
+    """稳定去重键：优先消息 id / tool_call_id，否则内容指纹。
+
+    LangGraph stream 后若再遍历 get_state 全量 messages，无 id 时会重复写入时间线。
+    """
+    mid = _msg_id(msg)
+    if mid:
+        return f"id:{mid}"
+
+    tcid = getattr(msg, "tool_call_id", None)
+    if not tcid and isinstance(msg, dict):
+        tcid = msg.get("tool_call_id")
+    if tcid:
+        return f"toolmsg:{tcid}"
+
+    tc_ids: list[str] = []
+    for tc in _tool_calls_of(msg):
+        if isinstance(tc, dict):
+            tid = str(tc.get("id") or tc.get("tool_call_id") or "").strip()
+        else:
+            tid = str(getattr(tc, "id", "") or getattr(tc, "tool_call_id", "") or "").strip()
+        if tid:
+            tc_ids.append(tid)
+    if tc_ids:
+        return "tc:" + ",".join(tc_ids)
+
+    cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type", "dict"))
+    role = getattr(msg, "type", None) or (msg.get("role") if isinstance(msg, dict) else "") or cls
+    name = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else "") or ""
+    text = _message_text(
+        getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+    )[:800]
+    # 含 tool_calls 摘要，避免仅文本相同的不同调用被误去重
+    if _tool_calls_of(msg):
+        bits = []
+        for tc in _tool_calls_of(msg)[:6]:
+            n, a = _tool_call_parts(tc)
+            bits.append(f"{n}:{json.dumps(a, ensure_ascii=False, sort_keys=True)[:120]}")
+        text = text + "|" + ";".join(bits)
+    raw = f"{role}|{name}|{text}"
+    import hashlib
+
+    return "fp:" + hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def _tool_calls_of(msg: Any) -> list:
+    tcs = getattr(msg, "tool_calls", None)
+    if tcs:
+        return list(tcs)
+    if isinstance(msg, dict):
+        return list(msg.get("tool_calls") or [])
+    additional = getattr(msg, "additional_kwargs", None) or {}
+    if isinstance(additional, dict):
+        return list(additional.get("tool_calls") or [])
+    return []
+
+
+def _tool_call_parts(tc: Any) -> tuple[str, dict]:
+    if isinstance(tc, dict):
+        name = str(tc.get("name") or tc.get("function", {}).get("name") or "tool")
+        args = tc.get("args")
+        if args is None and isinstance(tc.get("function"), dict):
+            args = tc["function"].get("arguments")
+    else:
+        name = str(getattr(tc, "name", "tool") or "tool")
+        args = getattr(tc, "args", {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"raw": args[:500]}
+    if not isinstance(args, dict):
+        args = {"raw": args}
+    return name, args
+
+
+def _tool_call_id(tc: Any) -> str:
+    """取工具调用的 id，用于 call ↔ callback 配对（兼容 dict/对象）。"""
+    if isinstance(tc, dict):
+        return str(tc.get("id") or tc.get("tool_call_id") or "").strip()
+    return str(getattr(tc, "id", "") or getattr(tc, "tool_call_id", "") or "").strip()
+
+
+def _format_tool_call(tc: Any) -> str:
+    name, args = _tool_call_parts(tc)
+    args = redact_obj(args)
+    args_s = json.dumps(args, ensure_ascii=False)
+    if len(args_s) > 400:
+        args_s = args_s[:400] + "…"
+    return f"{name}({args_s})"
+
+
+def build_success_path_from_messages(messages: list, *, limit: int = 40) -> str:
+    """从本轮消息中的工具调用轨迹提炼「成功实现路径」。"""
+    steps: list[str] = []
+    for msg in messages or []:
+        if len(steps) >= limit:
+            break
+        cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type", ""))
+        role = getattr(msg, "type", None) or (msg.get("role") if isinstance(msg, dict) else "") or cls
+
+        for tc in _tool_calls_of(msg):
+            if len(steps) >= limit:
+                break
+            steps.append(f"{len(steps) + 1}. call: {_format_tool_call(tc)}")
+
+        if "Tool" in cls or role in ("tool", "ToolMessage"):
+            name = (
+                getattr(msg, "name", None)
+                or (msg.get("name") if isinstance(msg, dict) else None)
+                or "tool"
+            )
+            body = _message_text(
+                getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+            )
+            body = redact_text(body)
+            if str(name) == "get_credential":
+                body = "（凭据明文已隐藏）"
+            if len(body) > 220:
+                body = body[:220] + "…"
+            if body:
+                steps.append(f"{len(steps) + 1}. callback: {name} — {body}")
+            else:
+                steps.append(f"{len(steps) + 1}. callback: {name}")
+
+    if not steps:
+        return ""
+    return "\n".join(steps)
+
+
+def _emit_message_events(
+    emit: EventCallback,
+    msg: Any,
+    seen: set[str],
+    *,
+    cache_tracker: CacheHitTracker | None = None,
+) -> None:
+    """把单条消息转成时间线事件（跳过已发过的 id/指纹）。"""
+    key = _msg_fingerprint(msg)
+    if key in seen:
+        return
+    seen.add(key)
+
+    cls = msg.__class__.__name__ if not isinstance(msg, dict) else msg.get("type", "")
+    role = getattr(msg, "type", None) or (msg.get("role") if isinstance(msg, dict) else "") or cls
+
+    # ToolMessage
+    if "Tool" in cls or role in ("tool", "ToolMessage"):
+        name = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else "") or "tool"
+        body = _message_text(
+            getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+        )
+        tcid = getattr(msg, "tool_call_id", None)
+        if not tcid and isinstance(msg, dict):
+            tcid = msg.get("tool_call_id")
+        status = "success"
+        if isinstance(msg, dict):
+            status = str(msg.get("status") or "success").lower()
+        else:
+            status = str(getattr(msg, "status", "success") or "success").lower()
+        emit(
+            "tool",
+            format_tool_callback_for_timeline(str(name), body),
+            {
+                "tool": name,
+                "phase": "callback",
+                "tool_call_id": str(tcid or ""),
+                "status": status,
+            },
+        )
+        return
+
+    # AIMessage / assistant
+    if "AI" in cls or role in ("ai", "assistant", "AIMessage"):
+        if cache_tracker is not None:
+            try:
+                cache_tracker.observe_message(msg)
+            except Exception:
+                logger.exception("cache hit 观测失败")
+        tcs = _tool_calls_of(msg)
+        text = _message_text(
+            getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+        )
+        reasoning = _reasoning_text(msg)
+        if reasoning:
+            emit("agent", reasoning, {"phase": "reasoning"})
+        # AI 正文总是发射：有工具调用时作为「旁白/指挥」先于 call 展示，
+        # 无工具调用时作为「AI 回答」→ 顺序: reasoning → 旁白 → call1..N → callback1..N
+        if text:
+            emit("agent", text, {"phase": "narration" if tcs else "answer"})
+        for tc in tcs:
+            name, args = _tool_call_parts(tc)
+            emit(
+                "tool",
+                format_tool_call_for_timeline(name, args),
+                {
+                    "phase": "call",
+                    "tool": name,
+                    "args": args,
+                    "tool_call_id": _tool_call_id(tc),
+                },
+            )
+        return
+
+    # Human / other — 一般不回显用户消息（UI 已有）
+    return
+
+
+def _collect_messages_from_update(update: Any) -> list:
+    msgs: list = []
+    if isinstance(update, dict):
+        if "messages" in update:
+            raw = update["messages"]
+            if isinstance(raw, list):
+                msgs.extend(raw)
+            else:
+                msgs.append(raw)
+        else:
+            # node_name -> payload
+            for v in update.values():
+                if isinstance(v, dict) and "messages" in v:
+                    raw = v["messages"]
+                    if isinstance(raw, list):
+                        msgs.extend(raw)
+                    else:
+                        msgs.append(raw)
+                elif isinstance(v, list):
+                    msgs.extend(v)
+    return msgs
+
+
+def _iter_interrupt_values(agent, config: dict):
+    """遍历 checkpoint 中未处理的 interrupt 值。"""
+    try:
+        state = agent.get_state(config)
+    except Exception as e:
+        logger.warning("get_state 失败: %s", e)
+        return
+    tasks = getattr(state, "tasks", None) or ()
+    for task in tasks:
+        interrupts = getattr(task, "interrupts", None) or ()
+        for intr in interrupts:
+            yield getattr(intr, "value", intr)
+
+
+def _first_ask_user_payload(agent, config: dict) -> dict | None:
+    for value in _iter_interrupt_values(agent, config):
+        if is_ask_user_interrupt(value):
+            return normalize_ask_user_value(value)
+        # 兼容：仅含 questions 的载荷
+        if isinstance(value, dict) and value.get("questions") and not (
+            value.get("action_requests") or value.get("actions")
+        ):
+            return normalize_ask_user_value({**value, "type": "ask_user"})
+    return None
+
+
+def _pending_from_state(agent, config: dict) -> list[dict]:
+    """从 checkpoint state 解析待审批动作（跳过 ask_user 澄清中断）。"""
+    pending: list[dict] = []
+    for value in _iter_interrupt_values(agent, config):
+        if is_ask_user_interrupt(value):
+            continue
+        if isinstance(value, dict) and value.get("questions") and not (
+            value.get("action_requests") or value.get("actions")
+        ):
+            continue
+
+        action_requests = None
+        if isinstance(value, dict):
+            action_requests = value.get("action_requests") or value.get("actions")
+        else:
+            action_requests = getattr(value, "action_requests", None)
+
+        if not action_requests:
+            # 兜底：整包当作一条（非 ask_user）
+            pending.append(
+                {
+                    "name": "tool",
+                    "args": {},
+                    "description": redact_text(str(value)[:500]),
+                    "risk": "操作",
+                }
+            )
+            continue
+
+        for action in action_requests:
+            if isinstance(action, dict):
+                name = action.get("name") or action.get("tool") or "tool"
+                args = action.get("args") or action.get("arguments") or {}
+            else:
+                name = getattr(action, "name", None) or "tool"
+                args = getattr(action, "args", {}) or {}
+            pending.append(
+                {
+                    "name": str(name),
+                    "args": args if isinstance(args, dict) else {"raw": str(args)},
+                    "description": f"{name}({args})"[:400],
+                    "risk": risk_label_for_tool(str(name)),
+                }
+            )
+    for item in pending:
+        item["args"] = redact_obj(item.get("args") or {})
+        item["description"] = redact_text(str(item.get("description") or ""))
+    return pending
+
+
+def _has_pending(agent, config: dict) -> bool:
+    try:
+        state = agent.get_state(config)
+        return bool(getattr(state, "next", None))
+    except Exception:
+        return False
+
+
+class AgentRunner:
+    """同步运行（应在后台线程调用）。"""
+
+    def __init__(
+        self,
+        settings: WokBeeSettings | None = None,
+        provider_store: ProviderStore | None = None,
+    ):
+        self.settings = settings or WokBeeSettings()
+        self.provider_store = provider_store or ProviderStore()
+        self._cancel = threading.Event()
+        self._approval_event = threading.Event()
+        self._approval_decisions: list[dict] | None = None
+        self._ask_user_event = threading.Event()
+        self._ask_user_answers: dict | None = None
+        self._run_events: list[Any] = []
+        self._events_lock = threading.Lock()  # 守护 _run_events（流线程与主线程并发访问）
+        self._cache_tracker = CacheHitTracker()
+        self._prefix_guard: PrefixGuard | None = None
+        self._session_context_block: str = ""
+        self._context_injected: bool = False
+        # 本轮是否已由 Agent 用 update_project_experience 工具更新过经验（结束兜底据此跳过）
+        self._experience_updated_by_tool: bool = False
+        self._step_budget: _StepBudget | None = None
+        self._seen_tool_update_ids: set[str] = set()
+        self._phase_states: list[dict[str, Any]] = []
+        self.on_event: EventCallback | None = None
+        self.on_approval_needed: ApprovalCallback | None = None
+        self.on_ask_user_needed: Callable[[dict], None] | None = None
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+        try:
+            from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+            kill_all_cancellable_runs(cancel_event=self._cancel)
+        except Exception:
+            pass
+        # 若卡在审批/澄清，解开等待
+        self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
+        self.resolve_ask_user({"cancelled": True})
+
+    def _mark_experience_updated(self) -> None:
+        """工具成功写入经验后标记，结束兜底据此跳过自动总结。"""
+        self._experience_updated_by_tool = True
+
+    @staticmethod
+    def _graph_recursion_limit(max_steps: int) -> int:
+        """Deep Agents usually consume one graph tick for model and one for tools."""
+        return max(4, max(1, int(max_steps)) * 2 + 1)
+
+    def _configure_step_budget(self, req: RunRequest) -> None:
+        self._step_budget = _StepBudget(req.max_steps)
+        self._seen_tool_update_ids = set()
+        self._phase_states = []
+
+    def _graph_config(self, thread_id: str, req: RunRequest) -> dict:
+        # recursion_limit is the graph-level hard stop; _StepBudget is the
+        # user-facing logical limit that also counts tool updates.
+        return {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": self._graph_recursion_limit(req.max_steps),
+        }
+
+    def _consume_tool_updates(self, messages: list[Any]) -> None:
+        if self._step_budget is None:
+            return
+        new_count = 0
+        for msg in messages or []:
+            tool_calls = _tool_calls_of(msg)
+            if tool_calls:
+                for index, call in enumerate(tool_calls):
+                    key = _tool_call_id(call) or f"{_msg_fingerprint(msg)}:{index}"
+                    if key not in self._seen_tool_update_ids:
+                        self._seen_tool_update_ids.add(key)
+                        new_count += 1
+                continue
+            cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type") or "")
+            role = getattr(msg, "type", None) or (
+                msg.get("role") if isinstance(msg, dict) else ""
+            ) or cls
+            if "Tool" in cls or role in ("tool", "ToolMessage"):
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                if not tool_call_id and isinstance(msg, dict):
+                    tool_call_id = msg.get("tool_call_id")
+                key = str(tool_call_id or _msg_fingerprint(msg))
+                if key not in self._seen_tool_update_ids:
+                    self._seen_tool_update_ids.add(key)
+                    new_count += 1
+        if new_count:
+            self._step_budget.consume("tool_update", new_count)
+
+    def _record_phase_state(
+        self,
+        *,
+        phase_index: int,
+        phase_type: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        state = {
+            "step": phase_index + 1,
+            "type": phase_type,
+            "status": status,
+            "detail": detail[:500],
+        }
+        self._phase_states.append(state)
+        self._emit(
+            "info",
+            f"管线第 {phase_index + 1} 步已结束：{status}"
+            + (f"（{detail[:300]}）" if detail else ""),
+            {
+                "pipeline_step": phase_index,
+                "pipeline_type": phase_type,
+                "pipeline_status": status,
+                "phase_end": True,
+            },
+        )
+
+    def _cancelled_result(
+        self, req: RunRequest, allow_auto_lesson: bool
+    ) -> RunResult:
+        return RunResult(
+            ok=False,
+            outcome="cancelled",
+            error="已取消",
+        )
+
+    def _finalize_early_failure(
+        self, req: RunRequest, result: RunResult, agent: Any, config: dict
+    ) -> None:
+        """Do not skip experience repair when a pipeline AI turn exits early."""
+        if result.outcome not in ("failed", "incomplete"):
+            return
+        err = result.error or f"AI 阶段未完成（{result.outcome}）"
+        self._emit("error", f"AI 阶段未完成：{err}", {"outcome": result.outcome})
+        path = ""
+        try:
+            state = agent.get_state(config)
+            values = getattr(state, "values", None) or {}
+            messages = values.get("messages") if isinstance(values, dict) else None
+            if messages:
+                path = build_success_path_from_messages(list(messages))
+        except Exception:
+            pass
+        lesson = self._ensure_lesson_written(
+            req,
+            "partial" if result.outcome == "incomplete" else "failed",
+            "AI 阶段未完成",
+            err,
+            success_path=path,
+        )
+        if lesson and not result.lesson_id:
+            result.lesson_id = lesson.id
+
+    def resolve_approval(self, decisions: list[dict]) -> None:
+        self._approval_decisions = decisions
+        self._approval_event.set()
+
+    def resolve_ask_user(self, answers: dict) -> None:
+        self._ask_user_answers = answers if isinstance(answers, dict) else {"cancelled": True}
+        self._ask_user_event.set()
+
+    def _emit_stream_delta(self, target: str, delta: str) -> None:
+        """流式增量事件（agent_stream）：只驱动 UI 实时气泡，不落盘、不入本轮轨迹。
+
+        与 `_emit` 不同：`_emit` 会写 `_run_events`（供对话/经验总结），token 级
+        增量不能混进去，否则总结会读到半截文本；也不进 store，避免 events.jsonl 爆炸。
+        """
+        if not delta or not self.on_event:
+            return
+        try:
+            self.on_event("agent_stream", delta, {"target": target})
+        except Exception:
+            logger.exception("agent_stream 事件回调失败")
+
+    def _emit(self, kind: str, content: str, meta: dict | None = None) -> None:
+        meta = dict(meta or {})
+        content = redact_text(content or "")
+        if "args" in meta:
+            meta["args"] = redact_obj(meta["args"])
+        # 本轮内存轨迹：供首次自动总结固化脚本（避免等 UI 写盘竞态）
+        with self._events_lock:
+            self._run_events.append(
+                SimpleNamespace(kind=kind, content=content or "", meta=dict(meta))
+            )
+        if self.on_event:
+            try:
+                self.on_event(kind, content, meta)
+            except Exception:
+                logger.exception("on_event 回调失败")
+
+    def _snapshot_run_events(self) -> list:
+        """线程安全地取当前事件快照。"""
+        with self._events_lock:
+            return list(self._run_events)
+
+    def _wait_approval(self, pending: list[dict]) -> list[dict]:
+        self._approval_event.clear()
+        self._approval_decisions = None
+        if self.on_approval_needed:
+            self.on_approval_needed(pending)
+        # 总超时兜底（真实 deadline，避免窗口关闭/审批无响应时线程永久阻塞）；默认 1 小时
+        deadline = time.monotonic() + (
+            float(getattr(self, "_approval_wait_timeout", 3600.0) or 3600.0)
+        )
+        cancelled = False
+        while not self._approval_event.wait(timeout=0.5):
+            if self._cancel.is_set():
+                cancelled = True
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("审批等待超时，自动拒绝")
+                cancelled = True
+                break
+        if cancelled and self._cancel.is_set():
+            return [{"type": "reject", "message": "用户取消"} for _ in pending]
+        decisions = self._approval_decisions or [
+            {"type": "reject", "message": "无审批结果"} for _ in pending
+        ]
+        # 数量对齐
+        if len(decisions) < len(pending):
+            decisions = list(decisions) + [
+                {"type": "reject", "message": "未提供决策"}
+                for _ in range(len(pending) - len(decisions))
+            ]
+        return decisions[: len(pending) or 1]
+
+    def _wait_ask_user(self, payload: dict) -> dict:
+        self._ask_user_event.clear()
+        self._ask_user_answers = None
+        if self.on_ask_user_needed:
+            self.on_ask_user_needed(payload)
+        deadline = time.monotonic() + (
+            float(getattr(self, "_ask_user_wait_timeout", 3600.0) or 3600.0)
+        )
+        while not self._ask_user_event.wait(timeout=0.5):
+            if self._cancel.is_set():
+                return {"cancelled": True}
+            if time.monotonic() >= deadline:
+                logger.warning("等待澄清超时，按取消处理")
+                return {"cancelled": True}
+        return self._ask_user_answers or {"cancelled": True}
+
+    def build_agent(self, req: RunRequest, *, mode: str = "run"):
+        """构建完整能力 Agent。
+
+        mode=run：按经验管线推进项目目标。
+        mode=chat：同等完整能力（文件/联网/execute/MCP/Skills），但不跑经验管线；
+                   提问可与目标无关，并可改项目名称/目标。
+        mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验，
+                   不挂项目经验工具；保留 Skills 与当前会话能力。
+        """
+        # This flag is needed while constructing the backend below.  Keep it
+        # at the start of the method so chat/run modes cannot hit an
+        # uninitialized local before the later memory-policy section.
+        design_mode = mode == "design"
+        if mode != "design":
+            ensure_project_layout(req.project_root)
+            workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
+            _ensure_experience_files(req.project_root, req.project)
+        else:
+            # design 模式（DeziBee）：不用 WokBee 目录约定（不建 memory/workspace/
+            # deliverables 等管线目录），只要 demo/prd/uploads（demo/index.html 由 store 创建）。
+            req.project_root.mkdir(parents=True, exist_ok=True)
+            for sub in ("demo", "prd", "uploads"):
+                (req.project_root / sub).mkdir(parents=True, exist_ok=True)
+
+        # Windows：容忍 resolve() 偶发返回的 \\?\ 扩展路径，避免并发写文件时误判越界
+        from wokbee.engine.backend_paths import install_extended_path_tolerance
+
+        install_extended_path_tolerance()
+
+        model = build_chat_model(
+            req.resolved,
+            timeout=self.settings.model_timeout_seconds,
+        )
+        project_inner = ArchiveDeniedBackend(
+            root_dir=str(req.project_root),
+            virtual_mode=True,
+            # 单工具执行超时：execute 子进程在内会按此阈值被杀掉（从 180s 固定值改为可配置）
+            timeout=int(self.settings.tool_timeout_seconds),
+            inherit_env=True,
+        )
+        # 暂停按钮与工具超时共用：execute 轮询此 Event，可在命令执行中途杀进程树
+        project_inner.cancel_event = self._cancel
+        if design_mode:
+            from dezibee.core.preview import validate_workbench_document
+
+            prototype_path = (req.project_root / "demo" / "index.html").resolve()
+
+            def validate_design_write(path, content):
+                if path == prototype_path:
+                    try:
+                        validate_workbench_document(content)
+                    except ValueError as exc:
+                        detail = str(exc).replace("，拒绝覆盖原型", "").replace(
+                            "拒绝覆盖原型。", ""
+                        )
+                        return (
+                            "WORKBENCH_DATA 可能不完整："
+                            f"{detail}。文件已写入，请继续读取当前文件并补全后再校验。"
+                        )
+                return None
+
+            project_inner.write_validator = validate_design_write
+        project_backend = project_inner
+        interrupt_on = build_interrupt_on(req.approval)
+        # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
+        # 它们只读/写本项目名与目标，属低风险元数据操作，不在 build_interrupt_on 任何桶内，
+        # 因此 interrupt_on 不会包含它们，无须 pop。
+
+        # chat 与 run 共用项目 checkpointer，但 thread_id 不同，状态不串
+        checkpointer = _get_checkpointer(req.project.id)
+
+        skills_paths: list[str] = []
+        routes: dict = {}
+        skills_extra_lines: list[str] = []
+        try:
+            skills_store = SkillsStore()
+            skills_store.cleanup_project_copies(req.project_root)
+            skills_paths = skills_store.global_skills_paths()
+            enabled_skills = [s.name for s in skills_store.list_enabled()]
+            for prefix, skill_root in skills_store.skill_routes():
+                # 只读挂载：全局技能库不是本项目产物，只允许读/列/搜，禁止写/改/删
+                skills_inner = ReadOnlyBackend(
+                    FilesystemBackend(
+                        root_dir=str(skill_root),
+                        virtual_mode=True,
+                    )
+                )
+                routes[prefix] = skills_inner
+                skills_extra_lines.append(
+                    f"- Skills 目录（真实路径，execute 可用）：{skill_root}",
+                )
+                skills_extra_lines.append(
+                    f"- 虚拟路径：{prefix}<技能名>/SKILL.md（只读，仅 read/ls/glob/grep）",
+                )
+                self._emit(
+                    "info",
+                    f"已挂载 Skills 目录（不复制到项目）：{skill_root}",
+                )
+            if enabled_skills:
+                skills_extra_lines.append(
+                    f"- 已启用 Skills：{', '.join(enabled_skills)}"
+                )
+        except Exception as e:
+            logger.exception("加载 Skills 失败")
+            self._emit("error", f"Skills 加载失败：{e}")
+
+        # ---- 附加目录：预挂载全局白名单 + 供 request_access 动态挂载 ----
+        access_registry = ApprovedDirRegistry()
+        access_extra_lines: list[str] = []
+        for entry in self.settings.additional_directories:
+            prefix = mount_dir(
+                routes,
+                access_registry,
+                entry["path"],
+                name=entry.get("name") or "",
+                persist=False,
+                slug=entry.get("slug") or "",
+                project_root=req.project_root,
+            )
+            if prefix:
+                access_extra_lines.append(
+                    f"- 附加目录虚拟路径：{prefix}（真实路径 {entry['path']}；read/write/grep 等文件工具可用，"
+                    "请优先使用此虚拟路径；真实路径仅 execute 可用）"
+                )
+        if access_extra_lines:
+            self._emit(
+                "info", "已挂载附加目录：\n" + "\n".join(access_extra_lines)
+            )
+        if req.approval.bypass_sandbox:
+            self._emit(
+                "info",
+                "已开启「忽略沙箱限制」：本会话所有工具免人工审批，"
+                "execute 可操作任意真实路径（含项目外目录）。请审慎使用。",
+            )
+
+        # 始终用 CompositeBackend：即使初始无路由，request_access 也能往 routes 动态加 /ext/ 路由
+        composite_backend = CompositeBackend(default=project_backend, routes=routes)
+        backend = AccessCoerceBackend(
+            composite_backend,
+            project_root=req.project_root,
+            registry=access_registry,
+            allow_real_paths=bool(req.approval.bypass_sandbox),
+        )
+        attach_execute_watch(
+            backend,
+            cancel_event=self._cancel,
+            default_timeout=float(self.settings.tool_timeout_seconds),
+        )
+
+        mcp_tools: list = []
+        try:
+            mcp_store = McpStore()
+            if mcp_store.list_enabled():
+                self._emit("info", "正在连接 MCP 服务器…")
+                mcp_tools = mcp_store.load_tools()
+                names = [getattr(t, "name", str(t)) for t in mcp_tools]
+                if names:
+                    self._emit(
+                        "info",
+                        f"已加载 MCP 工具：{', '.join(names[:20])}"
+                        + (f" 等 {len(names)} 个" if len(names) > 20 else ""),
+                    )
+                    if not req.approval.skip_routine:
+                        for n in names:
+                            interrupt_on[str(n)] = True
+                else:
+                    self._emit("info", "MCP 已启用但未返回工具")
+        except Exception as e:
+            logger.exception("加载 MCP 失败")
+            self._emit("error", f"MCP 加载失败：{e}")
+
+        # 项目经验注入策略：
+        # - run/chat 模式自动注入项目经验；design 模式跳过经验管线。
+        # - 经验只来自当前项目的 memory/experiences/，不读取全局或对话记忆。
+        pipe_probe = peek_pipeline(req.project_root)
+        first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
+        lesson_store = None if design_mode else LessonStore(req.project_root)
+
+        experience_digest = "" if design_mode else lesson_store.prompt_digest()
+        if not design_mode and not lesson_store.is_empty():
+            latest = lesson_store.latest_path()
+            if first_run:
+                self._emit(
+                    "info",
+                    f"首次运行（执行管线为空），已注入最新项目经验："
+                    f"{latest.name if latest else 'experiences/'}"
+                    f"（历史经验不注入；禁止使用 archives/）",
+                )
+            else:
+                self._emit(
+                    "info",
+                    f"非首次运行（已有执行管线），仍自动注入项目经验："
+                    f"{latest.name if latest else 'experiences/'}"
+                    ".",
+                )
+
+        # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
+        system_prompt = static_system_prompt(mode=mode)
+        runtime_env_block = build_runtime_env_block(
+            project_root=str(req.project_root),
+            model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+            policy=req.approval.summary(),
+            settings=self.settings,
+            design_mode=(mode == "design"),
+        )
+        context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
+        if mode == "run":
+            context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
+        self._session_context_block = build_session_context_block(
+            title=req.project.title,
+            goal=req.project.goal or "",
+            approval_summary=req.approval.summary(),
+            max_steps=req.max_steps if mode != "chat" else None,
+            experience_digest=experience_digest,
+            mode=mode,
+            runtime_env_block=runtime_env_block,
+            extra_lines=context_extra or None,
+        )
+
+        project_tools = build_project_meta_tools(
+            project_id=req.project.id,
+            settings=self.settings,
+            emit=self._emit,
+        )
+        # DeepSeek 服务端搜索：包成工具给 Agent 用（开关在设置 enable_deepseek_search；
+        # 需官方 DeepSeek Key 才真正注册，主模型可是本地模型）。
+        deepseek_search = None
+        if getattr(self.settings, "enable_deepseek_search", True):
+            try:
+                from wokbee.engine.deepseek_search import build_deepseek_search_tool
+
+                has_ds_key = bool(
+                    getattr(
+                        self.provider_store.get_settings("deepseek"),
+                        "api_key",
+                        "",
+                    ).strip()
+                )
+                if has_ds_key:
+                    deepseek_search = build_deepseek_search_tool(self.provider_store)
+                    self._emit(
+                        "info",
+                        "已挂载 DeepSeek 服务端搜索工具：deepseek_web_search（检索质量更高，多轮+引用）。",
+                    )
+                else:
+                    self._emit(
+                        "info",
+                        "已开启 DeepSeek 服务端搜索，但未配置官方 DeepSeek 的 API Key；"
+                        "deepseek_web_search 暂不生效，去「厂商设置」填官方 Key 即可。",
+                    )
+            except Exception:
+                logger.exception("构建 DeepSeek 搜索工具失败")
+                deepseek_search = None
+
+        tools = sort_tools_by_name(
+            list(NETWORK_TOOLS)
+            + list(build_file_tools(backend=backend, emit=self._emit))
+            + list(project_tools)
+            + list(build_credential_tools())
+            + (
+                []
+                if design_mode
+                else list(build_experience_tools(
+                    project_id=req.project.id,
+                    project_root=req.project_root,
+                    goal=req.project.goal or req.user_message,
+                    model_label=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+                    policy=req.approval.summary(),
+                    emit=self._emit,
+                    on_written=self._mark_experience_updated,
+                    events_provider=self._snapshot_run_events,
+                ))
+            )
+            + [build_ask_user_tool()]
+            + [build_access_request_tool(
+                composite_backend, access_registry, self.settings,
+                emit=self._emit, project_root=req.project_root,
+            )]
+            + ([deepseek_search] if deepseek_search is not None else [])
+            + list(build_autobee_tools(
+                resolved=req.resolved,
+                provider_store=self.provider_store,
+                emit=self._emit,
+            ))
+            + list(mcp_tools)
+        )
+        tools = wrap_tools_truncate_results(
+            tools,
+            project_root=req.project_root,
+            tool_timeout=self.settings.tool_timeout_seconds,
+            max_parallel_tools=self.settings.max_parallel_tools,
+        )
+        tool_names = [tool_name_of(t) for t in tools]
+        fp = prefix_fingerprint(system_prompt, tool_names)
+
+        def _on_cache_update(payload: dict) -> None:
+            phase = payload.get("phase")
+            if phase == "pin":
+                self._emit(
+                    "info",
+                    f"缓存前缀已钉死（DeepSeek prefix-cache）：fp={payload.get('prefix_fp')}，"
+                    f"tools={payload.get('tool_count')}。"
+                    " system 本会话不变；项目态在用户消息【会话上下文】。",
+                    {"cache": True, **payload},
+                )
+                return
+            tag = self._cache_tracker.format_tag()
+            self._emit(
+                "cache",
+                tag,
+                {"cache": True, **payload},
+            )
+
+        self._cache_tracker = CacheHitTracker(on_update=_on_cache_update)
+        self._cache_tracker.note_prefix(fp, len(tool_names))
+
+        # Reasonix 前缀护栏：只对 append-only 破坏告警，正常追加不打扰。
+        def _on_prefix_drift(payload: dict) -> None:
+            drift = payload.get("drift")
+            if not isinstance(drift, dict):
+                # 非漂移载荷（如发现点信息）不进改写告警，避免误报。
+                return
+            self._emit(
+                "error",
+                "缓存前缀被改写（append-only 破坏，DeepSeek 前缀缓存将在该点失效）：\n"
+                f"位置 #{drift.get('index')} 类型 {drift.get('kind') or 'rewrite'} "
+                f"role={drift.get('role') or '?'}\n"
+                f"内容：{drift.get('content') or '（空）'}",
+                {"cache": True, **payload},
+            )
+
+        self._prefix_guard = PrefixGuard(on_drift=_on_prefix_drift)
+        self._prefix_guard.note_static(fp, len(tool_names))
+
+        # ask_user 在工具内 interrupt，绝不能再套一层 interrupt_on
+        interrupt_on.pop("ask_user", None)
+
+        agent_name = (
+            f"wokbee-chat-{req.project.id}"
+            if mode == "chat"
+            else f"wokbee-{req.project.id}"
+        )
+        agent = create_deep_agent(
+            model=model,
+            tools=tools,
+            system_prompt=system_prompt,
+            backend=backend,
+            # 覆盖 Deep Agents 的通用文件工具说明：项目使用虚拟路径，并提供无需临时脚本的
+            # 定位 → 小范围读取 → 按行/锚点编辑流程。与默认中间件同名，create_deep_agent 会原位替换。
+            middleware=[
+                FilesystemMiddleware(
+                    backend=backend,
+                    custom_tool_descriptions=FILESYSTEM_TOOL_DESCRIPTIONS,
+                )
+            ],
+            interrupt_on=interrupt_on or None,
+            # 经验只注入首条 user 的【会话上下文】，不使用外部 MemoryMiddleware，
+            # 避免每次请求重新加载经验进 system，保持前缀缓存稳定。
+            skills=skills_paths or None,
+            checkpointer=checkpointer,
+            name=agent_name,
+        )
+        if mode == "run":
+            with _LOCK:
+                _AGENTS[req.project.id] = agent
+        return agent
+
+    def _with_session_context(self, user_message: Any) -> Any:
+        context = (self._session_context_block or "").strip()
+        if isinstance(user_message, list):
+            if not context:
+                return user_message
+            return [{"type": "text", "text": context}, *user_message]
+        return compose_user_with_context(str(user_message or ""), context)
+
+    def _context_already_in_state(self, agent, config: dict) -> bool:
+        """读 graph 已持久化消息：历史首条 user 是否已注入【会话上下文】。
+
+        run()/run_chat() 每次都会新建 AgentRunner，本 runner 的 _context_injected
+        无法跨轮生效，因此落到 checkpointer 的持久化消息上判重：只要首条 user 的消息
+        以固定哨兵头开头，就说明本会话已注入过——即使换成新 runner 也成立。
+        这保证第 2+ 轮的 user 只含纯问题，命中段最小化。
+        """
+        try:
+            state = agent.get_state(config)
+        except Exception:
+            return False
+        values = getattr(state, "values", None) or {}
+        messages = values.get("messages") if isinstance(values, dict) else None
+        if not messages:
+            return False
+        for m in messages:
+            role = str(
+                getattr(m, "type", None)
+                or (m.get("role") if isinstance(m, dict) else "")
+                or ""
+            )
+            if role not in ("user", "human", "HumanMessage"):
+                continue
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            if _message_text(content).startswith(_CONTEXT_SENTINEL):
+                return True
+        return False
+
+    def _inject_session_context_once(
+        self, payload: Any, *, agent=None, config: dict | None = None
+    ) -> Any:
+        """仅首条用户消息注入【会话上下文】，保持后续轮次 append-only 前缀稳定。
+
+        去重依据二选一（满足即跳过）：
+        1. 本 runner 已注入过（同轮内多阶段/续跑去重）；
+        2. graph 持久化消息已含固定哨兵头（跨新 runner 去重）。
+        """
+        if self._context_injected or not isinstance(payload, dict):
+            return payload
+        msgs = payload.get("messages")
+        if not isinstance(msgs, list) or not msgs:
+            return payload
+        if agent is not None and config is not None and self._context_already_in_state(agent, config):
+            self._context_injected = True
+            return payload
+        out_msgs = []
+        injected = False
+        for m in msgs:
+            if (
+                not injected
+                and isinstance(m, dict)
+                and (m.get("role") or "") == "user"
+            ):
+                content = m.get("content") or ""
+                out_msgs.append(
+                    {**m, "content": self._with_session_context(content)}
+                )
+                injected = True
+            else:
+                out_msgs.append(m)
+        if injected:
+            self._context_injected = True
+            return {**payload, "messages": out_msgs}
+        return payload
+
+    def _stream_until_pause(self, agent, input_payload, config: dict, seen: set[str]) -> None:
+        """流式执行，边跑边把消息推到时间线；遇 interrupt 正常返回。
+
+        stream 本身会堵在工具调用里。放到旁路线程跑，本线程轮询暂停：点暂停后立刻
+        杀 execute 进程树；若 stream 仍不退出则放弃等待，避免 UI 永远「运行中」。
+        """
+        if self._cancel.is_set():
+            return
+        if self._step_budget is not None:
+            self._step_budget.consume("agent_turn")
+
+        from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+        stream_error: list[BaseException] = []
+
+        def _run_stream() -> None:
+            pending: dict[str, list[str]] = {"reasoning": [], "text": []}
+            last_flush = 0.0
+            FLUSH_INTERVAL = 0.08
+
+            def _flush(force: bool = False) -> None:
+                nonlocal last_flush
+                now = time.monotonic()
+                if not force and now - last_flush < FLUSH_INTERVAL:
+                    return
+                for _target in ("reasoning", "text"):
+                    parts = pending[_target]
+                    if not parts:
+                        continue
+                    delta = "".join(parts)
+                    parts.clear()
+                    if delta:
+                        self._emit_stream_delta(_target, delta)
+                last_flush = now
+
+            try:
+                for chunk in agent.stream(
+                    input_payload,
+                    config=config,
+                    stream_mode=["messages", "updates"],
+                ):
+                    if self._cancel.is_set():
+                        break
+                    mode, payload = chunk
+                    if mode == "messages":
+                        msg_chunk, _meta = payload
+                        if _is_ai_message(msg_chunk):
+                            r_delta, t_delta = _stream_delta_parts(msg_chunk)
+                            if r_delta:
+                                pending["reasoning"].append(r_delta)
+                            if t_delta:
+                                pending["text"].append(t_delta)
+                            _flush()
+                    else:
+                        _flush(force=True)
+                        messages = _collect_messages_from_update(payload)
+                        self._consume_tool_updates(messages)
+                        for msg in messages:
+                            _emit_message_events(
+                                self._emit,
+                                msg,
+                                seen,
+                                cache_tracker=self._cache_tracker,
+                            )
+                _flush(force=True)
+            except GraphInterrupt:
+                pass
+            except StepLimitExceeded as e:
+                stream_error.append(e)
+            except GraphRecursionError:
+                if self._step_budget is not None:
+                    stream_error.append(
+                        StepLimitExceeded(
+                            self._step_budget.limit,
+                            self._step_budget.used,
+                            "graph_recursion",
+                        )
+                    )
+                else:
+                    stream_error.append(
+                        RuntimeError("Deep Agents graph recursion limit reached")
+                    )
+            except Exception as e:  # noqa: BLE001
+                stream_error.append(e)
+
+        t = threading.Thread(target=_run_stream, name="wokbee-agent-stream", daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(0.25)
+            if not self._cancel.is_set():
+                continue
+            kill_all_cancellable_runs(cancel_event=self._cancel)
+            t.join(8)
+            if t.is_alive():
+                logger.warning("暂停后 stream 未退出，放弃等待并结束本轮")
+                self._emit("info", "已暂停：正在退出执行管线（已终止本机命令）。")
+            break
+        if stream_error and not self._cancel.is_set():
+            raise stream_error[0]
+        self._check_prefix_guard(agent, config)
+
+    def _check_prefix_guard(self, agent, config: dict) -> None:
+        """轮次结束后校验消息历史 append-only；发现改写则归因到具体消息。"""
+        if self._prefix_guard is None:
+            return
+        try:
+            state = agent.get_state(config)
+            values = getattr(state, "values", None) or {}
+            messages = values.get("messages") if isinstance(values, dict) else None
+            if not messages:
+                return
+            self._prefix_guard.check(messages)
+        except Exception:
+            logger.exception("前缀护栏检查失败")
+
+    def _emit_script_items(self, items: list) -> None:
+        for item in items:
+            if item.ok:
+                preview = (item.output or "")[:600]
+                self._emit(
+                    "tool",
+                    f"callback: 本地脚本 `{item.path}` 成功：\n{preview}",
+                    {"script": item.path, "step_id": item.step_id},
+                )
+            else:
+                self._emit(
+                    "error",
+                    f"本地脚本 `{item.path}` 失败：{item.error or (item.output or '')[:400]}",
+                    {"script": item.path, "step_id": item.step_id},
+                )
+
+    def _drain_pending_interrupts(
+        self,
+        agent,
+        config: dict,
+        seen_msg_ids: set[str],
+        req: RunRequest,
+        *,
+        allow_auto_lesson: bool,
+    ) -> RunResult | None:
+        """处理 ask_user / 工具审批中断，直到无 pending 或需外部等待。"""
+        guard = 0
+        while _has_pending(agent, config) and guard < 50:
+            guard += 1
+            if self._cancel.is_set():
+                return RunResult(
+                    ok=False,
+                    outcome="cancelled",
+                    error="已取消",
+                )
+
+            ask_payload = _first_ask_user_payload(agent, config)
+            if ask_payload:
+                n = len(ask_payload.get("questions") or [])
+                self._emit(
+                    "info",
+                    f"AI 需要你澄清意图（{n} 题），请在弹窗中作答…",
+                    {"ask_user": ask_payload},
+                )
+                answers = self._wait_ask_user(ask_payload)
+                if self._cancel.is_set():
+                    return RunResult(
+                        ok=False,
+                        outcome="cancelled",
+                        error="已取消",
+                    )
+                if answers.get("cancelled"):
+                    self._emit("info", "你取消了澄清提问。")
+                else:
+                    self._emit("info", "已收到你的澄清回答，继续执行…")
+                self._stream_until_pause(
+                    agent,
+                    Command(resume=answers),
+                    config,
+                    seen_msg_ids,
+                )
+                continue
+
+            pending = _pending_from_state(agent, config)
+            if not pending:
+                break
+
+            lines = []
+            for i, act in enumerate(pending, 1):
+                lines.append(
+                    f"{i}. [{act.get('risk')}] {act.get('name')}: {act.get('description')}"
+                )
+            self._emit(
+                "approval",
+                "需要审批以下操作：\n" + "\n".join(lines),
+                {"pending": pending},
+            )
+
+            decisions = self._wait_approval(pending)
+            if self._cancel.is_set():
+                return RunResult(
+                    ok=False,
+                    outcome="cancelled",
+                    error="已取消",
+                )
+
+            approved = sum(1 for d in decisions if d.get("type") == "approve")
+            rejected = len(decisions) - approved
+            self._emit(
+                "approval",
+                f"审批结果：通过 {approved}，拒绝 {rejected}",
+                {"decisions": decisions},
+            )
+
+            self._stream_until_pause(
+                agent,
+                Command(resume={"decisions": decisions}),
+                config,
+                seen_msg_ids,
+            )
+        return None
+
+    def _run_agent_turn(
+        self,
+        agent,
+        config: dict,
+        seen_msg_ids: set[str],
+        req: RunRequest,
+        *,
+        payload: Any,
+        first: bool,
+        allow_auto_lesson: bool = True,
+        start_hint: str = "",
+    ) -> RunResult | None:
+        """跑一轮流式 + 审批。返回 None 表示可继续；返回 RunResult 表示应立刻结束。"""
+        if first:
+            self._emit(
+                "agent",
+                start_hint or "开始本阶段 AI 执行（过程将实时显示）…",
+                {"phase": "hint"},
+            )
+            self._stream_until_pause(
+                agent,
+                self._inject_session_context_once(payload, agent=agent, config=config),
+                config,
+                seen_msg_ids,
+            )
+        else:
+            self._emit("agent", "继续下一阶段 AI 执行…", {"phase": "hint"})
+            self._stream_until_pause(
+                agent,
+                self._inject_session_context_once(payload, agent=agent, config=config),
+                config,
+                seen_msg_ids,
+            )
+
+        # 暂停后立刻结束本轮，不再进入审批等待
+        if self._cancel.is_set():
+            return self._cancelled_result(req, allow_auto_lesson)
+
+        early = self._drain_pending_interrupts(
+            agent,
+            config,
+            seen_msg_ids,
+            req,
+            allow_auto_lesson=allow_auto_lesson,
+        )
+        if early is not None:
+            return early
+
+        if self._cancel.is_set():
+            return self._cancelled_result(req, allow_auto_lesson)
+
+        if _has_pending(agent, config):
+            pending = _pending_from_state(agent, config)
+            return RunResult(
+                ok=False,
+                outcome="awaiting_approval",
+                pending_actions=pending,
+            )
+        return None
+
+    def run_chat(self, req: RunRequest) -> RunResult:
+        """非运行期对话：回答提问（可与目标无关），可读写项目名称/目标；不跑经验管线。"""
+        with self._events_lock:
+            self._run_events = []
+        self._context_injected = False
+        thread_id = f"wokbee-chat-{req.project.id}"
+        chat_thread_id = str(getattr(req, "chat_thread_id", "") or "").strip()
+        if chat_thread_id:
+            thread_id += f"-{chat_thread_id}"
+        self._configure_step_budget(req)
+        config = self._graph_config(thread_id, req)
+        seen_msg_ids: set[str] = set()
+
+        question = (req.user_message or "").strip()
+        if not question and not req.attachments:
+            return RunResult(ok=False, outcome="failed", error="提问内容为空")
+
+        # DeziBee 设计模式经 run_chat 执行：按 runner_mode 选 build_agent 形态。
+        # 否则会按交互模式误建 WokBee 目录（memory/workspace/deliverables 等）。
+        chat_mode = (
+            "design"
+            if (getattr(req, "runner_mode", "") or "") == "design"
+            else "chat"
+        )
+        try:
+            agent = self.build_agent(req, mode=chat_mode)
+        except Exception as e:
+            logger.exception("创建交互 Agent 失败")
+            return RunResult(ok=False, outcome="failed", error=str(e))
+
+        self._emit(
+            "agent",
+            (
+                "设计模式（DeziBee：不跑经验管线，不注入项目经验）。"
+                if chat_mode == "design"
+                else "交互模式（完整能力，不跑经验管线）。"
+            )
+            + f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
+            + (
+                "可用：联网 / 文件 / execute / Skills / MCP。"
+                if chat_mode == "design"
+                else "可用：联网 / 文件 / execute / Skills / MCP / 项目名称与目标工具。"
+            ),
+            {"phase": "hint"},
+        )
+
+        # 附带近期对话，便于「总结对话后改目标/名称」
+        recent = self._recent_events_digest(req.project_root, limit=40)
+        sent_note = f"（发送时间：{_now()}）"
+        user_content = f"{question}\n\n{sent_note}"
+        if recent:
+            user_content = (
+                f"{question}\n\n{sent_note}\n\n"
+                "——\n【近期时间线摘录（供参考，回答不必复述全文）】\n"
+                f"{recent}"
+            )
+        user_content = _attachment_content(user_content, req.attachments)
+
+        try:
+            early = self._run_agent_turn(
+                agent,
+                config,
+                seen_msg_ids,
+                req,
+                payload={"messages": [{"role": "user", "content": user_content}]},
+                first=True,
+                allow_auto_lesson=False,
+                start_hint="Agent 处理中…",
+            )
+            if early:
+                # 对话模式：取消/失败原样返回；审批等待也返回
+                return early
+            if self._cancel.is_set():
+                return self._cancelled_result(req, False)
+
+            final_text = ""
+            try:
+                state = agent.get_state(config)
+                values = getattr(state, "values", None) or {}
+                messages = values.get("messages") if isinstance(values, dict) else None
+                if messages:
+                    # 只取最终文本；流式阶段已写入时间线，禁止把 checkpoint 全量历史再刷一遍
+                    final_text = _extract_text(list(messages))
+            except Exception:
+                pass
+
+            self._emit("info", "本轮回复已完成")
+            return RunResult(ok=True, outcome="success", final_text=final_text)
+        except StepLimitExceeded as e:
+            err = str(e)
+            self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+            return RunResult(ok=False, outcome="incomplete", error=err)
+        except Exception as e:
+            logger.exception("交互失败")
+            err = _format_engine_error(e)
+            self._emit("error", f"交互失败：{err}")
+            return RunResult(ok=False, outcome="failed", error=err)
+        finally:
+            # 对话结束标记：经验总结时据此只取最新一轮日志
+            try:
+                self._emit("info", "— 本轮对话结束 —", {"session_end": True})
+            except Exception:
+                pass
+
+    @staticmethod
+    def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:
+        try:
+            from wokbee.core.context_usage import (
+                events_as_messages,
+                load_context_state,
+            )
+            from wokbee.core.models import ProjectEvent
+            from wokbee.core.paths import events_path
+            from tokbee.core import context_manager as ctxman
+
+            ep = events_path(project_root)
+            if not ep.exists():
+                return ""
+            events: list = []
+            with ep.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(ProjectEvent.from_dict(json.loads(line)))
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        continue
+            # 只取最新一轮，避免旧轮日志灌进上下文
+            events = slice_latest_round(events)
+            messages = events_as_messages(events)
+            state = load_context_state(project_root)
+            summary, active, _ = ctxman.slice_after_compaction(
+                messages, state.get("compaction_points") or [],
+            )
+            rows: list[str] = []
+            if summary:
+                body = summary.strip().replace("\n", " ")
+                if len(body) > 400:
+                    body = body[:400] + "…"
+                rows.append(f"- [summary] {body}")
+            for msg in active:
+                kind = msg.get("kind") or msg.get("role") or "?"
+                body = (msg.get("content") or "").strip().replace("\n", " ")
+                if not body:
+                    continue
+                if len(body) > 220:
+                    body = body[:220] + "…"
+                rows.append(f"- [{kind}] {body}")
+            if not rows:
+                return ""
+            return "\n".join(rows[-limit:])
+        except Exception:
+            logger.exception("读取近期时间线失败")
+            return ""
+
+    def run(self, req: RunRequest, *, resume: bool = False) -> RunResult:
+        with self._events_lock:
+            self._run_events = []
+        self._context_injected = False
+        self._experience_updated_by_tool = False
+        thread_id = f"wokbee-{req.project.id}"
+        self._configure_step_budget(req)
+        config = self._graph_config(thread_id, req)
+        seen_msg_ids: set[str] = set()
+
+        base_message = (
+            req.user_message.strip()
+            or req.project.goal
+            or "请根据项目目标推进工作。"
+        )
+        base_content = _attachment_content(base_message, req.attachments)
+
+        try:
+            # 非 resume 必须清空 checkpoint，否则会继承上次空 AIMessage / 半截计划而秒退
+            if not resume:
+                _reset_run_state(req.project.id)
+            agent = self.build_agent(req, mode=req.runner_mode or "run")
+        except Exception as e:
+            logger.exception("创建 Agent 失败")
+            return RunResult(ok=False, outcome="failed", error=str(e))
+
+        self._emit(
+            "agent",
+            f"引擎已启动（Deep Agents + 联网工具）。"
+            f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
+            f"策略：{req.approval.summary()}；Agent 工作目录：{req.project_root}\n"
+            "可用：web_search / http_get / http_request / 文件工具 / execute\n"
+            "执行策略：已有 pipeline.json 时按 steps 顺序一路执行——"
+            "script 步骤自动执行（不耗 Token）；ai 步骤执行已确定的业务任务（按需调 LLM，"
+            "不重新规划）；仅当脚本报错 / 数据异常 / 输出不符预期时才异常接管。",
+            {"phase": "hint"},
+        )
+
+        final_text = ""
+        trajectory_messages: list = []
+        current_phase_index: int | None = None
+        current_phase_type = ""
+
+        # ── design 模式（DeziBee）：单轮对话式执行，无 pipeline / 经验兜底 ──
+        # DeziBee 需求没有 pipeline.json（不走 ensure memory/experience），
+        # 管线循环对它没有意义；直接一轮 agent turn，结束不写经验。
+        if getattr(req, "runner_mode", "") == "design":
+            try:
+                early = self._run_agent_turn(
+                    agent,
+                    config,
+                    seen_msg_ids,
+                    req,
+                    payload={"messages": [{"role": "user", "content": base_content}]},
+                    first=True,
+                    allow_auto_lesson=False,
+                    start_hint="Agent 处理中…",
+                )
+                if early:
+                    return early
+                try:
+                    state = agent.get_state(config)
+                    values = getattr(state, "values", None) or {}
+                    messages = values.get("messages") if isinstance(values, dict) else None
+                    if messages:
+                        final_text = _extract_text(list(messages))
+                except Exception:
+                    pass
+                self._emit("info", "本轮设计已完成")
+                return RunResult(ok=True, outcome="success", final_text=final_text)
+            except StepLimitExceeded as e:
+                err = str(e)
+                self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+                return RunResult(ok=False, outcome="incomplete", error=err)
+            except Exception as e:
+                logger.exception("DeziBee 设计执行失败")
+                err = _format_engine_error(e)
+                self._emit("error", f"执行失败：{err}")
+                return RunResult(ok=False, outcome="failed", error=err)
+            finally:
+                try:
+                    self._emit("info", "— 本轮设计结束 —", {"session_end": True})
+                except Exception:
+                    pass
+
+        try:
+            if resume:
+                early = self._run_agent_turn(
+                    agent,
+                    config,
+                    seen_msg_ids,
+                    req,
+                    payload={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "请继续未完成的流程（审批后或中断后续）。",
+                            }
+                        ]
+                    },
+                    first=True,
+                )
+                if early:
+                    self._finalize_early_failure(req, early, agent, config)
+                    return early
+            else:
+                # ── 有序管线：按 pipeline.json steps 顺序逐步推进 ──
+                phase_idx = 0
+                context_parts: list[str] = []
+                ai_turn = 0
+                max_phases = max(1, int(getattr(self.settings, "max_pipeline_phases", 64) or 64))
+
+                self._emit(
+                    "info",
+                    "按 scripts/pipeline.json 的 steps 顺序推进"
+                    "（script 自动执行不耗 Token；ai 步骤执行固定业务任务；"
+                    f"步骤上限 {max_phases}）…",
+                )
+
+                for _ in range(max_phases):
+                    if self._cancel.is_set():
+                        return self._cancelled_result(req, True)
+                    pipe = run_pipeline_until_ai_or_end(
+                        req.project_root,
+                        start_phase=phase_idx,
+                        prior_context=context_parts,
+                        cancel_event=self._cancel,
+                    )
+
+                    if not pipe.ran or not pipe.phases:
+                        self._emit("info", f"未使用有序管线：{pipe.reason}")
+                        early = self._run_agent_turn(
+                            agent,
+                            config,
+                            seen_msg_ids,
+                            req,
+                            payload={
+                                "messages": [
+                                    {"role": "user", "content": base_content}
+                                ]
+                            },
+                            first=True,
+                        )
+                        if early:
+                            self._finalize_early_failure(req, early, agent, config)
+                            return early
+                        break
+
+                    if pipe.items:
+                        self._emit(
+                            "info",
+                            f"有序管线：{pipe.reason}",
+                            {
+                                "phase": pipe.next_phase_index,
+                                "need_ai": pipe.need_ai,
+                                "ok": pipe.ok,
+                            },
+                        )
+                        self._emit_script_items(pipe.items)
+
+                    failed_phase = next(
+                        (phase for phase in pipe.phase_results if not phase.ok),
+                        None,
+                    )
+                    for phase in pipe.phase_results:
+                        if phase.ok:
+                            self._record_phase_state(
+                                phase_index=phase.index,
+                                phase_type="script",
+                                status="success",
+                            )
+
+                    current_phase_index = (
+                        failed_phase.index
+                        if failed_phase is not None
+                        else pipe.next_phase_index if pipe.ai_steps else None
+                    )
+                    current_phase_type = (
+                        "script" if failed_phase is not None else "ai"
+                    ) if current_phase_index is not None else ""
+
+                    context_parts = list(pipe.context_parts or [])
+
+                    if pipe.ok and not pipe.need_ai:
+                        # 全部为 script 步骤且成功：0 Token 完成（无 ai 步骤的纯脚本管线）
+                        published: list[str] = []
+                        try:
+                            from wokbee.engine.script_factory import goal_wants_deliverables
+
+                            if goal_wants_deliverables(req.project.goal or base_message):
+                                published = publish_pipeline_outputs(req.project_root)
+                        except Exception:
+                            logger.exception("发布纯脚本管线产物失败")
+                        self._emit(
+                            "agent",
+                            "有序管线均为脚本且已成功，0 Token 完成。\n"
+                            + (
+                                "脚本原始产物已复制到 deliverables/："
+                                + ", ".join(published[:20])
+                                if published
+                                else "保留脚本原始输出格式，未强制转换为 Markdown。"
+                            ),
+                        )
+                        self._emit("info", "运行结束：成功（纯脚本有序管线，未调用 LLM）")
+                        return RunResult(
+                            ok=True,
+                            outcome="success",
+                            final_text=(pipe.combined_output or "")[:2000],
+                            lesson_id="",
+                        )
+
+                    user_message = build_user_message_for_ai_phase(
+                        original_message=base_message,
+                        pipeline=pipe,
+                    )
+                    ai_turn += 1
+                    early = self._run_agent_turn(
+                        agent,
+                        config,
+                        seen_msg_ids,
+                        req,
+                        payload={
+                            "messages": [
+                                {"role": "user", "content": user_message}
+                            ]
+                        },
+                        first=True,
+                    )
+                    if early:
+                        if failed_phase is not None:
+                            self._record_phase_state(
+                                phase_index=failed_phase.index,
+                                phase_type="script",
+                                status="失败-AI接管后失败",
+                                detail=failed_phase.error,
+                            )
+                        else:
+                            self._record_phase_state(
+                                phase_index=pipe.next_phase_index,
+                                phase_type="ai",
+                                status="失败-AI接管后失败",
+                                detail=early.error or early.outcome,
+                            )
+                        self._finalize_early_failure(req, early, agent, config)
+                        return early
+
+                    if failed_phase is not None:
+                        self._record_phase_state(
+                            phase_index=failed_phase.index,
+                            phase_type="script",
+                            status="失败-AI接管后成功",
+                            detail="AI 已完成当前异常接管",
+                        )
+                    else:
+                        self._record_phase_state(
+                            phase_index=pipe.next_phase_index,
+                            phase_type="ai",
+                            status="success",
+                        )
+                    current_phase_index = None
+                    current_phase_type = ""
+
+                    segment_text = ""
+                    try:
+                        state = agent.get_state(config)
+                        values = getattr(state, "values", None) or {}
+                        messages = (
+                            values.get("messages") if isinstance(values, dict) else None
+                        )
+                        if messages:
+                            trajectory_messages = list(messages)
+                            # 流式已写时间线；此处只取文本，避免把历史 messages 重复落盘
+                            segment_text = _extract_text(trajectory_messages)
+                            final_text = segment_text
+                    except Exception:
+                        pass
+
+                    if segment_text:
+                        context_parts.append(
+                            f"## 阶段 {pipe.next_phase_index + 1}（AI）产出\n"
+                            f"{segment_text[:4000]}"
+                        )
+
+                    phase_idx = pipe.next_phase_index + 1
+                    if phase_idx >= len(pipe.phases):
+                        break
+                else:
+                    self._emit("info", "有序管线阶段次数达到上限，结束循环")
+
+            # 收尾：再取一次最终文本（不重复刷时间线）
+            try:
+                state = agent.get_state(config)
+                values = getattr(state, "values", None) or {}
+                messages = values.get("messages") if isinstance(values, dict) else None
+                if messages:
+                    trajectory_messages = list(messages)
+                    final_text = _extract_text(trajectory_messages) or final_text
+            except Exception:
+                pass
+
+            if self._cancel.is_set():
+                return self._cancelled_result(req, True)
+
+            success_path = build_success_path_from_messages(trajectory_messages)
+            lesson = self._ensure_lesson_written(
+                req,
+                "success",
+                final_text[:800] or "任务执行完成",
+                "",
+                success_path=success_path,
+            )
+            self._emit("info", "运行结束：成功")
+            return RunResult(
+                ok=True,
+                outcome="success",
+                final_text=final_text,
+                lesson_id=lesson.id if lesson else "",
+            )
+
+        except StepLimitExceeded as e:
+            logger.warning("Agent 达到 max_steps 硬上限：%s", e)
+            err = str(e)
+            self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
+            if current_phase_index is not None:
+                self._record_phase_state(
+                    phase_index=current_phase_index,
+                    phase_type=current_phase_type or "ai",
+                    status="失败-AI接管后失败",
+                    detail=err,
+                )
+            fail_path = ""
+            try:
+                state = agent.get_state(config)
+                values = getattr(state, "values", None) or {}
+                messages = values.get("messages") if isinstance(values, dict) else None
+                if messages:
+                    fail_path = build_success_path_from_messages(list(messages))
+            except Exception:
+                pass
+            lesson = self._ensure_lesson_written(
+                req,
+                "partial",
+                "执行未完成：已达到 max_steps 硬上限",
+                err,
+                success_path=fail_path,
+            )
+            return RunResult(
+                ok=False,
+                outcome="incomplete",
+                error=err,
+                lesson_id=lesson.id if lesson else "",
+            )
+        except Exception as e:
+            logger.exception("Agent 运行失败")
+            err = _format_engine_error(e)
+            self._emit("error", f"执行失败：{err}")
+            if current_phase_index is not None:
+                self._record_phase_state(
+                    phase_index=current_phase_index,
+                    phase_type=current_phase_type or "ai",
+                    status="失败-AI接管后失败",
+                    detail=err,
+                )
+            fail_path = ""
+            try:
+                state = agent.get_state(config)
+                values = getattr(state, "values", None) or {}
+                messages = values.get("messages") if isinstance(values, dict) else None
+                if messages:
+                    fail_path = build_success_path_from_messages(list(messages))
+            except Exception:
+                pass
+            lesson = self._ensure_lesson_written(
+                req,
+                "failed",
+                str(e)[:500],
+                str(e),
+                success_path=fail_path,
+            )
+            return RunResult(
+                ok=False,
+                outcome="failed",
+                error=err,
+                lesson_id=lesson.id if lesson else "",
+            )
+        finally:
+            # 本轮运行/对话结束标记：经验总结时据此只取最新一轮日志
+            try:
+                self._emit("info", "— 本轮运行/对话结束 —", {"session_end": True})
+            except Exception:
+                pass
+
+    def _run_had_exception(self) -> bool:
+        """本轮是否出现脚本失败 / 工具报错 / 数据异常等。
+
+        只有出现异常（并由 AI 接管处理）的运行，才在结束前做「是否需要更新
+        Pipeline / 经验」的判断；稳定复跑的干净执行不做判断（省一次 LLM 调用）。
+        """
+        for ev in self._snapshot_run_events():
+            kind = (getattr(ev, "kind", "") or "").strip()
+            content = (getattr(ev, "content", None) or "").strip()
+            if kind == "error":
+                return True
+            if kind == "tool":
+                meta = getattr(ev, "meta", None) or {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                status = str(meta.get("status") or "").strip().lower()
+                if status and status not in ("ok", "success", "succeeded", "done"):
+                    return True
+                if "脚本执行失败" in content or content.startswith("脚本执行失败"):
+                    return True
+        return False
+
+    def _ensure_lesson_written(
+        self,
+        req: RunRequest,
+        outcome: str,
+        summary: str,
+        errors: str,
+        *,
+        success_path: str = "",
+        notes: str = "",
+        artifacts: str = "",
+    ) -> Lesson | None:
+        """经验写入兜底：主责是 Agent 运行中用 update_project_experience 工具自写。
+
+        仅两种情况由系统补写（走 AI 总结管线）：
+        1. 首次运行（经验库为空）且 Agent 未写过——保底固化管线；
+        2. 本轮出现异常——经验总结阶段必须复核每个阶段状态；即使 Agent 已经用工具
+           更新过，也要让总结 AI 判断并直接修正 pipeline/经验。
+        其余情况（非首次成功、Agent 已更新、取消）不写。
+        """
+        store = LessonStore(req.project_root)
+        first_run = store.is_empty()
+        if outcome == "cancelled":
+            if first_run:
+                self._emit("info", "已取消；尚无经验，未写入取消类经验。")
+            else:
+                self._emit("info", "已取消；未更新经验。")
+            return None
+        had_exception = self._run_had_exception()
+        if self._experience_updated_by_tool and not had_exception:
+            return None
+        if not first_run and not had_exception:
+            return None
+        if not first_run and had_exception:
+            self._emit(
+                "info",
+                "本轮出现异常；经验总结 AI 将复核每个阶段状态并直接修正经验"
+                "（含 pipeline/脚本）。",
+            )
+        return self._write_lesson(
+            req,
+            outcome,
+            summary,
+            errors,
+            success_path=success_path,
+            notes=notes,
+            artifacts=artifacts,
+            events=self._snapshot_run_events(),
+            use_ai=True,
+        )
+
+    def write_lesson_manual(
+        self,
+        req: RunRequest,
+        outcome: str,
+        summary: str,
+        errors: str = "",
+        *,
+        success_path: str = "",
+        notes: str = "",
+        artifacts: str = "",
+        events: list | None = None,
+    ) -> Lesson | None:
+        """人工发起经验总结：始终新建一份；优先用 AI（上一份经验+日志+脚本）。"""
+        return self._write_lesson(
+            req,
+            outcome,
+            summary,
+            errors,
+            success_path=success_path,
+            notes=notes,
+            artifacts="",
+            events=events,
+            use_ai=True,
+        )
+
+    def _write_lesson(
+        self,
+        req: RunRequest,
+        outcome: str,
+        summary: str,
+        errors: str,
+        *,
+        success_path: str = "",
+        notes: str = "",
+        artifacts: str = "",
+        events: list | None = None,
+        use_ai: bool = True,
+    ) -> Lesson | None:
+        try:
+            store = LessonStore(req.project_root)
+            # 固化用的「原始工具轨迹」：必须保留，不能被 AI 散文覆盖
+            trace_for_scripts = (success_path or "").strip()
+
+            # 事件优先：调用方传入 > 本轮内存缓冲 > 磁盘 events.jsonl
+            if events is None:
+                mem_events = self._snapshot_run_events()
+                events = mem_events if mem_events else None
+            if not events:
+                try:
+                    from wokbee.core.models import ProjectEvent
+                    from wokbee.core.paths import events_path
+
+                    ep = events_path(req.project_root)
+                    loaded: list = []
+                    if ep.exists():
+                        with ep.open("r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    loaded.append(ProjectEvent.from_dict(json.loads(line)))
+                                except (json.JSONDecodeError, TypeError, KeyError):
+                                    continue
+                    # 只取最新一轮（上一个「会话结束」标记之后），旧日志不上传占用 token
+                    events = slice_latest_round(loaded)[-400:] if loaded else []
+                except Exception:
+                    logger.exception("读取运行日志失败，AI 总结将缺少日志上下文")
+                    events = []
+            # 内存缓冲有工具调用时并入（补磁盘竞态缺口）
+            mem_events = self._snapshot_run_events()
+            if mem_events:
+                events = list(events or []) + [
+                    e
+                    for e in mem_events
+                    if getattr(e, "kind", "") == "tool"
+                    and (getattr(e, "meta", None) or {}).get("phase") == "call"
+                ]
+
+            previous_text = store.read_latest_text(max_chars=8000)
+            run_log = build_lesson_digest(events)
+            scripts_ctx = collect_scripts_context(req.project_root)
+            env = build_runtime_env_block(
+                project_root=str(req.project_root),
+                model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+                policy=req.approval.summary(),
+                settings=self.settings,
+            )
+
+            self._emit(
+                "info",
+                "准备经验总结上下文：\n"
+                f"- 上一份经验：{len(previous_text or '')} 字\n"
+                f"- 运行日志：{len(run_log or '')} 字"
+                f"（事件约 {len(events or [])} 条）\n"
+                f"- 脚本/pipeline：{len(scripts_ctx or '')} 字\n"
+                f"- 阶段状态：{len(self._phase_states)} 条",
+            )
+
+            ai_fields: dict[str, str] = {}
+            if use_ai:
+                try:
+                    # ResolvedModel 才调模型；占位 SimpleNamespace 跳过
+                    if getattr(req.resolved, "api_key", None) and getattr(
+                        req.resolved, "api_host", None
+                    ):
+                        model_label = (
+                            f"{req.resolved.provider_name}/{req.resolved.model_id}"
+                        )
+                        self._emit(
+                            "info",
+                            f"正在调用 AI 总结经验…\n"
+                            f"模型：{model_label}\n"
+                            f"输入：上一份经验 + 运行日志 + 脚本",
+                        )
+                        chat = build_chat_model(
+                            req.resolved,
+                            timeout=self.settings.model_timeout_seconds,
+                        )
+                        ai_fields = summarize_lesson_with_ai(
+                            model=chat,
+                            goal=req.project.goal or req.user_message,
+                            outcome=outcome,
+                            previous_experience=previous_text,
+                            run_log=run_log or summary,
+                            scripts_context=scripts_ctx,
+                            environment_hint=env,
+                            phase_states=json.dumps(
+                                self._phase_states,
+                                ensure_ascii=False,
+                            ),
+                        )
+                        # 结束后再展示完整结果（生成过程不刷进度气泡）
+                        preview_parts = []
+                        if ai_fields.get("summary"):
+                            preview_parts.append(
+                                f"**摘要**\n{ai_fields['summary'][:800]}"
+                            )
+                        if ai_fields.get("success_path"):
+                            preview_parts.append(
+                                f"**成功实现路径**\n{ai_fields['success_path'][:1200]}"
+                            )
+                        if ai_fields.get("notes"):
+                            preview_parts.append(
+                                f"**注意事项**\n{ai_fields['notes'][:600]}"
+                            )
+                        ai_scripts = ai_fields.get("script_files") or []
+                        if ai_scripts:
+                            names = [
+                                str(x.get("filename") or "?")
+                                for x in ai_scripts
+                                if isinstance(x, dict)
+                            ]
+                            preview_parts.append(
+                                f"**AI 手写脚本**\n" + "、".join(names[:12])
+                            )
+                        if preview_parts:
+                            self._emit(
+                                "agent",
+                                "【AI 经验总结结果】\n\n" + "\n\n".join(preview_parts),
+                                {"phase": "lesson"},
+                            )
+                        self._emit("info", "AI 经验总结完成，开始写入经验与脚本…")
+                    else:
+                        self._emit("info", "无可用模型密钥，改用规则回退总结经验")
+                except Exception as e:
+                    logger.exception("AI 总结经验失败，回退规则总结")
+                    self._emit("info", f"AI 总结失败，改用规则回退：{e}")
+
+            # 合并：AI 优先，否则用调用方/规则回退；绝不写入产物
+            summary_f = (ai_fields.get("summary") or summary or "").strip()
+            path_f = (ai_fields.get("success_path") or success_path or "").strip()
+            notes_f = (ai_fields.get("notes") or notes or "").strip()
+
+            if not path_f:
+                if outcome == "success":
+                    path_f = (
+                        "1. AI:\"{提示词: 明确目标与约束，制定执行方案}\";[AI 环节：理解任务并规划]\n"
+                        "2. 工具调用:\"{cmd: 联网获取或读取 uploads/ 获取真实数据}\";[获取真实数据，禁止用 archives/；同名或相近文件以最新修改时间为准]\n"
+                        "3. 工具调用:\"{cmd: 在 workspace/ 起草，最终写入 deliverables/}\";[在沙箱起草并交付]\n"
+                        "4. AI:\"{提示词: 用中文说明过程与数据来源}\";[AI 环节：交代过程与数据来源（经验中不记录结果正文）]"
+                    )
+                else:
+                    path_f = (
+                        "本次未形成完整成功路径。建议下次：\n"
+                        "- 先读最新 memory/experiences/exp_*.md\n"
+                        "- 优先复用已验证数据源、本地脚本与工具顺序\n"
+                        f"- 关注失败原因：{errors or summary_f}"
+                    )
+
+            if not notes_f:
+                notes_parts = []
+                if errors:
+                    notes_parts.append(
+                        f"- **本次运行报错**：复跑前先核对环境与脚本——{errors[:300]}；"
+                        "可固化步骤已写入 scripts/ 与 pipeline.json，脚本报错时 AI 介入补救。"
+                    )
+                notes_parts.append(
+                    "- **需要实时数据**：必须联网获取，禁止凭记忆编造；禁止访问 archives/ 归档数据。"
+                )
+                notes_parts.append(
+                    "- **脚本 callback 需留痕**：脚本执行后把 callback 写入 workspace/script_callback_*.md，"
+                    "AI 环节先读再写，禁止编造。"
+                )
+                notes_f = "\n".join(notes_parts)
+
+            if not summary_f:
+                summary_f = "本轮流程经验（方法向，不含结果/产物）。"
+
+            lesson = Lesson(
+                project_id=req.project.id,
+                goal=req.project.goal or req.user_message,
+                outcome=outcome,
+                summary=summary_f,
+                success_path=path_f,
+                notes=notes_f,
+                errors=errors,
+                model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+                policy=req.approval.summary(),
+            )
+
+            # 固化本地脚本：用原始工具轨迹 + 事件，勿只用 AI 改写后的散文路径
+            try:
+                solidify_path = "\n".join(
+                    x for x in (trace_for_scripts, path_f) if x
+                )
+                solid = solidify_scripts(
+                    req.project_root,
+                    lesson_id=lesson.id,
+                    goal=lesson.goal,
+                    summary=summary_f,
+                    success_path=solidify_path,
+                    events=events,
+                )
+                # 总结 AI 手写的 .bat/.json/.py 等一并写入 scripts/ 并并入 pipeline
+                ai_script_files = []
+                if isinstance(ai_fields, dict):
+                    raw_files = ai_fields.get("script_files")
+                    if isinstance(raw_files, list):
+                        ai_script_files = raw_files
+                ai_written = apply_ai_authored_scripts(
+                    req.project_root,
+                    lesson_id=lesson.id,
+                    project_id=req.project.id,
+                    script_files=ai_script_files,
+                )
+                # AI 手写脚本已按规范重命名：{原始名 → 新文件名}，供 pipeline 路径对上新文件
+                rename_map: dict[str, str] = {}
+                for _st in ai_written:
+                    _src = str((_st.args or {}).get("_src") or "").strip()
+                    if _src:
+                        rename_map[_src] = Path(_st.rel_path).name
+                ai_pipeline = []
+                if isinstance(ai_fields, dict):
+                    raw_pipe = ai_fields.get("pipeline_steps")
+                    if isinstance(raw_pipe, list):
+                        ai_pipeline = raw_pipe
+                applied_order = apply_ai_pipeline_steps(
+                    req.project_root,
+                    lesson_id=lesson.id,
+                    goal=lesson.goal,
+                    pipeline_steps=ai_pipeline,
+                    rename_map=rename_map or None,
+                )
+                # AI 未给出清单时用固化结果补全；有脚本时以固化章节为准（更准确）
+                # 执行顺序统一由 pipeline.json 的 steps 表达（只含脚本步骤）
+                lesson.scripts = [s.rel_path for s in solid.script_steps] + [
+                    s.rel_path for s in ai_written
+                ]
+                # 去重保序
+                seen_sp: set[str] = set()
+                uniq_scripts: list[str] = []
+                for p in lesson.scripts:
+                    if p not in seen_sp:
+                        seen_sp.add(p)
+                        uniq_scripts.append(p)
+                lesson.scripts = uniq_scripts
+                lesson.pipeline = solid.pipeline_rel
+                # pipeline 是执行事实来源：清理旧/幽灵引用后重新同步经验主线。
+                drop_missing_pipeline_scripts(req.project_root)
+                sync_lesson_from_pipeline(lesson, req.project_root)
+                total_scripts = len(lesson.scripts)
+                if total_scripts or applied_order:
+                    order_note = (
+                        "（已采用 AI 给出的 pipeline_steps：script+ai 混合）"
+                        if applied_order
+                        else "（自动固化真实执行顺序：确定性脚本步骤）"
+                    )
+                    self._emit(
+                        "info",
+                        f"已按成功路径写入有序步骤到 scripts/pipeline.json"
+                        f"（脚本 {total_scripts} 个{order_note}；"
+                        f"其中 AI 手写脚本 {len(ai_written)} 个）；"
+                        f"下次按 steps 一路执行（script 自动跑 0 Token；"
+                        f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
+                        f"scripts/ 不参与归档",
+                        {"scripts": lesson.scripts},
+                    )
+                elif not total_scripts:
+                    self._emit(
+                        "info",
+                        "本轮未识别到可固化脚本，且 AI 未手写 script_files；"
+                        "故 scripts/ 无新脚本。下次若有 execute/.py/.bat 或 AI 手写，"
+                        "总结时会写入。",
+                    )
+            except Exception:
+                logger.exception("固化脚本失败（经验仍会写入）")
+
+            # 保存本次用到的 Skills 快照与参考材料到 uploads/references/（归档不清理）
+            try:
+                from wokbee.core.references import (
+                    snapshot_used_skills,
+                    write_reference_manifest,
+                )
+
+                used_skills: list[str] = []
+                mats: list[dict] = []
+                if isinstance(ai_fields, dict):
+                    raw_skills = ai_fields.get("used_skills")
+                    if isinstance(raw_skills, list):
+                        used_skills = [str(s) for s in raw_skills if str(s).strip()]
+                    raw_mats = ai_fields.get("reference_materials")
+                    if isinstance(raw_mats, list):
+                        mats = [
+                            m
+                            for m in raw_mats
+                            if isinstance(m, dict)
+                            and (str(m.get("path") or "").strip() or str(m.get("note") or "").strip())
+                        ]
+                written = snapshot_used_skills(
+                    req.project_root,
+                    used_skills,
+                )
+                manifest_path = write_reference_manifest(
+                    req.project_root,
+                    used_skills=used_skills,
+                    materials=mats,
+                    goal=lesson.goal or "",
+                )
+                snap_msg = f"已保存 {len(written)} 个 Skill 快照到 uploads/references/skills/"
+                if manifest_path:
+                    try:
+                        mrel = manifest_path.relative_to(req.project_root).as_posix()
+                    except ValueError:
+                        mrel = str(manifest_path)
+                    snap_msg += f"，并登记 {mrel}"
+                if written or manifest_path:
+                    self._emit("info", snap_msg + "（uploads/references/ 不会被归档）")
+            except Exception:
+                logger.exception("保存参考材料失败（经验仍会写入）")
+
+            # 注意：总结时不清理、不删除任何已有脚本（scripts/ 全部保留）
+
+            path = store.save(lesson)
+            try:
+                rel = path.relative_to(req.project_root).as_posix()
+            except ValueError:
+                rel = str(path)
+            self._emit(
+                "lesson",
+                f"已新建经验：{rel}\n"
+                f"（多份并存，运行只加载最新；内容不含结果/产物）",
+                {"lesson_id": lesson.id, "path": str(path)},
+            )
+            return lesson
+        except Exception:
+            logger.exception("写入 lesson 失败")
+            return None
+
+
+def resolve_model_for_project(
+    project: Project,
+    settings: WokBeeSettings,
+    provider_store: ProviderStore | None = None,
+) -> ResolvedModel:
+    """解析项目模型：项目绑定 → 厂商默认模型 → WokBee 设置默认 → 列表第一个。"""
+    store = provider_store or ProviderStore()
+    # 1) 项目已绑定
+    provider = (project.provider or "").strip()
+    model_id = (project.model_id or "").strip()
+    if provider and model_id:
+        resolved = store.resolve(provider, model_id)
+        if resolved:
+            return resolved
+    # 2) 厂商设置里的「默认」徽章（用户认知上的默认模型）
+    default = store.resolve_default()
+    if default:
+        return default
+    # 3) WokBee 设置页可选覆盖
+    wp = (settings.default_provider or "").strip()
+    wm = (settings.default_model_id or "").strip()
+    if wp and wm:
+        resolved = store.resolve(wp, wm)
+        if resolved:
+            return resolved
+    first = store.first_resolved()
+    if not first:
+        raise ValueError("没有可用模型，请先在「AI配置 → 厂商设置」中启用模型并填写 Key/Host。")
+    return first

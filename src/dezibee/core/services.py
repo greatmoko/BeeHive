@@ -47,8 +47,10 @@ class DeziBeeWorker(QThread):
         *,
         project: Project | None = None,
         approval: ApprovalFlags | None = None,
-        max_steps: int = 40,
+        max_steps: int | None = None,
         attachments: list[dict] | None = None,
+        conversation_id: str = "",
+        settings: WokBeeSettings | None = None,
     ):
         super().__init__(parent)
         self._req = req
@@ -59,7 +61,9 @@ class DeziBeeWorker(QThread):
             {"skip_read": True, "skip_write": True, "skip_routine": True,
              "skip_high_risk": True, "bypass_sandbox": False}
         )
-        self._max_steps = max_steps
+        self._settings = settings or WokBeeSettings()
+        self._max_steps = self._settings.max_steps if max_steps is None else int(max_steps)
+        self._conversation_id = str(conversation_id or "")
         self._cancel_requested = False
         self._runner = None  # run() 中创建；cancel() 需要借此中断进行中的一轮
 
@@ -86,12 +90,12 @@ class DeziBeeWorker(QThread):
                 model_id=self._req.model_id,
                 approval=self._approval,
             )
-            resolved = resolve_model_for_project(project, WokBeeSettings())
+            resolved = resolve_model_for_project(project, self._settings)
             if resolved is None:
                 self.model_error.emit("未配置可用的 AI 模型，请先在「厂商设置」添加模型。")
                 return
 
-            runner = AgentRunner()
+            runner = AgentRunner(self._settings)
             self._runner = runner
             runner.on_event = self._on_event
             runner.on_approval_needed = self._on_approval
@@ -105,6 +109,7 @@ class DeziBeeWorker(QThread):
                 max_steps=self._max_steps,
                 attachments=self._attachments,
                 runner_mode="design",
+                chat_thread_id=self._conversation_id,
             )
             if self._cancel_requested:
                 from wokbee.engine.runner import RunResult
@@ -208,8 +213,13 @@ def build_design_prompt(req: Requirement) -> str:
         "3. links：卡片间交互关系（from/to/trigger/condition/note），画布自动画连线；\n"
         "4. prd.sections：PRD 长文档（章节 id 唯一，卡片.prdId ↔ 章节 id 双向定位联动；"
         "页面也可写 page.prdId，切换页面时右栏自动定位到该页章节）。"
-        "注意：用户可在「预览」页右栏点「✎ 编辑」直接手改 PRD（保存写回同一份 index.html），"
-        "因此改 PRD 前先 find_in_file 确认目标区域当前内容，不要重复读完整网页或用旧内容覆盖用户手改。\n"
+        "注意：用户可在「预览」页右栏点「✎ 编辑」直接手改 PRD（保存写回同一份 index.html）。"
+        "任何 PRD 修改前必须先读取当前最新的 prd/目标章节；允许为理解上下文全文读取 PRD，"
+        "但实际写入只改用户指定的章节或片段，不能用旧对话文本覆盖用户手改。"
+        "可对用户内容做二次编写，但仅限完善表达、结构和明显缺失说明；必须保留事实、数字、约束、业务规则、"
+        "验收条件、字段名、接口名和原始意图，不得擅自新增需求。修改后重新读取目标区域确认结果，"
+        "PRD-only 请求禁止使用 write_file/write_file_chunk 重写整个 demo/index.html。\n"
+        "整段连续行的小范围修改优先使用 edit_file_lines（1-based 行号）；edit_file 仍可用于精确文本替换。\n"
         "动手前先读 demo/GUIDE.md（数据模型 + 创作规范 + 自查清单）。\n"
         "【可部署要求】整个 demo/ 文件夹必须能直接复制部署到对象存储 OSS / GitHub Pages 等"
         "静态托管：纯静态、相对路径、无构建步骤、无本地绝对路径、无服务端依赖。"
