@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -10,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-TEST_TMP_ROOT = Path(__file__).resolve().parents[1]
+TEST_TMP_ROOT: Path
 
 from wokbee.engine.lessons import (
     Lesson,
@@ -41,6 +42,16 @@ from autobee.engine.executor import TaskExecutor
 
 
 class WokBeeExecutionControlTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        global TEST_TMP_ROOT
+        TEST_TMP_ROOT = Path(cls._tmp.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
     def test_agent_context_does_not_confuse_app_runtime_dir_with_workdir(self):
         runtime = RuntimeEnv(
             os_name="Windows",
@@ -149,6 +160,9 @@ class WokBeeExecutionControlTests(unittest.TestCase):
 
     def test_pipeline_resolves_renamed_script(self):
         root = TEST_TMP_ROOT
+        target = root / "scripts" / "make_release.ps1"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("Write-Output ok", encoding="utf-8")
         with patch("wokbee.engine.script_factory.ensure_project_layout"), \
              patch("wokbee.engine.script_factory.safe_write_text") as write:
             result = apply_ai_pipeline_steps(
