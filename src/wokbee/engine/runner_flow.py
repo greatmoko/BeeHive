@@ -21,57 +21,21 @@ from wokbee.engine.script_runner import (
     publish_pipeline_outputs,
     run_pipeline_until_ai_or_end,
 )
+from wokbee.engine.runner_support import (
+    _attachment_content,
+    _collect_messages_from_update,
+    _emit_message_events,
+    _extract_text,
+    _first_ask_user_payload,
+    _format_engine_error,
+    _has_pending,
+    _is_ai_message,
+    _pending_from_state,
+    _stream_delta_parts,
+    build_success_path_from_messages,
+)
 
 logger = logging.getLogger("wokbee")
-
-
-def _execution_helper(name):
-    from wokbee.engine import runner_execution
-    return getattr(runner_execution, name)
-
-
-def _attachment_content(*args, **kwargs):
-    return _execution_helper("_attachment_content")(*args, **kwargs)
-
-
-def _collect_messages_from_update(*args, **kwargs):
-    return _execution_helper("_collect_messages_from_update")(*args, **kwargs)
-
-
-def _emit_message_events(*args, **kwargs):
-    return _execution_helper("_emit_message_events")(*args, **kwargs)
-
-
-def _extract_text(*args, **kwargs):
-    return _execution_helper("_extract_text")(*args, **kwargs)
-
-
-def _first_ask_user_payload(*args, **kwargs):
-    return _execution_helper("_first_ask_user_payload")(*args, **kwargs)
-
-
-def _format_engine_error(*args, **kwargs):
-    return _execution_helper("_format_engine_error")(*args, **kwargs)
-
-
-def _has_pending(*args, **kwargs):
-    return _execution_helper("_has_pending")(*args, **kwargs)
-
-
-def _is_ai_message(*args, **kwargs):
-    return _execution_helper("_is_ai_message")(*args, **kwargs)
-
-
-def _pending_from_state(*args, **kwargs):
-    return _execution_helper("_pending_from_state")(*args, **kwargs)
-
-
-def _stream_delta_parts(*args, **kwargs):
-    return _execution_helper("_stream_delta_parts")(*args, **kwargs)
-
-
-def build_success_path_from_messages(*args, **kwargs):
-    return _execution_helper("build_success_path_from_messages")(*args, **kwargs)
 
 
 class RunnerFlowMixin:
