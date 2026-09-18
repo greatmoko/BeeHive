@@ -11,16 +11,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from wokbee.engine.archive_guard import ArchiveDeniedBackend
 from wokbee.engine.access_coerce import AccessCoerceBackend
 from wokbee.engine.file_tools import build_file_tools
+from wokbee.core.paths import PROJECT_SUBDIRS, ensure_project_layout
 from dezibee.core.preview import validate_workbench_document
 
 
 class FileSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
+        self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.backend = ArchiveDeniedBackend(root_dir=self.root, virtual_mode=True)
         self.tools = {t.name: t for t in build_file_tools(backend=AccessCoerceBackend(self.backend))}
+
+    def test_project_layout_rejects_application_source_root(self):
+        source_root = Path(__file__).resolve().parents[1]
+
+        with self.assertRaisesRegex(ValueError, "应用源码目录"):
+            ensure_project_layout(source_root)
+
+    def test_project_layout_creates_standard_directories(self):
+        root = self.root / "project"
+        ensure_project_layout(root)
+
+        self.assertTrue(all((root / name).is_dir() for name in PROJECT_SUBDIRS))
 
     def test_long_unicode_write_edit_find_read_delete(self):
         content = "中文🙂\n" * 20000 + "unique anchor\n"

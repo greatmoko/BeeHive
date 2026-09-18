@@ -5,6 +5,9 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+
+_APP_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+
 # 每个项目目录下的标准子目录
 # deliverables：项目交付物（归档时一并归档并清空）
 # uploads：用户上传文件 + 参考材料（uploads/references/，Agent 可读取；归档时保留，不随会话清空）
@@ -43,6 +46,12 @@ def project_dir(workspace_root: Path, project_id: str) -> Path:
 
 def ensure_project_layout(root: Path) -> None:
     """创建项目根目录及标准子目录。"""
+    root = Path(root).expanduser()
+    if root.resolve() == _APP_SOURCE_ROOT:
+        raise ValueError(
+            "不能在 BeeHive 应用源码目录创建 WokBee 项目。"
+            "请在 WokBee 设置中选择专用工作文件夹。"
+        )
     root.mkdir(parents=True, exist_ok=True)
     for name in PROJECT_SUBDIRS:
         (root / name).mkdir(parents=True, exist_ok=True)
