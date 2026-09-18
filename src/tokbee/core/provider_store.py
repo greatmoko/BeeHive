@@ -1,253 +1,39 @@
-"""厂商配置持久化 — Chatbox 风格 ProviderSettings。
+"""厂商配置存储兼容入口。
 
-左侧「我的厂商」仅显示用户主动添加的项；内置厂商通过添加弹窗加入。
+模型/序列化与 API Key 加解密已分别移至 provider_models/provider_secrets；
+本模块只保留 ProviderStore 的厂商列表、配置读写和模型解析。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import uuid
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from tokbee.core.config import default_data_dir
 
+from tokbee.core.config import default_data_dir
 from tokbee.core.errors import AIError
-from tokbee.core.provider import (
-    BUILTIN_PROVIDERS, ProviderModelDef,
-    get_builtin, infer_family,
-)
+from tokbee.core.provider import BUILTIN_PROVIDERS, get_builtin, infer_family
 from tokbee.core.safe_io import safe_write_json
-from wokbee.core.credential_crypto import (
-    CredentialVaultError,
-    decode_key,
-    encode_key,
-    generate_key,
-    open_sealed,
-    seal,
+from tokbee.core.provider_models import (
+    CustomProviderInfo,
+    ProviderModel,
+    ProviderSettings,
+    ResolvedModel,
+    _migrate_reasoning_adapter,
+    _migrate_reasoning_effort,
+    _optional_float,
+    _optional_int,
+)
+from tokbee.core.provider_secrets import (
+    _get_master_key,
+    _master_backend,
+    _open_key,
+    _seal_key,
 )
 
 _logger = logging.getLogger(__name__)
-
-_master_backend_ref: object | None = None
-
-
-def _master_backend():
-    """复用保险箱的 Keyring 主密钥后端（Windows 凭据管理器 / DPAPI）。"""
-    global _master_backend_ref
-    if _master_backend_ref is None:
-        from wokbee.core.credential_store import KeyringBackend
-        _master_backend_ref = KeyringBackend()
-    return _master_backend_ref
-
-
-def _get_master_key() -> bytes | None:
-    """取主密钥；缺失则生成并写入系统凭据管理器。不可用时返回 None（降级明文）。"""
-    try:
-        encoded = _master_backend().get()
-        if encoded:
-            return decode_key(encoded)
-        key = generate_key()
-        _master_backend().set(encode_key(key))
-        return key
-    except Exception as e:  # noqa: BLE001
-        _logger.warning("无法访问系统凭据管理器，API Key 将退回明文保存: %s", e)
-        return None
-
-
-def _seal_key(plain: str) -> str:
-    """把明文 API Key 封成信封（密文 JSON 文本）；无法加密时降级为明文。"""
-    if not plain:
-        return ""
-    key = _get_master_key()
-    if key is None:
-        return plain
-    try:
-        return seal({"v": 1, "s": plain}, key)
-    except Exception as e:  # noqa: BLE001
-        _logger.warning("API Key 加密失败，退回明文保存: %s", e)
-        return plain
-
-
-def _open_key(blob: str) -> str:
-    """解开信封得到明文 API Key；兼容旧版明文；解密失败返回空串（不崩溃）。"""
-    if not blob:
-        return ""
-    if not blob.lstrip().startswith("{"):
-        return blob  # 旧版明文
-    key = _get_master_key()
-    if key is None:
-        _logger.warning("凭据管理器不可用，无法解密 API Key，已置空")
-        return ""
-    try:
-        data = open_sealed(blob, key)
-        return str(data.get("s") or "")
-    except CredentialVaultError as e:
-        _logger.warning("解密 API Key 失败，已置空: %s", e)
-        return ""
-
-
-def _migrate_reasoning_adapter(d: dict) -> str:
-    """旧字段迁移 → 新 reasoning_adapter：""=自动 / openai / deepseek。"""
-    a = str(d.get("reasoning_adapter") or "").strip().lower()
-    if a in ("openai", "deepseek"):
-        return a
-    ctrl = str(d.get("reasoning_control") or "").strip().lower()
-    if ctrl in ("thinking", "enable_thinking"):
-        return "deepseek"
-    if ctrl in ("reasoning_effort", "thinking_config"):
-        return "openai"
-    return ""
-
-
-def _migrate_reasoning_effort(d: dict) -> str:
-    """旧字段迁移 → 新 reasoning_effort。"""
-    e = str(d.get("reasoning_effort") or "").strip()
-    if e:
-        return e
-    adapter = _migrate_reasoning_adapter(d)
-    if adapter == "deepseek":
-        return str(d.get("deepseek_reasoning_effort") or "").strip()
-    return str(d.get("openai_reasoning_effort") or "").strip()
-
-
-@dataclass
-class ProviderModel:
-    model_id: str
-    nickname: str = ""
-    capabilities: list[str] = field(default_factory=list)
-    context_window: int = 1_000_000
-    max_output: int = 0
-    enabled: bool = False  # 默认不勾选，由用户启用
-    api_protocol: str = "chat"  # chat | responses
-    temperature: float | None = None
-    top_p: float | None = None
-    max_tokens: int | None = None
-    stream: bool = True
-    reasoning_enabled: bool = True
-    reasoning_adapter: str = ""  # "", "openai", "deepseek"
-    reasoning_effort: str = "medium"
-
-    @classmethod
-    def from_def(cls, d: ProviderModelDef, enabled: bool = False) -> "ProviderModel":
-        return cls(
-            model_id=d.model_id,
-            nickname=d.nickname,
-            capabilities=list(d.capabilities),
-            context_window=d.context_window,
-            max_output=d.max_output,
-            enabled=enabled,
-            api_protocol="chat",
-        )
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "ProviderModel":
-        return cls(
-            model_id=str(d.get("model_id", "")),
-            nickname=str(d.get("nickname", "")),
-            capabilities=list(d.get("capabilities") or []),
-            context_window=int(d.get("context_window") or 1_000_000),
-            max_output=int(d.get("max_output") or 0),
-            enabled=bool(d.get("enabled", False)),
-            api_protocol=(
-                str(d.get("api_protocol") or "chat").strip().lower()
-                if str(d.get("api_protocol") or "chat").strip().lower() in ("chat", "responses")
-                else "chat"
-            ),
-            temperature=_optional_float(d.get("temperature")),
-            top_p=_optional_float(d.get("top_p")),
-            max_tokens=_optional_int(d.get("max_tokens")),
-            stream=bool(d.get("stream", True)),
-            reasoning_enabled=bool(d.get("reasoning_enabled", True)),
-            reasoning_adapter=_migrate_reasoning_adapter(d),
-            reasoning_effort=_migrate_reasoning_effort(d) or "medium",
-        )
-
-
-def _optional_float(value, default: float | None = None) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _optional_int(value) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-@dataclass
-class ProviderSettings:
-    api_key: str = ""
-    api_host: str = ""
-    models: list[ProviderModel] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "api_key": _seal_key(self.api_key),
-            "api_host": self.api_host,
-            "models": [asdict(m) for m in self.models],
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "ProviderSettings":
-        models = [ProviderModel.from_dict(m) for m in (d.get("models") or [])]
-        return cls(
-            api_key=_open_key(str(d.get("api_key", ""))),
-            api_host=str(d.get("api_host", "")),
-            models=models,
-        )
-
-
-@dataclass
-class CustomProviderInfo:
-    id: str = field(default_factory=lambda: f"custom-{uuid.uuid4().hex[:8]}")
-    name: str = "自定义本地 API"
-    icon: str = "🖥️"
-    family: str = "openai_compat"
-    notes: str = "自定义 OpenAI 兼容本地 / 私有 API"
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "CustomProviderInfo":
-        return cls(
-            id=str(d.get("id") or f"custom-{uuid.uuid4().hex[:8]}"),
-            name=str(d.get("name") or "自定义本地 API"),
-            icon=str(d.get("icon") or "🖥️"),
-            family=str(d.get("family") or "openai_compat"),
-            notes=str(d.get("notes") or "自定义 OpenAI 兼容本地 / 私有 API"),
-        )
-
-
-@dataclass
-class ResolvedModel:
-    """对话调用时解析出的当前模型连接信息。"""
-    provider_id: str
-    provider_name: str
-    model_id: str
-    api_host: str
-    api_key: str
-    family: str
-    context_window: int = 1_000_000
-    api_protocol: str = "chat"
-    temperature: float | None = None
-    top_p: float | None = None
-    max_tokens: int | None = None
-    stream: bool = True
-    reasoning_enabled: bool = True
-    reasoning_adapter: str = ""
-    reasoning_effort: str = ""
-
 
 class ProviderStore:
     """管理「我的厂商」列表与各厂商配置。"""
@@ -652,3 +438,13 @@ class ProviderStore:
         if len(key) <= 8:
             return "****"
         return f"{key[:3]}****{key[-4:]}"
+
+
+
+__all__ = [
+    "ProviderModel",
+    "ProviderSettings",
+    "CustomProviderInfo",
+    "ResolvedModel",
+    "ProviderStore",
+]

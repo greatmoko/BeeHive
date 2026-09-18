@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 
 from langchain_core.messages import AIMessage
@@ -51,6 +52,26 @@ def _reasoning_delta(raw: object) -> str:
     if isinstance(raw, list):
         return "".join(str(x) for x in raw)
     return str(raw or "")
+
+
+def _windows_http_client():
+    """Use the project-pinned httpx client on Windows.
+
+    OpenAI 3.x currently defaults to ``httpx2``.  Its streaming response path
+    has produced native access violations on this Windows/Python 3.13 setup;
+    the project already depends on the stable ``httpx`` client and OpenAI
+    accepts it as a compatible custom client.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import httpx
+
+        return httpx.Client(http2=False)
+    except Exception:
+        # Keep the existing OpenAI default if the optional compatibility path
+        # cannot be constructed (for example during a partial installation).
+        return None
 
 
 def _inject_reasoning() -> None:
@@ -186,6 +207,9 @@ def build_chat_model(
         "streaming": bool(resolved.stream),
         "max_retries": 1,
     }
+    http_client = _windows_http_client()
+    if http_client is not None:
+        kwargs["http_client"] = http_client
     openai_reasoning = resolved.family == "openai" and _is_openai_reasoning_model(resolved.model_id)
     family = resolved.family
     adapter = effective_adapter(resolved.reasoning_adapter, family)
