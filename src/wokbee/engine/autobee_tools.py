@@ -9,6 +9,7 @@ Agent 把用户「做成一个 autobee 的自动任务，在每天下午 6 点�
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Literal
 
@@ -23,6 +24,8 @@ from autobee.engine.scheduler import describe_cron, get_global_scheduler
 
 from wokbee.core.project_store import ProjectStore
 from wokbee.engine.ask_user import normalize_ask_user_value
+
+logger = logging.getLogger("wokbee")
 
 _TASK_TYPE_HINT = "任务类型，text=文本，script=脚本，wokbee=运行 WokBee 项目任务"
 
@@ -388,12 +391,14 @@ def build_autobee_tools(
             push_wecom=d.push_wecom,
             webhook_url=d.webhook_url,
         )
+        registration_error = False
         scheduler = get_global_scheduler()
         if scheduler is not None:
             try:
                 scheduler.add_or_update(task)
-            except Exception:
-                pass
+            except Exception:  # 第三方调度器边界：任务已持久化，需向调用者显式报告注册失败。
+                logger.exception("AutoBee 定时任务注册失败：%s", task.id)
+                registration_error = True
         if emit:
             try:
                 emit(
@@ -403,7 +408,10 @@ def build_autobee_tools(
                 )
             except Exception:
                 pass
-        return d.summary(task.id)
+        result = d.summary(task.id)
+        if registration_error:
+            result += "\n警告：任务已保存，但未能注册到运行中的调度器。请在 AutoBee 中检查任务状态或重启应用。"
+        return result
 
     create_scheduled_task.name = "create_scheduled_task"
     list_scheduled_tasks.name = "list_scheduled_tasks"
