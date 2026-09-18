@@ -8,20 +8,17 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from deepagents import FilesystemMiddleware, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 from langgraph.types import Command
 
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 
-from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN, _now
+from wokbee.core.models import Project, _now
 from wokbee.core.timeline_format import (
     format_tool_call_for_timeline,
     format_tool_callback_for_timeline,
@@ -29,7 +26,6 @@ from wokbee.core.timeline_format import (
 from wokbee.core.credential_store import redact_obj, redact_text
 from wokbee.core.paths import (
     ensure_project_layout,
-    memory_dir,
     workspace_sandbox,
 )
 from wokbee.core.settings import WokBeeSettings
@@ -93,73 +89,19 @@ from wokbee.engine.script_runner import (
 )
 from wokbee.core.skills_store import SkillsStore
 from wokbee.core.mcp_store import McpStore
+from wokbee.engine.runner_events import EventCallback, ExecutionEventLog
+from wokbee.engine.runner_models import RunRequest, RunResult, StepBudget, StepLimitExceeded
+from wokbee.engine.runner_sessions import (
+    ensure_experience_files as _ensure_experience_files,
+    get_checkpointer as _get_checkpointer,
+    remember_agent,
+    reset_run_state as _reset_run_state,
+)
 
 logger = logging.getLogger("wokbee")
 
-EventCallback = Callable[[str, str, dict], None]  # kind, content, meta
 ApprovalCallback = Callable[[list[dict]], None]  # pending action summaries
-
-
-@dataclass
-class RunRequest:
-    project: Project
-    project_root: Path
-    user_message: str
-    resolved: ResolvedModel
-    approval: ApprovalFlags
-    max_steps: int = 40
-    attachments: list[dict] = field(default_factory=list)
-    # 运行器模式：run（经验管线）| chat（交互）| design（DeziBee 设计）
-    runner_mode: str = ""
-    # 可选的对话隔离键；为空时保持按项目复用旧 chat thread 的兼容行为。
-    chat_thread_id: str = ""
-
-
-@dataclass
-class RunResult:
-    ok: bool
-    outcome: str  # success | failed | cancelled | awaiting_approval | incomplete
-    final_text: str = ""
-    error: str = ""
-    lesson_id: str = ""
-    pending_actions: list[dict] = field(default_factory=list)
-
-
-class StepLimitExceeded(RuntimeError):
-    """Raised when one Agent run exhausts its logical step budget."""
-
-    def __init__(self, limit: int, used: int, kind: str) -> None:
-        self.limit = limit
-        self.used = used
-        self.kind = kind
-        super().__init__(
-            f"Agent 执行未完成：已达到 max_steps={limit} 的硬上限 "
-            f"（已用 {used} 步，最后计数类型：{kind}）。"
-            "已停止继续调用模型或工具，请提高 max_steps 或拆分任务。"
-        )
-
-
-class _StepBudget:
-    """Thread-safe logical budget for Agent turns and tool updates."""
-
-    def __init__(self, limit: int) -> None:
-        self.limit = max(1, int(limit))
-        self.used = 0
-        self._lock = threading.Lock()
-
-    def consume(self, kind: str, amount: int = 1) -> None:
-        amount = max(1, int(amount))
-        with self._lock:
-            if self.used + amount > self.limit:
-                self.used = self.limit
-                raise StepLimitExceeded(self.limit, self.used, kind)
-            self.used += amount
-
-
-# 进程内 checkpointer，保证同一项目可 resume
-_CHECKPOINTERS: dict[str, InMemorySaver] = {}
-_AGENTS: dict[str, Any] = {}
-_LOCK = threading.Lock()
+_StepBudget = StepBudget  # 私有旧名兼容
 
 # 【会话上下文】块的固定首行，用作「是否已注入」的稳定哨兵（内容可随项目变更，
 # 但首行字面量恒定）。判定已注入时以此为准，不依赖 project.title/goal 等易变内容。
@@ -208,42 +150,6 @@ def _format_engine_error(exc: BaseException) -> str:
     return text
 
 
-def _get_checkpointer(project_id: str) -> InMemorySaver:
-    with _LOCK:
-        if project_id not in _CHECKPOINTERS:
-            _CHECKPOINTERS[project_id] = InMemorySaver()
-        return _CHECKPOINTERS[project_id]
-
-
-def _reset_run_state(project_id: str) -> InMemorySaver:
-    """新开「运行」时清空线程状态，避免继承上次卡死的空 AIMessage / 半截对话。"""
-    with _LOCK:
-        _CHECKPOINTERS[project_id] = InMemorySaver()
-        _AGENTS.pop(project_id, None)
-        return _CHECKPOINTERS[project_id]
-
-
-def _ensure_experience_files(project_root: Path, project: Project) -> None:
-    mem = memory_dir(project_root)
-    mem.mkdir(parents=True, exist_ok=True)
-    (mem / "experiences").mkdir(parents=True, exist_ok=True)
-    agents_md = mem / "AGENTS.md"
-    # AGENTS.md 只保留项目标识与项目经验约定，不生成任何记忆库文件。
-    content = (
-        f"# Project {project.title}\n\n"
-        f"- id: `{project.id}`\n"
-        f"- goal: {project.goal or '(未设置)'}\n"
-        f"- approval: {project.approval.summary()}\n\n"
-        "你是 WokBee——运行在用户本机上的工作助手。能力范围、系统环境、可调用工具、"
-        "目录与凭据约定见本轮系统提示与【会话上下文】。\n"
-        "项目运行经验位于 memory/experiences/（只加载最新一份）。\n"
-        "**禁止**访问 archives/；文件工具只用虚拟路径；凭据只给环境变量名，严禁写出账号密码。\n"
-        f"项目名称最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
-    )
-    agents_md.write_text(content, encoding="utf-8")
-    from wokbee.engine.lessons import LessonStore
-
-    LessonStore(project_root).rebuild_index()
 
 
 def _attachment_content(text: str, attachments: list[dict] | None) -> Any:
@@ -743,8 +649,7 @@ class AgentRunner:
         self._approval_decisions: list[dict] | None = None
         self._ask_user_event = threading.Event()
         self._ask_user_answers: dict | None = None
-        self._run_events: list[Any] = []
-        self._events_lock = threading.Lock()  # 守护 _run_events（流线程与主线程并发访问）
+        self._event_log = ExecutionEventLog()
         self._cache_tracker = CacheHitTracker()
         self._prefix_guard: PrefixGuard | None = None
         self._session_context_block: str = ""
@@ -894,36 +799,17 @@ class AgentRunner:
     def _emit_stream_delta(self, target: str, delta: str) -> None:
         """流式增量事件（agent_stream）：只驱动 UI 实时气泡，不落盘、不入本轮轨迹。
 
-        与 `_emit` 不同：`_emit` 会写 `_run_events`（供对话/经验总结），token 级
+        与 `_emit` 不同：`_emit` 会写事件缓冲（供对话/经验总结），token 级
         增量不能混进去，否则总结会读到半截文本；也不进 store，避免 events.jsonl 爆炸。
         """
-        if not delta or not self.on_event:
-            return
-        try:
-            self.on_event("agent_stream", delta, {"target": target})
-        except Exception:
-            logger.exception("agent_stream 事件回调失败")
+        self._event_log.emit_stream(self.on_event, target, delta)
 
     def _emit(self, kind: str, content: str, meta: dict | None = None) -> None:
-        meta = dict(meta or {})
-        content = redact_text(content or "")
-        if "args" in meta:
-            meta["args"] = redact_obj(meta["args"])
-        # 本轮内存轨迹：供首次自动总结固化脚本（避免等 UI 写盘竞态）
-        with self._events_lock:
-            self._run_events.append(
-                SimpleNamespace(kind=kind, content=content or "", meta=dict(meta))
-            )
-        if self.on_event:
-            try:
-                self.on_event(kind, content, meta)
-            except Exception:
-                logger.exception("on_event 回调失败")
+        self._event_log.emit(self.on_event, kind, content, meta)
 
     def _snapshot_run_events(self) -> list:
         """线程安全地取当前事件快照。"""
-        with self._events_lock:
-            return list(self._run_events)
+        return self._event_log.snapshot()
 
     def _wait_approval(self, pending: list[dict]) -> list[dict]:
         self._approval_event.clear()
@@ -1335,8 +1221,7 @@ class AgentRunner:
             name=agent_name,
         )
         if mode == "run":
-            with _LOCK:
-                _AGENTS[req.project.id] = agent
+            remember_agent(req.project.id, agent)
         return agent
 
     def _with_session_context(self, user_message: Any) -> Any:
@@ -1692,8 +1577,7 @@ class AgentRunner:
 
     def run_chat(self, req: RunRequest) -> RunResult:
         """非运行期对话：回答提问（可与目标无关），可读写项目名称/目标；不跑经验管线。"""
-        with self._events_lock:
-            self._run_events = []
+        self._event_log.reset()
         self._context_injected = False
         thread_id = f"wokbee-chat-{req.project.id}"
         chat_thread_id = str(getattr(req, "chat_thread_id", "") or "").strip()
@@ -1847,8 +1731,7 @@ class AgentRunner:
             return ""
 
     def run(self, req: RunRequest, *, resume: bool = False) -> RunResult:
-        with self._events_lock:
-            self._run_events = []
+        self._event_log.reset()
         self._context_injected = False
         self._experience_updated_by_tool = False
         thread_id = f"wokbee-{req.project.id}"
@@ -2412,7 +2295,7 @@ class AgentRunner:
             ai_fields: dict[str, str] = {}
             if use_ai:
                 try:
-                    # ResolvedModel 才调模型；占位 SimpleNamespace 跳过
+                    # ResolvedModel 才调模型；占位对象跳过
                     if getattr(req.resolved, "api_key", None) and getattr(
                         req.resolved, "api_host", None
                     ):
