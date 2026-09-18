@@ -11,11 +11,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QEvent, QFileInfo, QIODevice, QPoint, Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QPixmap
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, Qt, Signal
+from PySide6.QtGui import QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileIconProvider,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,15 +27,13 @@ from PySide6.QtWidgets import (
 
 from tokbee.ui.combo_style import apply_combo_popup_style
 from tokbee.ui.styles.theme import Theme
-from wokbee.ui.action_bar import _EqButton, _AttachmentChip, _is_image_file, _sanitize_name
+from ui_common.attachments import AttachmentState, is_image_file, refresh_attachment_bar
+from wokbee.ui.action_bar import _EqButton
 
 from dezibee.core.models import Requirement
 from dezibee.core.services import current_model_label, model_options
 from dezibee.ui.info_panel import ReqInfoPanel
 from dezibee.ui.web_chat import DeziBeeChatLog
-
-_IMAGE_EXTS = _is_image_file  # 复用 WokBee 判定（函数形式保持一致命名）
-
 
 class InputBar(QFrame):
     """功能及用户输入区：输入框在上，功能按钮在下方（参考 WokBee 布局）。"""
@@ -53,10 +50,10 @@ class InputBar(QFrame):
         super().__init__(parent)
         self.theme = theme
         self._running = False
-        self._attachments: list[dict] = []
+        self._attachment_state = AttachmentState()
+        self._attachments = self._attachment_state.items
         self._drafts: dict[str, str] = {}
         self._draft_req_id: str | None = None
-        self._uploads_root: Path | None = None  # 由 view 按需求注入（需求目录/uploads）
         c = theme.colors
         self.setStyleSheet(
             f"InputBar {{ background: {c['content_bg']}; border-top: 1px solid {c['border']}; }}"
@@ -198,7 +195,7 @@ class InputBar(QFrame):
     # ── 附件（与 WokBee 同一套：粘贴/去重/落盘/取走） ─────
     def set_uploads_root(self, root: str | Path | None):
         """由 view 在需求切换时注入：粘贴的图片/文件立即保存到 <需求目录>/uploads/。"""
-        self._uploads_root = Path(root) if root else None
+        self._attachment_state.set_uploads_root(root)
 
     def set_draft_context(self, req_id: str | None):
         """切换需求时保存当前草稿，并加载目标需求自己的草稿。"""
@@ -210,75 +207,23 @@ class InputBar(QFrame):
         self._edit.blockSignals(False)
 
     def _add_attachment(self, item: dict):
-        # 唯一性：同一个本地文件不重复追加；剪贴板图片无源路径，允许连续粘贴多张
-        for exists in self._attachments:
-            src = item.get("path")
-            if src and exists.get("path") == src:
-                return
-        self._persist_inline(item)
-        self._attachments.append(item)
-        self._refresh_attach_bar()
+        if self._attachment_state.add(item):
+            self._refresh_attach_bar()
 
     def _refresh_attach_bar(self):
-        # 清空除 stretch 外的子控件
-        while self._attach_lay.count() > 1:
-            w = self._attach_lay.takeAt(0).widget()
-            if w is not None:
-                w.setParent(None)
-        for item in self._attachments:
-            chip = _AttachmentChip(item, self.theme)
-            chip.remove_clicked.connect(
-                lambda it, c=chip: self._remove_attachment(it)
-            )
-            # 插到 stretch 之前
-            self._attach_lay.insertWidget(self._attach_lay.count() - 1, chip)
-        self._attach_bar.setVisible(bool(self._attachments))
-        self._attach_bar.adjustSize()
+        refresh_attachment_bar(self._attach_lay, self._attach_bar, self._attachments, self.theme, self._remove_attachment)
 
     def _remove_attachment(self, item: dict):
-        for i, it in enumerate(self._attachments):
-            if it is item:
-                self._attachments.pop(i)
-                break
+        self._attachment_state.remove(item)
         self._refresh_attach_bar()
 
     def _persist_inline(self, item: dict):
         """图片/文件（无本地 path）写盘到 uploads/，返回 path；失败则原样。"""
-        data = item.get("data")
-        display = item.get("display_name") or "attachment"
-        root = self._uploads_root
-        name = _sanitize_name(display)
-        source = item.get("path")
-        if root is None:
-            return source
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            target = root / name
-            if target.exists():
-                target = root / (
-                    f"{target.stem}_{time.strftime('%Y%m%d_%H%M%S')}"
-                    f"_{time.time_ns() % 1_000_000:06d}{target.suffix}"
-                )
-            if source is not None and Path(str(source)).exists():
-                import shutil
-
-                shutil.copy2(str(source), str(target))
-            elif data is not None:
-                target.write_bytes(data)
-            else:
-                return source
-            item["path"] = target
-            item["display_name"] = target.name
-            return target
-        except OSError:
-            return source
+        return self._attachment_state.persist(item)
 
     def _take_attachments(self) -> list[dict]:
         """返回附件列表（供发送取走），随后清空 chip 条。"""
-        items = list(self._attachments)
-        for it in items:
-            self._persist_inline(it)
-        self._attachments.clear()
+        items = self._attachment_state.take()
         self._refresh_attach_bar()
         return items
 
@@ -299,7 +244,7 @@ class InputBar(QFrame):
                     continue
                 self._add_attachment(
                     {
-                        "kind": "image" if _is_image_file(p) else "file",
+                        "kind": "image" if is_image_file(p) else "file",
                         "display_name": p.name,
                         "data": None,
                         "path": p,
