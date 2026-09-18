@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from ui_common.dialogs import show_tip
 from tokbee.ui.styles.system import (
     apply_checkbox, apply_combo_popup_style, apply_danger_btn, apply_lineedit, apply_radio,
     apply_secondary_btn, apply_spin, section_label_qss, style_hint_label,
@@ -276,34 +277,7 @@ class _ModelSettingsPopup(QFrame):
 
 
 def _tip(parent: QWidget, theme: Theme, message: str):
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("提示")
-    dlg.setFixedSize(360, 150)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 14px; color: {c['text']};")
-    layout.addWidget(msg)
-    layout.addStretch()
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setCursor(Qt.CursorShape.PointingHandCursor)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px; font-size: 13px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    layout.addLayout(row)
-    dlg.exec()
+    show_tip(parent, theme, message, height=150)
 
 
 def _confirm(parent: QWidget, theme: Theme, message: str, title: str = "确认") -> bool:

@@ -9,40 +9,10 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from ui_common.dialogs import show_tip as _tip
 from tokbee.ui.views.session_params_editor import SessionParamsEditor
 from tokbee.core.session_settings import SessionSettings, GlobalSessionDefaults
 from tokbee.core.ai_role import AIRole, AIRoleManager
-
-
-def _tip(parent: QWidget, theme: Theme, message: str):
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("提示")
-    dlg.setFixedSize(360, 140)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 14px; color: {c['text']};")
-    layout.addWidget(msg)
-    layout.addStretch()
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setCursor(Qt.CursorShape.PointingHandCursor)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px; font-size: 13px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    layout.addLayout(row)
-    dlg.exec()
 
 
 class SessionDefaultsWorkspace(QWidget):
