@@ -5,8 +5,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tokbee.core.safe_io import safe_write_text
+
 from wokbee.core.paths import ensure_project_layout, memory_dir, scripts_dir
 from wokbee.engine.lesson_models import Lesson, _now, _slug, _stamp, render_lesson_md
+
+EXPERIENCES_SUBDIR = "experiences"
+LEGACY_SINGLE = "EXPERIENCE.md"
+_EXP_NAME_RE = re.compile(
+    r"^exp_(\d{8}_\d{6}(?:_\d{3})?)(?:_[a-z0-9]+)?\.md$", re.I
+)
+
+
 class LessonStore:
     """`memory/experiences/exp_YYYYMMDD_HHMMSS.md` 多份经验；运行只读最新。"""
 

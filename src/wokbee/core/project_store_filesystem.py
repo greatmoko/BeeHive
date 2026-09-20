@@ -13,6 +13,7 @@ from tokbee.core.safe_io import safe_write_json
 from wokbee.core.models import Project
 from wokbee.core.paths import project_dir
 from wokbee.core.settings import WokBeeSettings
+from wokbee.core.project_store_support import _META_LOCK
 
 logger = logging.getLogger("wokbee")
 TRASH_RETENTION_DAYS = 7
@@ -148,4 +149,3 @@ class ProjectStoreFilesystemMixin:
         safe_write_json(self.workspace_root / "_index.json", index)
 
 __all__ = ["ProjectStoreFilesystemMixin", "TRASH_RETENTION_DAYS"]
-

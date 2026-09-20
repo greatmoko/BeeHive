@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, Qt, Signal
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from tokbee.ui.combo_style import apply_combo_popup_style
 from tokbee.ui.styles.theme import Theme
 from ui_common.attachments import AttachmentState, is_image_file, refresh_attachment_bar
-from wokbee.ui.action_bar import _EqButton
+from wokbee.ui.action_bar import _EqButton, _InputResizeHandle
 
 from dezibee.core.models import Requirement
 from dezibee.core.services import current_model_label, model_options
@@ -59,8 +59,8 @@ class InputBar(QFrame):
             f"InputBar {{ background: {c['content_bg']}; border-top: 1px solid {c['border']}; }}"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 2, 16, 10)
+        layout.setSpacing(4)
 
         # 附件 chip 条（有附件时显示，输入框上方）
         self._attach_bar = QFrame()
@@ -72,13 +72,19 @@ class InputBar(QFrame):
         self._attach_lay.addStretch()
         layout.addWidget(self._attach_bar)
 
+        self._input_resize = _InputResizeHandle(self.theme)
+        self._input_resize.drag_delta.connect(self._on_input_resize_delta)
+        layout.addWidget(self._input_resize, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         # 输入框（上）
         self._edit = QTextEdit()
         self._edit.setPlaceholderText(
             "输入需求或修改意见…（Enter 发送，Shift+Enter 换行；可粘贴图片/文件）"
         )
         self._edit.setAcceptRichText(False)
-        self._edit.setFixedHeight(64)
+        self._edit_min_h = 64
+        self._edit.setMinimumHeight(self._edit_min_h)
+        self._edit.setFixedHeight(self._edit_min_h)
         self._edit.setStyleSheet(f"""
             QTextEdit {{
                 background: {c["input_bg"]}; color: {c["text"]};
@@ -189,8 +195,41 @@ class InputBar(QFrame):
         self._send_btn.clicked.connect(self._on_send)
         row.addWidget(self._send_btn)
 
+        layout.addSpacing(2)
         layout.addLayout(row)
         self.reload_models()
+        QTimer.singleShot(0, self._sync_input_resize_width)
+
+    def _input_max_height(self) -> int:
+        win = self.window()
+        height = win.height() if win is not None else self.height()
+        if height <= 0:
+            height = 600
+        return max(self._edit_min_h, int(height * 2 / 3))
+
+    def _sync_input_resize_width(self):
+        if self.width() > 0:
+            self._input_resize.set_available_width(self.width())
+
+    def _on_input_resize_delta(self, delta: int):
+        if not delta:
+            return
+        max_height = self._input_max_height()
+        new_height = min(
+            max(self._edit.height() + delta, self._edit_min_h),
+            max_height,
+        )
+        self._edit.setMaximumHeight(max_height)
+        self._edit.setFixedHeight(new_height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "_edit"):
+            return
+        self._sync_input_resize_width()
+        max_height = self._input_max_height()
+        self._edit.setMaximumHeight(max_height)
+        self._edit.setFixedHeight(min(self._edit.height(), max_height))
 
     # ── 附件（与 WokBee 同一套：粘贴/去重/落盘/取走） ─────
     def set_uploads_root(self, root: str | Path | None):
@@ -379,12 +418,13 @@ class DeziBeeWorkspace(QWidget):
             f"DeziBeeWorkspace {{ background: {self.theme.colors['content_bg']}; }}"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(0)
 
         # 1. 需求信息区
         self.info_panel = ReqInfoPanel(self.theme)
         layout.addWidget(self.info_panel)
+        layout.addSpacing(8)
 
         # 2. 交互记录区（可伸缩，WokBee 网页聊天组件）
         self.chat_log = DeziBeeChatLog(self.theme)

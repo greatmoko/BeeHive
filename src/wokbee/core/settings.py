@@ -9,7 +9,7 @@ from tokbee.core.config import Config
 
 from wokbee.core.models import ApprovalFlags
 
-DEFAULT_WORKSPACE = Path.home() / "WokBeeWorkspace"
+DEFAULT_WORKSPACE = Path.home() / "BeeHive" / "WokBee"
 
 DEFAULT_APPROVAL = {
     "skip_read": True,
@@ -44,15 +44,15 @@ DEFAULTS = {
     # 用户可自行添加目录并从其中加载技能。与 additional_directories 不同的是，
     "skills_dirs": [],
     # DeziBee 工作文件夹：每个需求在其下创建 {需求ID}/ 子目录（Demo/PRD/互动记录）。
-    "dezibee_work_root": str(Path.home() / "WokBee" / "DeziBee"),
+    "dezibee_work_root": str(Path.home() / "BeeHive" / "DeziBee"),
     # 终端运行软件默认配置：空 = 未选择，运行时按 cmd 处理。
     "terminal_app": "",
 }
 
 
 def _default_dezibee_work_root_str() -> str:
-    """默认 DeziBee 工作文件夹；旧版本号（~/.wokbee/wokbee）自动迁移。"""
-    p = Path.home() / "WokBee" / "DeziBee"
+    """默认 DeziBee 工作文件夹，与应用配置目录分开。"""
+    p = Path.home() / "BeeHive" / "DeziBee"
     return str(p)
 
 

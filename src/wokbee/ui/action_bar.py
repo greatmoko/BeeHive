@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QEvent, QIODevice, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from tokbee.core.provider_store import ProviderStore
@@ -42,6 +43,61 @@ _RUN_EQ_PAD_BOTTOM = 6
 _RUN_EQ_INTERVAL = 70    # 帧间隔（毫秒）
 _RUN_EQ_DECAY = 0.82     # 每帧回落系数（真实均衡器风格）
 _RUN_EQ_PEAK = 0.35      # 高于该值的随机量才触发跃升
+
+
+class _InputResizeHandle(QWidget):
+    """输入框顶部拖拽条：向上拖高、向下拖矮。"""
+
+    drag_delta = Signal(int)
+
+    def __init__(self, theme: Theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setFixedSize(100, 8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("拖动调整高度")
+        self._dragging = False
+        self._last_y = 0
+
+    def set_available_width(self, width: int):
+        self.setFixedWidth(max(28, int(width) // 3))
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(self._theme.colors.get("border", "#e5e5e5")))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        y = self.height() // 2
+        painter.drawLine(8, y, self.width() - 8, y)
+        painter.end()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._last_y = event.globalPosition().toPoint().y()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._dragging:
+            y = event.globalPosition().toPoint().y()
+            delta = self._last_y - y
+            self._last_y = y
+            if delta:
+                self.drag_delta.emit(delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class _EqButton(QPushButton):
@@ -154,8 +210,8 @@ class _ActionBar(QFrame):
             }}
         """)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 2, 16, 12)
+        layout.setSpacing(4)
 
         self._approval_bar = QFrame()
         self._approval_bar.setVisible(False)
@@ -211,12 +267,18 @@ class _ActionBar(QFrame):
         self._attach_lay.addStretch()
         layout.addWidget(self._attach_bar)
 
+        self._input_resize = _InputResizeHandle(self.theme)
+        self._input_resize.drag_delta.connect(self._on_input_resize_delta)
+        layout.addWidget(self._input_resize, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         self._input = QTextEdit()
         bind_text_edit_context_menu(self._input, c)
         self._input.setPlaceholderText(
             "输入提问或指令…（Enter 发送，Shift+Enter 换行；发送=完整能力，运行=经验管线）"
         )
-        self._input.setFixedHeight(72)
+        self._input_min_h = 72
+        self._input.setMinimumHeight(self._input_min_h)
+        self._input.setFixedHeight(self._input_min_h)
         self._input.setStyleSheet(f"""
             QTextEdit {{
                 background: {c["input_bg"]}; color: {c["text"]};
@@ -282,9 +344,42 @@ class _ActionBar(QFrame):
         )
         self._send_btn.clicked.connect(self._on_send)
         row.addWidget(self._send_btn)
+        layout.addSpacing(4)
         layout.addLayout(row)
 
         self.reload_models()
+        QTimer.singleShot(0, self._sync_input_resize_width)
+
+    def _input_max_height(self) -> int:
+        win = self.window()
+        height = win.height() if win is not None else self.height()
+        if height <= 0:
+            height = 600
+        return max(self._input_min_h, int(height * 2 / 3))
+
+    def _sync_input_resize_width(self):
+        if self.width() > 0:
+            self._input_resize.set_available_width(self.width())
+
+    def _on_input_resize_delta(self, delta: int):
+        if not delta:
+            return
+        max_height = self._input_max_height()
+        new_height = min(
+            max(self._input.height() + delta, self._input_min_h),
+            max_height,
+        )
+        self._input.setMaximumHeight(max_height)
+        self._input.setFixedHeight(new_height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "_input"):
+            return
+        self._sync_input_resize_width()
+        max_height = self._input_max_height()
+        self._input.setMaximumHeight(max_height)
+        self._input.setFixedHeight(min(self._input.height(), max_height))
 
     def _icon_btn_qss(self) -> str:
         c = self.theme.colors

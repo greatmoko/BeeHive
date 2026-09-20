@@ -327,17 +327,17 @@ class _ChatWorkspace(QWidget):
         input_wrapper.setStyleSheet(f"""
             QFrame {{
                 background: {c["content_bg"]};
-                border-top: 1px solid {c["border_light"]};
+                border-top: 1px solid {c["border"]};
             }}
         """)
         self._input_wrapper = input_wrapper
         input_layout = QVBoxLayout(input_wrapper)
-        input_layout.setContentsMargins(20, 0, 20, 14)
-        input_layout.setSpacing(8)
+        input_layout.setContentsMargins(20, 2, 20, 14)
+        input_layout.setSpacing(4)
 
         self._input_resize = _InputResizeHandle(self.theme)
         self._input_resize.drag_delta.connect(self._on_input_resize_delta)
-        input_layout.addWidget(self._input_resize)
+        input_layout.addWidget(self._input_resize, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # 附件预览条
         self._attach_bar = QFrame()
@@ -453,11 +453,13 @@ class _ChatWorkspace(QWidget):
         self._send_btn.clicked.connect(self._on_send)
         bottom_bar.addWidget(self._send_btn)
 
+        input_layout.addSpacing(4)
         input_layout.addLayout(bottom_bar)
         layout.addWidget(input_wrapper)
 
         self._show_welcome()
         QTimer.singleShot(0, self._clamp_input_height)
+        QTimer.singleShot(0, self._sync_input_resize_width)
 
     def _input_max_height(self) -> int:
         """软件整体高度的 2/3。"""
@@ -466,6 +468,11 @@ class _ChatWorkspace(QWidget):
         if h <= 0:
             h = 600
         return max(self._input_min_h, int(h * 2 / 3))
+
+    def _sync_input_resize_width(self):
+        parent = self._input_resize.parentWidget()
+        if parent is not None and parent.width() > 0:
+            self._input_resize.set_available_width(parent.width())
 
     def _clamp_input_height(self):
         if not hasattr(self, "_input_box"):
@@ -487,6 +494,7 @@ class _ChatWorkspace(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._sync_input_resize_width()
         self._clamp_input_height()
 
     def eventFilter(self, obj, event):

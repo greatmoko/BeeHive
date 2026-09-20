@@ -75,20 +75,23 @@ class _InputResizeHandle(QWidget):
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
         self.theme = theme
-        self.setFixedHeight(8)
+        self.setFixedSize(100, 8)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
         self.setToolTip("拖动调整高度")
         self._dragging = False
         self._last_y = 0
 
+    def set_available_width(self, width: int):
+        self.setFixedWidth(max(28, int(width) // 3))
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         c = self.theme.colors
-        # 中间短横作为拖拽暗示
+        # 拖拽条占可用输入区宽度的 1/3。
         mid_y = self.height() / 2
-        x0 = self.width() / 2 - 14
-        x1 = self.width() / 2 + 14
+        x0 = 8
+        x1 = self.width() - 8
         pen = QPen(QColor(c.get("border", "#e5e5e5")))
         pen.setWidth(2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
