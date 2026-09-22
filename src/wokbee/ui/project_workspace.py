@@ -731,6 +731,20 @@ class _ProjectWorkspace(QWidget):
         if not target:
             return
         meta_d = meta if isinstance(meta, dict) else {}
+        if kind == "context_usage":
+            # Context usage belongs in the ring, not the chat timeline.  The
+            # middleware can report it for every model/tool step; persisting
+            # each update creates noisy, content-free system cards.
+            if visible:
+                try:
+                    self._actions.set_context_usage(
+                        int(meta_d.get("used", 0) or 0),
+                        int(meta_d.get("limit", 0) or 0),
+                        enabled=True,
+                    )
+                except (TypeError, ValueError):
+                    pass
+            return
         if meta_d.get("memory_proposal_id"):
             from wokbee.ui.memory_workspace import show_memory_proposal
             show_memory_proposal(meta_d["memory_proposal_id"], self)
