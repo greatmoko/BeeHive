@@ -234,6 +234,23 @@ class MemoryStore:
         with self.connect() as db:
             db.execute("INSERT INTO global_memory(content,timestamp) VALUES (?,?)", (json.dumps(snapshot["content"], ensure_ascii=False), now()))
 
+    def save_global(self, content):
+        """Save a user-edited global memory snapshot as a new immutable version."""
+        if not isinstance(content, dict) or any(name not in content for name in MODULES):
+            raise ValueError("全局记忆必须包含全部四个模块")
+        normalized = {name: str(content.get(name) or "").strip() for name in MODULES}
+        if len(self.global_text({"content": normalized})) > 5000:
+            raise ValueError("全局记忆总长度不可超过5000字")
+        current = self.global_memory()
+        if normalized == current["content"]:
+            return current["version"]
+        with self.connect() as db:
+            row = db.execute(
+                "INSERT INTO global_memory(content,timestamp) VALUES (?,?) RETURNING version",
+                (json.dumps(normalized, ensure_ascii=False), now()),
+            ).fetchone()
+        return int(row["version"])
+
     def thresholds(self):
         with self.connect() as db:
             values = dict(db.execute("SELECT key,value FROM memory_settings"))

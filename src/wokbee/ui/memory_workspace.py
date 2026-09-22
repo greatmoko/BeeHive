@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from wokbee.core.memory import MemoryStore
+from wokbee.core.memory import MODULES, MemoryStore
 
 
 class MemoryProposalDialog(QDialog):
@@ -85,13 +85,15 @@ class MemoryWorkspace(QWidget):
         self.version_label = QLabel()
         root.addWidget(self.version_label)
         self.content = QTextEdit()
-        self.content.setReadOnly(True)
         self.content.setStyleSheet(
             "QTextEdit { background: #ffffff; color: #202124; "
             "selection-background-color: #cfe3ff; selection-color: #202124; "
             "border: 1px solid #c7cbd1; border-radius: 4px; }"
         )
         root.addWidget(self.content, 1)
+        save_memory = QPushButton("保存为新版本")
+        save_memory.clicked.connect(self.save_global_memory)
+        root.addWidget(save_memory)
         restore_row = QHBoxLayout()
         self.version = QSpinBox()
         self.version.setMinimum(1)
@@ -150,6 +152,21 @@ class MemoryWorkspace(QWidget):
             self.store.set_thresholds(self.trigger.value() / 100, self.target.value() / 100)
         except ValueError as exc:
             QMessageBox.warning(self, "无法保存", str(exc))
+
+    def save_global_memory(self):
+        try:
+            blocks = self.content.toPlainText().split("\n\n")
+            parsed = {}
+            for block in blocks:
+                lines = block.splitlines()
+                if lines and lines[0].startswith("【") and lines[0].endswith("】"):
+                    parsed[lines[0][1:-1]] = "\n".join(lines[1:]).strip()
+            version = self.store.save_global({name: parsed.get(name, "") for name in MODULES})
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "无法保存全局记忆", str(exc))
+            return
+        self.refresh()
+        QMessageBox.information(self, "已保存", f"全局记忆已保存为 v{version}。")
 
     def restore(self):
         answer = QMessageBox.question(self, "恢复全局记忆", f"将版本 {self.version.value()} 恢复为一个新版本？",
