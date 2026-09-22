@@ -2,7 +2,7 @@
 import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
+    QDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
     QLineEdit, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -82,7 +82,24 @@ class MemoryWorkspace(QWidget):
         save.clicked.connect(self.save_thresholds)
         row.addWidget(save)
         root.addLayout(row)
-        root.addWidget(QLabel("原子记忆查询（默认显示最近 10 条）"))
+        global_card = QGroupBox("全局记忆（单份）")
+        global_layout = QVBoxLayout(global_card)
+        global_layout.addWidget(QLabel("可直接编辑并保存，AI 建议仍需手动确认。"))
+        self.content = QTextEdit()
+        self.content.setStyleSheet(
+            "QTextEdit { background: #ffffff; color: #202124; "
+            "selection-background-color: #cfe3ff; selection-color: #202124; "
+            "border: 1px solid #c7cbd1; border-radius: 4px; }"
+        )
+        global_layout.addWidget(self.content)
+        save_memory = QPushButton("保存全局记忆")
+        save_memory.clicked.connect(self.save_global_memory)
+        global_layout.addWidget(save_memory)
+        root.addWidget(global_card, 1)
+
+        atomic_card = QGroupBox("原子记忆（关键词组与完整记忆）")
+        atomic_layout = QVBoxLayout(atomic_card)
+        atomic_layout.addWidget(QLabel("默认显示最近 10 条；输入关键词后只显示相关记忆。"))
         search_row = QHBoxLayout()
         self.atomic_query = QLineEdit()
         self.atomic_query.setPlaceholderText("输入关键词，多个关键词用空格或逗号分隔")
@@ -90,7 +107,7 @@ class MemoryWorkspace(QWidget):
         atomic_search = QPushButton("查询")
         atomic_search.clicked.connect(self.refresh_atomic_memories)
         search_row.addWidget(atomic_search)
-        root.addLayout(search_row)
+        atomic_layout.addLayout(search_row)
         atomic_scroll = QScrollArea()
         atomic_scroll.setWidgetResizable(True)
         atomic_scroll.setMaximumHeight(190)
@@ -98,18 +115,11 @@ class MemoryWorkspace(QWidget):
         self.atomic_results = QVBoxLayout(atomic_container)
         self.atomic_results.setContentsMargins(4, 4, 4, 4)
         atomic_scroll.setWidget(atomic_container)
-        root.addWidget(atomic_scroll)
-        root.addWidget(QLabel("全局记忆（单份，可直接编辑保存）"))
-        self.content = QTextEdit()
-        self.content.setStyleSheet(
-            "QTextEdit { background: #ffffff; color: #202124; "
-            "selection-background-color: #cfe3ff; selection-color: #202124; "
-            "border: 1px solid #c7cbd1; border-radius: 4px; }"
-        )
-        root.addWidget(self.content, 1)
-        save_memory = QPushButton("保存全局记忆")
-        save_memory.clicked.connect(self.save_global_memory)
-        root.addWidget(save_memory)
+        atomic_layout.addWidget(atomic_scroll)
+        clear_atomic = QPushButton("清空全部原子记忆")
+        clear_atomic.clicked.connect(self.clear_atomic_memories)
+        atomic_layout.addWidget(clear_atomic)
+        root.addWidget(atomic_card, 1)
         restore_row = QHBoxLayout()
         refresh = QPushButton("刷新建议")
         refresh.clicked.connect(self.refresh)
@@ -120,7 +130,7 @@ class MemoryWorkspace(QWidget):
         container = QWidget()
         self.pending = QVBoxLayout(container)
         scroll.setWidget(container)
-        root.addWidget(scroll, 1)
+        root.addWidget(scroll)
         self.refresh()
         self.refresh_atomic_memories()
 
@@ -160,7 +170,7 @@ class MemoryWorkspace(QWidget):
                     if child.widget():
                         child.widget().deleteLater()
         query = self.atomic_query.text().replace(",", " ").split()
-        rows = self.store.search(query, 10) if query else self.store.recent(10)
+        rows = self.store.search_full(query, 10) if query else self.store.recent(10)
         if not rows:
             self.atomic_results.addWidget(QLabel("没有匹配的原子记忆。"))
             return
@@ -168,7 +178,7 @@ class MemoryWorkspace(QWidget):
             # Search results intentionally expose enough context for deletion,
             # while keeping the full body out of the default list.
             ident = item["id"]
-            text = f"{item['id']}  ·  {item['type']}  ·  {', '.join(item['keywords'])}"
+            text = f"{item['id']}  ·  {item['type']}  ·  关键词组：{', '.join(item['keywords'])}\n完整记忆：{item['body']}"
             label = QLabel(text)
             label.setWordWrap(True)
             label.setMinimumWidth(0)
@@ -196,6 +206,14 @@ class MemoryWorkspace(QWidget):
             QMessageBox.warning(self, "无法删除", str(exc))
             return
         self.refresh_atomic_memories()
+
+    def clear_atomic_memories(self):
+        answer = QMessageBox.question(self, "清空原子记忆", "确定删除全部原子记忆吗？此操作不可恢复。",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.store.clear_atomic()
+            self.refresh_atomic_memories()
 
     def open_proposal(self, proposal):
         dialog = MemoryProposalDialog(proposal, self.store, self)

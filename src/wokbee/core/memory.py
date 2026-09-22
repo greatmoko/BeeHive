@@ -151,6 +151,18 @@ class MemoryStore:
             ).fetchall()
         return [{**dict(row), "keywords": json.loads(row["keywords"]), "type": row["kind"]} for row in rows]
 
+    def search_full(self, keywords, limit=10):
+        ids = [row["id"] for row in self.search(keywords, limit)]
+        if not ids:
+            return []
+        with self.connect() as db:
+            rows = [db.execute("SELECT * FROM atomic_memory WHERE id=?", (ident,)).fetchone() for ident in ids]
+        return [{**dict(row), "keywords": json.loads(row["keywords"]), "type": row["kind"]} for row in rows if row]
+
+    def clear_atomic(self):
+        with self.connect() as db:
+            db.execute("DELETE FROM atomic_memory")
+
     def delete(self, ident):
         with self.connect() as db:
             row = db.execute("SELECT id FROM atomic_memory WHERE id=?", (str(ident),)).fetchone()
