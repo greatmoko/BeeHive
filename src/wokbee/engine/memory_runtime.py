@@ -60,10 +60,22 @@ def build_memory_tools(session, store, read_records):
 
 
 def parse_json(text):
-    text = text.strip()
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("模型未返回记忆整理结果")
     if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0]
-    result = json.loads(text)
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        # Models sometimes add a short lead-in despite the strict JSON request.
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("模型未返回有效JSON")
+        try:
+            result = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError("模型返回的记忆JSON格式无效") from exc
     if not isinstance(result, dict):
         raise ValueError("记忆整理结果必须是JSON对象")
     return result
@@ -161,7 +173,12 @@ def finalize_memory(runner, req, result):
             messages.append(response)
             calls = getattr(response, "tool_calls", None) or []
             if not calls:
-                output = parse_json(message_text(response))
+                try:
+                    output = parse_json(message_text(response))
+                except ValueError:
+                    # A malformed final response must not discard the useful
+                    # base session record or surface as a fatal run error.
+                    output = {"session": fallback, "global_updates": []}
                 break
             for call in calls:
                 try:
