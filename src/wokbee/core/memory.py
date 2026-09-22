@@ -149,7 +149,7 @@ class MemoryStore:
                 "FROM atomic_memory a WHERE NOT EXISTS (SELECT 1 FROM atomic_memory b WHERE b.previous_id=a.id) "
                 "ORDER BY timestamp DESC LIMIT ?", (max(1, min(50, int(limit))),)
             ).fetchall()
-        return [{**dict(row), "keywords": json.loads(row["keywords"])} for row in rows]
+        return [{**dict(row), "keywords": json.loads(row["keywords"]), "type": row["kind"]} for row in rows]
 
     def delete(self, ident):
         with self.connect() as db:
