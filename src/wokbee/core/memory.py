@@ -142,6 +142,25 @@ class MemoryStore:
         return [{"id": r["id"], "keywords": json.loads(r["keywords"]), "type": r["kind"]}
                 for score, r in scored if score][:max(1, min(50, int(limit)))]
 
+    def recent(self, limit=10):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,keywords,kind,body,file_url,timestamp,retrieval_count,version,previous_id "
+                "FROM atomic_memory a WHERE NOT EXISTS (SELECT 1 FROM atomic_memory b WHERE b.previous_id=a.id) "
+                "ORDER BY timestamp DESC LIMIT ?", (max(1, min(50, int(limit))),)
+            ).fetchall()
+        return [{**dict(row), "keywords": json.loads(row["keywords"])} for row in rows]
+
+    def delete(self, ident):
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM atomic_memory WHERE id=?", (str(ident),)).fetchone()
+            if not row:
+                raise ValueError("原子记忆不存在")
+            child = db.execute("SELECT id FROM atomic_memory WHERE previous_id=?", (str(ident),)).fetchone()
+            if child:
+                raise ValueError("该记忆已有新版本，不能删除历史版本")
+            db.execute("DELETE FROM atomic_memory WHERE id=?", (str(ident),))
+
     def read(self, ids: list[str]):
         unique = list(dict.fromkeys(ids))
         if len(unique) > 50:

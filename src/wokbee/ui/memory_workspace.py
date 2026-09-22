@@ -3,7 +3,7 @@ import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from wokbee.core.memory import MODULES, MemoryStore
@@ -82,6 +82,17 @@ class MemoryWorkspace(QWidget):
         save.clicked.connect(self.save_thresholds)
         row.addWidget(save)
         root.addLayout(row)
+        root.addWidget(QLabel("原子记忆查询（默认显示最近 10 条）"))
+        search_row = QHBoxLayout()
+        self.atomic_query = QLineEdit()
+        self.atomic_query.setPlaceholderText("输入关键词，多个关键词用空格或逗号分隔")
+        search_row.addWidget(self.atomic_query)
+        atomic_search = QPushButton("查询")
+        atomic_search.clicked.connect(self.refresh_atomic_memories)
+        search_row.addWidget(atomic_search)
+        root.addLayout(search_row)
+        self.atomic_results = QVBoxLayout()
+        root.addLayout(self.atomic_results)
         root.addWidget(QLabel("全局记忆（单份，可直接编辑保存）"))
         self.content = QTextEdit()
         self.content.setStyleSheet(
@@ -105,6 +116,7 @@ class MemoryWorkspace(QWidget):
         scroll.setWidget(container)
         root.addWidget(scroll, 1)
         self.refresh()
+        self.refresh_atomic_memories()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -130,6 +142,43 @@ class MemoryWorkspace(QWidget):
             button.clicked.connect(lambda _, p=proposal: self.open_proposal(p))
             self.pending.addWidget(button)
         self.pending.addStretch()
+
+    def refresh_atomic_memories(self):
+        while self.atomic_results.count():
+            item = self.atomic_results.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        query = self.atomic_query.text().replace(",", " ").split()
+        rows = self.store.search(query, 10) if query else self.store.recent(10)
+        if not rows:
+            self.atomic_results.addWidget(QLabel("没有匹配的原子记忆。"))
+            return
+        for item in rows:
+            # Search results intentionally expose enough context for deletion,
+            # while keeping the full body out of the default list.
+            ident = item["id"]
+            text = f"{item['id']}  ·  {item['type']}  ·  {', '.join(item['keywords'])}"
+            label = QLabel(text)
+            label.setWordWrap(True)
+            row = QHBoxLayout()
+            row.addWidget(label, 1)
+            remove = QPushButton("删除")
+            remove.clicked.connect(lambda _, key=ident: self.delete_atomic_memory(key))
+            row.addWidget(remove)
+            self.atomic_results.addLayout(row)
+
+    def delete_atomic_memory(self, ident):
+        answer = QMessageBox.question(self, "删除原子记忆", "确定删除这条原子记忆吗？此操作不可恢复。",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.delete(ident)
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "无法删除", str(exc))
+            return
+        self.refresh_atomic_memories()
 
     def open_proposal(self, proposal):
         dialog = MemoryProposalDialog(proposal, self.store, self)
