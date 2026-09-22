@@ -33,7 +33,16 @@ def clean(value):
 
 class SessionMemory:
     def __init__(self, root: Path):
-        self.path = Path(root) / ".wokbee" / "session_memory.md"
+        # Session history belongs with the project's existing memory/ tree.
+        # WokBee projects and DeziBee requirements both pass their work root here.
+        self.path = Path(root) / "memory" / "session_memory.md"
+        legacy = Path(root) / ".wokbee" / "session_memory.md"
+        if not self.path.exists() and legacy.exists():
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_bytes(legacy.read_bytes())
+            except OSError:
+                pass
 
     def records(self):
         if not self.path.exists():

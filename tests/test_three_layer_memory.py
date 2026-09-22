@@ -37,6 +37,15 @@ class MemoryTests(unittest.TestCase):
         big = self.session.append("big", goal="中" * 3000, result="文" * 3000, unresolved="长" * 3000, keywords="词" * 3000)
         self.assertLessEqual(len(big["text"]), 1000)
 
+    def test_legacy_session_memory_is_migrated_without_deleting_source(self):
+        legacy = self.root / ".wokbee" / "session_memory.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("\n<!-- turn:legacy -->\n旧记录\n", encoding="utf-8")
+        session = SessionMemory(self.root)
+        self.assertEqual(session.path, self.root / "memory" / "session_memory.md")
+        self.assertIn("旧记录", session.path.read_text(encoding="utf-8"))
+        self.assertTrue(legacy.exists())
+
     def test_atomic_versions_counts_dedup_and_conditions(self):
         first = self.store.write(["工作电脑", "系统"], "事实", "工作电脑 Windows")
         second = self.store.write(["个人电脑", "系统"], "事实", "个人电脑 macOS")
@@ -256,6 +265,7 @@ class MemoryTests(unittest.TestCase):
         before = session.path.read_bytes()
         store.archive_session(project.id, include_memory=True)
         self.assertEqual(session.path.read_bytes(), before)
+        self.assertEqual(session.path.parent.name, "memory")
 
 
 if __name__ == "__main__":

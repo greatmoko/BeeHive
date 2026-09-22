@@ -202,7 +202,7 @@ class ProjectStoreEventsMixin:
         moved: list[str] = []
         for name in ARCHIVABLE_DIRS:
             # 明确跳过长期保留目录，防止误归档
-            if name in ("archives", "scripts", "memory", "references", "uploads", ".wokbee"):
+            if name in ("archives", "scripts", "memory", "references", "uploads"):
                 continue
             src = root / name
             if not src.exists():
@@ -217,16 +217,29 @@ class ProjectStoreEventsMixin:
             # 清空源目录内容（保留空目录）
             self._empty_dir(src)
 
-        kept = ["project.json", "archives/", "uploads/", ".wokbee/session_memory.md"]
+        kept = ["project.json", "archives/", "uploads/", "memory/session_memory.md"]
         if include_memory:
             for extra in ("memory", "scripts"):
                 src = root / extra
                 if not src.exists():
                     continue
+                session_copy = None
+                session_path = src / "session_memory.md" if extra == "memory" else None
+                if session_path and session_path.exists():
+                    # Experience cleanup may archive memory/, but session history
+                    # is permanent and must remain in the live project.
+                    session_copy = session_path.read_bytes()
                 try:
                     shutil.copytree(src, dest / extra, dirs_exist_ok=True)
+                    if session_path:
+                        archived_session = dest / extra / "session_memory.md"
+                        if archived_session.exists():
+                            archived_session.unlink()
                     moved.append(extra)
                     self._empty_dir(src)
+                    if session_path and session_copy is not None:
+                        session_path.parent.mkdir(parents=True, exist_ok=True)
+                        session_path.write_bytes(session_copy)
                 except OSError as e:
                     logger.warning("归档复制 %s 失败: %s", extra, e)
         else:
