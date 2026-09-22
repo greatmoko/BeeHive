@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from functools import wraps
 from typing import Any, Callable
 from threading import RLock
 
@@ -63,6 +64,7 @@ def wrap_read_file_soft_limit(middleware: Any, *, max_chars: int) -> None:
             continue
 
         def wrap(fn):
+            @wraps(fn)
             def wrapped(*args, **kwargs):
                 call_kwargs = dict(kwargs)
                 if "offset" not in call_kwargs and len(args) > 2:
@@ -82,6 +84,7 @@ def wrap_read_file_soft_limit(middleware: Any, *, max_chars: int) -> None:
         updates = {"func": wrap(original_func)}
         coroutine = getattr(tool, "coroutine", None)
         if inspect.iscoroutinefunction(coroutine):
+            @wraps(coroutine)
             async def wrapped_async(*args, **kwargs):
                 call_kwargs = dict(kwargs)
                 if "offset" not in call_kwargs and len(args) > 2:
