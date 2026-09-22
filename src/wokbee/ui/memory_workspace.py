@@ -16,6 +16,17 @@ class MemoryProposalDialog(QDialog):
         self.setWindowTitle("全局记忆更新建议")
         self.resize(600, 480)
         self.store, self.proposal = store, proposal
+        # Override the app-wide input stylesheet so this read-only view stays
+        # readable when the surrounding theme uses a dark editor palette.
+        self.setStyleSheet("""
+            QDialog { background: #f7f8fa; color: #202124; }
+            QLabel { color: #202124; background: transparent; }
+            QTextEdit { background: #ffffff; color: #202124;
+                selection-background-color: #cfe3ff; selection-color: #202124;
+                border: 1px solid #c7cbd1; border-radius: 4px; }
+            QPushButton { background: #ffffff; color: #202124;
+                border: 1px solid #b9bec7; border-radius: 4px; padding: 4px 18px; }
+        """)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"修改模块：{proposal['module']}"))
         details = QTextEdit()
@@ -75,6 +86,11 @@ class MemoryWorkspace(QWidget):
         root.addWidget(self.version_label)
         self.content = QTextEdit()
         self.content.setReadOnly(True)
+        self.content.setStyleSheet(
+            "QTextEdit { background: #ffffff; color: #202124; "
+            "selection-background-color: #cfe3ff; selection-color: #202124; "
+            "border: 1px solid #c7cbd1; border-radius: 4px; }"
+        )
         root.addWidget(self.content, 1)
         restore_row = QHBoxLayout()
         self.version = QSpinBox()
