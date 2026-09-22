@@ -654,7 +654,8 @@ class RunnerFlowMixin:
                     script_context_parts = list(pipe.context_parts or [])
 
                     if pipe.ok and not pipe.need_ai:
-                        # 全部为 script 步骤且成功：0 Token 完成（无 ai 步骤的纯脚本管线）
+                        # Script steps still require an AI acceptance pass so the
+                        # produced files are checked against the user's goal.
                         published: list[str] = []
                         try:
                             from wokbee.engine.script_factory import goal_wants_deliverables
@@ -665,7 +666,7 @@ class RunnerFlowMixin:
                             logger.exception("发布纯脚本管线产物失败")
                         self._emit(
                             "agent",
-                            "有序管线均为脚本且已成功，0 Token 完成。\n"
+                            "有序管线均为脚本且已成功，准备由 AI 核对产出物是否达到目标。\n"
                             + (
                                 "脚本原始产物已复制到 deliverables/："
                                 + ", ".join(published[:20])
@@ -673,7 +674,25 @@ class RunnerFlowMixin:
                                 else "保留脚本原始输出格式，未强制转换为 Markdown。"
                             ),
                         )
-                        self._emit("info", "运行结束：成功（纯脚本有序管线，未调用 LLM）")
+                        ai_turn += 1
+                        verification = self._run_agent_turn(
+                            agent,
+                            config,
+                            seen_msg_ids,
+                            req,
+                            payload={"messages": [{"role": "user", "content": (
+                                "脚本管线已经执行完成。现在只做结果验收：读取并核对实际产出物，"
+                                "对照用户目标判断是否达标。不要重新执行脚本，不要修改文件；"
+                                "请明确说明已达标项目、未达标项目和需要补救的动作。\n\n"
+                                f"用户目标：{base_message}\n脚本结果：{pipe.combined_output or '（无文本输出）'}"
+                            )}]},
+                            first=True,
+                            allow_auto_lesson=False,
+                            start_hint="脚本已完成，AI 正在核对产出物…",
+                        )
+                        if verification is not None:
+                            return verification
+                        self._emit("info", "运行结束：脚本产出已完成 AI 核对")
                         return RunResult(
                             ok=True,
                             outcome="success",

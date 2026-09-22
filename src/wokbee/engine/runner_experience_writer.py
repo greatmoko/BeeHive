@@ -295,7 +295,7 @@ class ExperienceWriterMixin:
                     f"已按成功路径写入有序步骤到 scripts/pipeline.json"
                     f"（脚本 {total_scripts} 个{order_note}；"
                     f"其中 AI 手写脚本 {ai_written_count} 个）；"
-                    f"下次按 steps 一路执行（script 自动跑 0 Token；"
+                    f"下次按 steps 一路执行（script 自动执行；"
                     f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
                     f"scripts/ 不参与归档",
                     {"scripts": lesson.scripts},
