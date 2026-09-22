@@ -336,9 +336,6 @@ class DeziBeeView(QWidget):
             return
         conv = req.active_conversation()
         meta = meta if isinstance(meta, dict) else {}
-        if meta.get("memory_proposal_id"):
-            from wokbee.ui.memory_workspace import show_memory_proposal
-            show_memory_proposal(meta["memory_proposal_id"], self)
         target = "reasoning" if str(meta.get("target") or "") == "reasoning" else "text"
         if kind == "agent_stream":
             # 流式增量：只驱动网页实时气泡，不落盘（完整 agent 事件到达时前端自动定稿去重）

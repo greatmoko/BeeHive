@@ -186,10 +186,10 @@ body {
   border-left: 3px solid var(--border); padding-left: 10px; color: var(--text2); margin: 6px 0;
 }
 
-/* ── 正文 3 行截断 + 展开 ── */
+/* ── 正文 1 行截断 + 展开 ── */
 .md.clamped {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -503,8 +503,8 @@ function onResumeApproval(approved) {
   pendingRows.clear();
 }
 
-/* ═══════════════ 正文 3 行截断 + 展开 ═══════════════ */
-const CLAMP_LINES = 3;
+/* ═══════════════ 正文 1 行截断 + 展开 ═══════════════ */
+const CLAMP_LINES = 1;
 
 function removeClampToggle(md) {
   const toggle = md.nextElementSibling;
@@ -670,6 +670,7 @@ function updateOlderButton() {
 
 /* ═══════════════ 事件渲染入口 ═══════════════ */
 function renderEvent(d) {
+  if (d.session_end) return null; // 内部轮次边界用于日志切分，不重复显示为结束气泡
   const kind = d.kind || '';
   const role = d.role || 'system';
   if (kind === 'tool') return renderTool(d);

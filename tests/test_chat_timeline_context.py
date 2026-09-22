@@ -121,6 +121,8 @@ class ChatTimelineContextTests(unittest.TestCase):
         runner, content, _ = self.run_chat({}, entrypoint="run_design")
         runner._recent_events_digest.assert_not_called()
         self.assertNotIn("近期时间线摘录", content)
+        self.assertIn("【记忆阶段】首次交互", content)
+        self.assertNotIn("获取项目需求/目标", content)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ class ModePolicy:
 
 
 _COMMON_TOOLS = "可用：联网 / 文件 / execute / Skills / MCP"
+_MEMORY_TOOLS = "三级记忆：全局记忆加载及受限更新建议 / 原子记忆按需查询与写入 / 会话记忆选择性读取与自动写入"
 MODES = {
     "run": ModePolicy(
         "run", pipeline=True, experience=True, project_metadata=True, timeline=False, design_workspace=False,
@@ -53,11 +54,11 @@ MODES = {
     ),
     "chat": ModePolicy(
         "chat", pipeline=False, experience=True, project_metadata=True, timeline=True, design_workspace=False,
-        intro="交互模式（完整能力，不跑经验管线）。", capabilities=_COMMON_TOOLS + " / 项目名称与目标工具。",
+        intro="交互模式（完整能力，不跑经验管线）。", capabilities=_COMMON_TOOLS + " / 项目名称与目标工具 / " + _MEMORY_TOOLS + "。",
     ),
     "design": ModePolicy(
         "design", pipeline=False, experience=False, project_metadata=False, timeline=False, design_workspace=True,
-        intro="设计模式（DeziBee：不跑经验管线，不注入项目经验）。", capabilities=_COMMON_TOOLS + "。",
+        intro="设计模式（DeziBee：不跑经验管线，不注入项目经验）。", capabilities=_COMMON_TOOLS + " / " + _MEMORY_TOOLS + "。",
     ),
 }
 

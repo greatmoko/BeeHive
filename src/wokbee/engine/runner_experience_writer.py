@@ -240,7 +240,7 @@ class ExperienceWriterMixin:
                                 "【AI 经验总结结果】\n\n" + "\n\n".join(preview_parts),
                                 {"phase": "lesson"},
                             )
-                        self._emit("info", "AI 经验总结完成，开始写入经验与脚本…")
+                        self._emit("info", "AI 经验总结完成，正在固化经验、管线与脚本…")
                     else:
                         self._emit("info", "无可用模型密钥，改用规则回退总结经验")
                 except Exception as e:

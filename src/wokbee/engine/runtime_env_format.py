@@ -58,6 +58,28 @@ def _format_tool_line(label: str, rt: RuntimeEnv) -> str | None:
     return f"{label}={exe}" + (f" ({ver})" if ver else "")
 
 
+def _numbered_environment_text(text: str, prefix: tuple[int, ...] = ()) -> str:
+    """Convert the environment block's existing heading/bullet hierarchy to numbers."""
+    result, item, subitem = [], 0, 0
+    for raw in str(text or "").splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            result.append("")
+        elif stripped.startswith("【") and "】" in stripped:
+            result.append(f"{'.'.join(map(str, prefix))}. {stripped}" if prefix else f"1. {stripped}")
+        elif stripped.startswith("- "):
+            item, subitem = item + 1, 0
+            number = (*prefix, item) if prefix else (1, item)
+            result.append(f"{'.'.join(map(str, number))}. {stripped[2:]}")
+        elif stripped.startswith("· "):
+            subitem += 1
+            number = (*prefix, item, subitem) if prefix else (1, item, subitem)
+            result.append(f"{'.'.join(map(str, number))}. {stripped[2:]}")
+        else:
+            result.append(raw)
+    return "\n".join(result)
+
+
 def format_runtime_env_block(
     rt: RuntimeEnv,
     *,
@@ -209,8 +231,8 @@ def build_runtime_env_settings_text(settings=None) -> str:
             "首次运行 Agent 时将自动探测并保存；也可点击下方「重新探测」。"
             "之后所有 Agent 均加载此缓存，不会重复扫描。"
         )
-    header = f"最后探测：{rt.probed_at or '未知'}\n\n"
-    return header + format_runtime_env_block(rt)
+    runtime = _numbered_environment_text(format_runtime_env_block(rt), prefix=(1, 2))
+    return f"1. 系统环境信息\n1.1. 最后探测：{rt.probed_at or '未知'}\n\n{runtime}"
 
 
 def build_execute_invocation(command: str, settings=None) -> tuple[list[str] | None, str]:
@@ -251,4 +273,3 @@ def build_execute_invocation(command: str, settings=None) -> tuple[list[str] | N
             "powershell",
         )
     return (None, "shell")
-

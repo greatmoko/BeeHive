@@ -641,47 +641,31 @@ class _ProjectWorkspace(QWidget):
             _tip(self, self.theme, "正在更新项目信息，请稍候。")
             return
 
-        text, attachments = self._actions.take_input(with_attachments=True)
         project = self.store.get(self._project_id)
         if not project:
-            if text:
-                self._actions.set_draft(text)
             return
 
         goal = (project.goal or "").strip()
         if not goal:
-            # 运行前必须有目标：弹窗让用户补填；取消则还原输入框
-            filled = _ask_multiline(
+            # 运行只校验项目目标；不取走输入框草稿或附件。
+            filled = (_ask_multiline(
                 self,
                 self.theme,
                 "请填写项目目标",
                 "当前项目目标为空，运行前需要先设置目标。",
-                text or "",
+                "",
                 min_lines=5,
-            )
+            ) or "").strip()
             if not filled:
-                if text:
-                    self._actions.set_draft(text)
-                else:
-                    _tip(self, self.theme, "请先设置项目目标后再运行。")
+                _tip(self, self.theme, "请先设置项目目标后再运行。")
                 return
             self.store.update_goal(self._project_id, filled)
             project = self.store.get(self._project_id) or project
             goal = filled
             self._schedule_essentials_refresh()
-            # 输入框内容若已用作目标，不再重复当指令；无额外指令时用目标运行
-            text = ""
 
         project = self.store.get(self._project_id) or project
-
-        if text:
-            uev = ProjectEvent(kind="user", content=text)
-            self.store.append_event(self._project_id, uev)
-            self._timeline.append_event(uev)
-        user_message = text or goal
-        if not user_message:
-            _tip(self, self.theme, "请先设置项目目标或在输入框填写指令。")
-            return
+        user_message = goal
 
         self._status_before_chat = None
         self._worker_mode = "run"
@@ -704,7 +688,7 @@ class _ProjectWorkspace(QWidget):
             self.store.settings.run_max_steps,
             parent=self,
             mode="run",
-            attachments=attachments,
+            attachments=[],
         )
         self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
@@ -745,9 +729,6 @@ class _ProjectWorkspace(QWidget):
                 except (TypeError, ValueError):
                     pass
             return
-        if meta_d.get("memory_proposal_id"):
-            from wokbee.ui.memory_workspace import show_memory_proposal
-            show_memory_proposal(meta_d["memory_proposal_id"], self)
         if kind == "agent_stream":
             # 流式增量：只驱动时间线实时气泡，不落盘（完整 agent 事件到达时再定稿）
             if visible:

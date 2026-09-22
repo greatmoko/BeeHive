@@ -392,10 +392,16 @@ class RunnerFlowMixin:
         if update:
             self._emit("user", update)
         sent_note = f"（发送时间：{_now()}）"
-        user_content = f"{question}\n\n{sent_note}"
+        memory_stage = (
+            "【记忆阶段】首次交互：理解当前用户意图后，按全局记忆规则按需检索原子记忆。"
+            if policy.name in ("chat", "design") and not has_history
+            else "【记忆阶段】非首次交互：直接处理当前问题；仅在需要项目历史或跨项目经验时按需读取会话记忆或原子记忆。"
+            if policy.name in ("chat", "design") else ""
+        )
+        user_content = "\n\n".join(part for part in (memory_stage, question, sent_note) if part)
         if recent:
             user_content = (
-                f"{question}\n\n{sent_note}\n\n"
+                f"{memory_stage}\n\n{question}\n\n{sent_note}\n\n"
                 "——\n【近期时间线摘录（供参考，回答不必复述全文）】\n"
                 f"{recent}"
             )

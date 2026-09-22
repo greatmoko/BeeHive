@@ -14,6 +14,14 @@ from wokbee.engine.runner_modes import mode_policy
 
 
 class RunnerModeTests(unittest.TestCase):
+    def test_interactive_modes_advertise_three_layer_memory(self):
+        for mode in ("chat", "design"):
+            with self.subTest(mode=mode):
+                capabilities = mode_policy(mode).capabilities
+                self.assertIn("全局记忆", capabilities)
+                self.assertIn("原子记忆", capabilities)
+                self.assertIn("会话记忆", capabilities)
+
     def test_design_directory_preparation_skips_wokbee_layout(self):
         request = SimpleNamespace(project_root=Mock())
         with patch("wokbee.engine.runner_assembly.ensure_project_layout") as layout, patch(
@@ -33,7 +41,8 @@ class RunnerModeTests(unittest.TestCase):
         names = (
             "prepare_project_root", "configure_design_write_validator", "build_chat_model",
             "ArchiveDeniedBackend", "CompositeBackend", "AccessCoerceBackend", "attach_execute_watch",
-            "SkillsStore", "McpStore", "build_runtime_env_block", "build_project_meta_tools",
+            "SkillsStore", "McpStore", "ensure_runtime_env", "build_runtime_env_settings_text",
+            "build_project_meta_tools",
             "LessonStore", "peek_pipeline", "build_file_tools", "build_credential_tools", "build_experience_tools",
             "build_ask_user_tool", "build_access_request_tool", "build_autobee_tools",
             "FilesystemMiddleware", "wrap_read_file_soft_limit", "create_deep_agent", "_get_checkpointer",
@@ -54,16 +63,21 @@ class RunnerModeTests(unittest.TestCase):
             max_steps=64, user_message="设计",
         )
         for mode in ("design", "chat", "run"):
-            with self.subTest(mode=mode), patch.multiple(
+            with self.subTest(mode=mode), patch("wokbee.core.memory.MemoryStore") as memory_store, patch.multiple(
                 "wokbee.engine.runner_agent_assembly", **dict.fromkeys(names, DEFAULT)
             ) as mocks, patch(
                 "wokbee.engine.runner_agent_assembly.wrap_tools_runtime_controls", side_effect=lambda tools, **kw: tools
             ):
+                memory_store.return_value.global_memory.return_value = {
+                    "content": {"用户画像": "", "环境信息": "", "全局规则": "", "记忆使用规则": ""}
+                }
+                memory_store.return_value.global_text.return_value = ""
+                memory_store.return_value.thresholds.return_value = (.8, .3)
                 mocks["SkillsStore"].return_value.list_enabled.return_value = []
                 mocks["SkillsStore"].return_value.global_skills_paths.return_value = []
                 mocks["SkillsStore"].return_value.skill_routes.return_value = []
                 mocks["McpStore"].return_value.list_enabled.return_value = []
-                mocks["build_runtime_env_block"].return_value = "运行环境"
+                mocks["build_runtime_env_settings_text"].return_value = "环境信息"
                 mocks["LessonStore"].return_value.prompt_digest.return_value = "经验"
                 mocks["LessonStore"].return_value.is_empty.return_value = True
                 for name in ("build_file_tools", "build_credential_tools", "build_autobee_tools", "build_project_meta_tools", "build_experience_tools"):

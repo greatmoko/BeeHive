@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 
 from deepagents import FilesystemMiddleware, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
@@ -43,7 +44,7 @@ from wokbee.engine.runner_assembly import configure_design_write_validator, prep
 from wokbee.engine.runner_models import RunRequest
 from wokbee.engine.runner_modes import mode_policy
 from wokbee.engine.runner_sessions import get_checkpointer as _get_checkpointer, remember_agent
-from wokbee.engine.runtime_env import build_runtime_env_block
+from wokbee.engine.runtime_env import build_runtime_env_settings_text, ensure_runtime_env
 from wokbee.engine.script_runner import peek_pipeline
 
 logger = logging.getLogger("wokbee")
@@ -72,15 +73,19 @@ class AgentAssemblyMixin:
             timeout=self.settings.model_timeout_seconds,
         )
         from wokbee.core.memory import MemoryStore, SessionMemory
-        from wokbee.engine.memory_runtime import MEMORY_PROMPT, build_memory_tools
+        from wokbee.engine.memory_runtime import (
+            build_memory_tools,
+        )
         from wokbee.engine.memory_context import SessionMemoryMiddleware
 
         self._memory_model = model
         self._memory_store = MemoryStore()
-        self._memory_global = self._memory_store.global_text(self._memory_store.global_memory())
         self._memory_reads = getattr(self, "_memory_reads", {})
         session_memory = SessionMemory(req.project_root)
-        memory_tools = build_memory_tools(session_memory, self._memory_store, self._memory_reads)
+        memory_tools = build_memory_tools(
+            session_memory, self._memory_store, self._memory_reads,
+            memory_state=getattr(self, "_memory_notifications", None),
+        )
         project_inner = ArchiveDeniedBackend(
             root_dir=str(req.project_root),
             virtual_mode=True,
@@ -226,15 +231,23 @@ class AgentAssemblyMixin:
                 )
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
-        system_prompt = static_system_prompt(mode=mode) + MEMORY_PROMPT
-        runtime_env_block = build_runtime_env_block(
-            project_root=str(req.project_root),
-            model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
-            policy=req.approval.summary(),
-            settings=self.settings,
-            design_mode=policy.design_workspace,
-        )
+        system_prompt = static_system_prompt(mode=mode)
+        # 环境信息只保存到全局记忆；会话由全局记忆快照统一注入，不单独加载环境块。
+        ensure_runtime_env(self.settings)
+        try:
+            self._memory_store.ensure_environment(
+                build_runtime_env_settings_text(self.settings)
+            )
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            logger.warning("首次环境信息写入全局记忆失败，继续使用当前记忆：%s", exc)
+        self._memory_global = self._memory_store.global_text(self._memory_store.global_memory())
         context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
+        if policy.pipeline:
+            context_extra.insert(
+                0,
+                "- 运行阶段：首次运行（先获取项目需求/目标，再按全局记忆规则检索原子记忆）"
+                if first_run else "- 运行阶段：非首次运行（直接按当前阶段提示词处理；非必要不调取记忆）",
+            )
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -242,10 +255,8 @@ class AgentAssemblyMixin:
             max_steps=req.max_steps if policy.pipeline else None,
             experience_digest=experience_digest,
             mode=mode,
-            runtime_env_block=runtime_env_block,
             extra_lines=context_extra or None,
         )
-
         project_tools = build_project_meta_tools(
             project_id=req.project.id,
             settings=self.settings,

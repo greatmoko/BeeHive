@@ -54,6 +54,7 @@ def _event_to_dict(ev: ProjectEvent) -> dict:
         "phase": phase,
         "time": ev.created_at,
         "content": _redact_display(body),
+        "session_end": bool(meta.get("session_end")),
     }
     if ev.kind == "deliverables":
         d["deliverable"] = True

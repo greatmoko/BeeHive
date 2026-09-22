@@ -32,7 +32,7 @@ from wokbee.engine.script_runner import (
     validate_pipeline_script_paths,
 )
 from wokbee.engine.runner import StepLimitExceeded, _StepBudget
-from wokbee.engine.runtime_env import RuntimeEnv, build_runtime_env_block, format_runtime_env_block
+from wokbee.engine.runtime_env import RuntimeEnv, build_runtime_env_block, build_runtime_env_settings_text, format_runtime_env_block
 from wokbee.engine.archive_guard import ArchiveDeniedBackend
 from wokbee.engine.script_runner import group_phases
 from wokbee.engine.tool_truncate import ToolConcurrencyLimiter
@@ -74,6 +74,15 @@ class WokBeeExecutionControlTests(unittest.TestCase):
         block = format_runtime_env_block(runtime)
         self.assertIn("应用运行目录（仅系统内部，不是 Agent 工作目录）", block)
         self.assertIn(r"C:\app-runtime", block)
+
+    def test_settings_environment_text_uses_hierarchical_numbers(self):
+        runtime = RuntimeEnv(os_name="Windows", python_exe=r"C:\Python\python.exe", probed_at="2026-09-23")
+        with patch("wokbee.engine.runtime_env_format.get_runtime_env", return_value=runtime):
+            text = build_runtime_env_settings_text()
+        self.assertIn("1. 系统环境信息", text)
+        self.assertIn("1.1. 最后探测", text)
+        self.assertIn("1.2. 【运行环境】", text)
+        self.assertIn("1.2.1. ", text)
 
     def test_agent_runtime_block_uses_project_root_not_cached_cwd(self):
         runtime = RuntimeEnv(
