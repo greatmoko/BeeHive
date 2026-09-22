@@ -3,7 +3,8 @@ import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QLineEdit, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QSizePolicy, QSpinBox, QTextEdit, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from wokbee.core.memory import MODULES, MemoryStore
@@ -110,14 +111,13 @@ class MemoryWorkspace(QWidget):
         atomic_search.clicked.connect(self.refresh_atomic_memories)
         search_row.addWidget(atomic_search)
         atomic_layout.addLayout(search_row)
-        atomic_scroll = QScrollArea()
-        atomic_scroll.setWidgetResizable(True)
-        atomic_scroll.setMaximumHeight(190)
-        atomic_container = QWidget()
-        self.atomic_results = QVBoxLayout(atomic_container)
-        self.atomic_results.setContentsMargins(4, 4, 4, 4)
-        atomic_scroll.setWidget(atomic_container)
-        atomic_layout.addWidget(atomic_scroll)
+        self.atomic_table = QTableWidget(0, 4)
+        self.atomic_table.setHorizontalHeaderLabels(["ID", "类型", "关键词组", "操作"])
+        self.atomic_table.setMinimumHeight(180)
+        self.atomic_table.setAlternatingRowColors(True)
+        self.atomic_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.atomic_table.horizontalHeader().setStretchLastSection(True)
+        atomic_layout.addWidget(self.atomic_table)
         clear_atomic = QPushButton("清空全部原子记忆")
         clear_atomic.clicked.connect(self.clear_atomic_memories)
         atomic_layout.addWidget(clear_atomic)
@@ -163,39 +163,40 @@ class MemoryWorkspace(QWidget):
         self.pending.addStretch()
 
     def refresh_atomic_memories(self):
-        while self.atomic_results.count():
-            item = self.atomic_results.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                while item.layout().count():
-                    child = item.layout().takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
         query = self.atomic_query.text().replace(",", " ").split()
         rows = self.store.search_full(query, 10) if query else self.store.recent(10)
-        if not rows:
-            self.atomic_results.addWidget(QLabel("没有匹配的原子记忆。"))
-            return
-        for item in rows:
-            # Search results intentionally expose enough context for deletion,
-            # while keeping the full body out of the default list.
-            ident = item["id"]
-            text = f"{item['id']}  ·  {item['type']}  ·  关键词组：{', '.join(item['keywords'])}\n完整记忆：{item['body']}"
-            label = QLabel(text)
-            label.setWordWrap(True)
-            label.setMinimumWidth(0)
-            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            row_widget = QWidget()
-            row_widget.setMinimumHeight(34)
-            row = QHBoxLayout(row_widget)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.addWidget(label, 1)
+        self.atomic_table.setRowCount(0)
+        for row, item in enumerate(rows):
+            self.atomic_table.insertRow(row)
+            self.atomic_table.setItem(row, 0, QTableWidgetItem(str(item["id"])))
+            self.atomic_table.setItem(row, 1, QTableWidgetItem(item["type"]))
+            self.atomic_table.setItem(row, 2, QTableWidgetItem(", ".join(item["keywords"])))
+            actions = QWidget()
+            action_layout = QHBoxLayout(actions)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            view = QPushButton("查看")
+            view.clicked.connect(lambda _, value=item: self.show_atomic_detail(value))
             remove = QPushButton("删除")
-            remove.setFixedWidth(58)
-            remove.clicked.connect(lambda _, key=ident: self.delete_atomic_memory(key))
-            row.addWidget(remove)
-            self.atomic_results.addWidget(row_widget)
+            remove.clicked.connect(lambda _, key=item["id"]: self.delete_atomic_memory(key))
+            action_layout.addWidget(view)
+            action_layout.addWidget(remove)
+            self.atomic_table.setCellWidget(row, 3, actions)
+        self.atomic_table.resizeColumnsToContents()
+
+    def show_atomic_detail(self, item):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"原子记忆详情 · {item['id']}")
+        dialog.resize(620, 420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"ID：{item['id']}\n类型：{item['type']}\n关键词组：{', '.join(item['keywords'])}"))
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(item["body"])
+        layout.addWidget(body)
+        close = QPushButton("关闭")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
 
     def delete_atomic_memory(self, ident):
         answer = QMessageBox.question(self, "删除原子记忆", "确定删除这条原子记忆吗？此操作不可恢复。",
