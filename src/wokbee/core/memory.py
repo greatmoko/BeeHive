@@ -116,6 +116,8 @@ class MemoryStore:
             """)
             content = {name: MEMORY_RULES if name == "记忆使用规则" else "" for name in MODULES}
             db.execute("INSERT OR IGNORE INTO global_memory(version,content,timestamp) VALUES (1,?,?)", (json.dumps(content, ensure_ascii=False), now()))
+            # Migrate older builds that stored one row per global-memory version.
+            db.execute("DELETE FROM global_memory WHERE version < (SELECT MAX(version) FROM global_memory)")
 
     @contextmanager
     def connect(self):
@@ -178,11 +180,17 @@ class MemoryStore:
             return ident
 
     def global_memory(self, version=None):
+        """Return the single current global memory document.
+
+        ``version`` is accepted for compatibility with older callers but is
+        intentionally ignored; global memory no longer has user-visible
+        versions or history.
+        """
         with self.connect() as db:
-            row = db.execute("SELECT * FROM global_memory WHERE version=?", (version,)).fetchone() if version else db.execute("SELECT * FROM global_memory ORDER BY version DESC LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM global_memory ORDER BY version DESC LIMIT 1").fetchone()
         if row is None:
-            raise ValueError("全局记忆版本不存在")
-        return {"version": row["version"], "content": json.loads(row["content"])}
+            raise ValueError("全局记忆不存在")
+        return {"content": json.loads(row["content"])}
 
     @staticmethod
     def global_text(snapshot):
@@ -204,7 +212,7 @@ class MemoryStore:
                 return row["id"]
             ident = uuid.uuid4().hex
             db.execute("INSERT INTO memory_proposals VALUES (?,?,?,?,?,?,'pending',?)",
-                       (ident, module, old, new, str(reason), snapshot["version"], now()))
+                       (ident, module, old, new, str(reason), 1, now()))
         return ident
 
     def proposals(self):
@@ -226,16 +234,11 @@ class MemoryStore:
                 content[proposal["module"]] = proposal["new"]
                 if len(self.global_text({"content": content})) > 5000:
                     raise ValueError("全局记忆总长度不可超过5000字")
-                db.execute("INSERT INTO global_memory(content,timestamp) VALUES (?,?)", (json.dumps(content, ensure_ascii=False), now()))
+                db.execute("UPDATE global_memory SET content=?, timestamp=?", (json.dumps(content, ensure_ascii=False), now()))
             db.execute("UPDATE memory_proposals SET status=? WHERE id=?", ("accepted" if accept else "rejected", ident))
 
-    def restore(self, version):
-        snapshot = self.global_memory(version)
-        with self.connect() as db:
-            db.execute("INSERT INTO global_memory(content,timestamp) VALUES (?,?)", (json.dumps(snapshot["content"], ensure_ascii=False), now()))
-
     def save_global(self, content):
-        """Save a user-edited global memory snapshot as a new immutable version."""
+        """Replace the single user-editable global memory document."""
         if not isinstance(content, dict) or any(name not in content for name in MODULES):
             raise ValueError("全局记忆必须包含全部四个模块")
         normalized = {name: str(content.get(name) or "").strip() for name in MODULES}
@@ -243,13 +246,10 @@ class MemoryStore:
             raise ValueError("全局记忆总长度不可超过5000字")
         current = self.global_memory()
         if normalized == current["content"]:
-            return current["version"]
+            return False
         with self.connect() as db:
-            row = db.execute(
-                "INSERT INTO global_memory(content,timestamp) VALUES (?,?) RETURNING version",
-                (json.dumps(normalized, ensure_ascii=False), now()),
-            ).fetchone()
-        return int(row["version"])
+            db.execute("UPDATE global_memory SET content=?, timestamp=?", (json.dumps(normalized, ensure_ascii=False), now()))
+        return True
 
     def thresholds(self):
         with self.connect() as db:

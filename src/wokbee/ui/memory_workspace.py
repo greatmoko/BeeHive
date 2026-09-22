@@ -82,8 +82,7 @@ class MemoryWorkspace(QWidget):
         save.clicked.connect(self.save_thresholds)
         row.addWidget(save)
         root.addLayout(row)
-        self.version_label = QLabel()
-        root.addWidget(self.version_label)
+        root.addWidget(QLabel("全局记忆（单份，可直接编辑保存）"))
         self.content = QTextEdit()
         self.content.setStyleSheet(
             "QTextEdit { background: #ffffff; color: #202124; "
@@ -91,17 +90,10 @@ class MemoryWorkspace(QWidget):
             "border: 1px solid #c7cbd1; border-radius: 4px; }"
         )
         root.addWidget(self.content, 1)
-        save_memory = QPushButton("保存为新版本")
+        save_memory = QPushButton("保存全局记忆")
         save_memory.clicked.connect(self.save_global_memory)
         root.addWidget(save_memory)
         restore_row = QHBoxLayout()
-        self.version = QSpinBox()
-        self.version.setMinimum(1)
-        restore_row.addWidget(QLabel("恢复历史版本"))
-        restore_row.addWidget(self.version)
-        restore = QPushButton("恢复此版本")
-        restore.clicked.connect(self.restore)
-        restore_row.addWidget(restore)
         refresh = QPushButton("刷新建议")
         refresh.clicked.connect(self.refresh)
         restore_row.addWidget(refresh)
@@ -124,10 +116,7 @@ class MemoryWorkspace(QWidget):
         self.target.setValue(round(target * 100))
         snapshot = self.store.global_memory()
         text = self.store.global_text(snapshot)
-        self.version_label.setText(f"全局记忆 v{snapshot['version']} · {len(text)}/5000 字")
         self.content.setPlainText(text)
-        self.version.setMaximum(snapshot["version"])
-        self.version.setValue(max(1, snapshot["version"] - 1))
         while self.pending.count():
             item = self.pending.takeAt(0)
             if item.widget():
@@ -161,17 +150,9 @@ class MemoryWorkspace(QWidget):
                 lines = block.splitlines()
                 if lines and lines[0].startswith("【") and lines[0].endswith("】"):
                     parsed[lines[0][1:-1]] = "\n".join(lines[1:]).strip()
-            version = self.store.save_global({name: parsed.get(name, "") for name in MODULES})
+            changed = self.store.save_global({name: parsed.get(name, "") for name in MODULES})
         except (ValueError, OSError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "无法保存全局记忆", str(exc))
             return
         self.refresh()
-        QMessageBox.information(self, "已保存", f"全局记忆已保存为 v{version}。")
-
-    def restore(self):
-        answer = QMessageBox.question(self, "恢复全局记忆", f"将版本 {self.version.value()} 恢复为一个新版本？",
-                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                      QMessageBox.StandardButton.No)
-        if answer == QMessageBox.StandardButton.Yes:
-            self.store.restore(self.version.value())
-            self.refresh()
+        QMessageBox.information(self, "已保存", "全局记忆已保存。" if changed else "内容未变化。")
