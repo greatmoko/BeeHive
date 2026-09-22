@@ -181,10 +181,15 @@ def finalize_memory(runner, req, result):
                     output = {"session": fallback, "global_updates": []}
                 break
             for call in calls:
+                tool_name = str(call.get("name") or "记忆工具")
+                runner._emit("info", f"记忆整理正在调用：{tool_name}", {"memory_tool": tool_name})
                 try:
                     value = tool_map[call["name"]].invoke(call["args"])
                 except Exception as exc:
                     value = f"记忆工具错误：{exc}"
+                    runner._emit("error", f"记忆工具调用失败：{tool_name}：{exc}", {"memory_tool": tool_name})
+                else:
+                    runner._emit("info", f"记忆工具已完成：{tool_name}", {"memory_tool": tool_name})
                 messages.append(ToolMessage(content=str(value), tool_call_id=call["id"]))
         if output is None:
             raise ValueError("记忆整理工具轮数已达上限")
