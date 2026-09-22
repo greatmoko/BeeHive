@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sysprompt import TOKBEE_SYSTEM_PROMPT
+
 import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -70,7 +72,7 @@ class ProviderOptions:
 class SessionSettings:
     provider: str = ""
     model_id: str = ""
-    system_prompt: str = "You are a helpful assistant."
+    system_prompt: str = TOKBEE_SYSTEM_PROMPT
     # None = 未设置（请求体不发送该字段）
     temperature: float | None = 0.7
     top_p: float | None = 1.0
@@ -142,7 +144,7 @@ class SessionSettings:
         return cls(
             provider=str(d.get("provider") or ""),
             model_id=str(d.get("model_id") or d.get("modelId") or ""),
-            system_prompt=str(d.get("system_prompt") or "You are a helpful assistant."),
+            system_prompt=str(d.get("system_prompt") or TOKBEE_SYSTEM_PROMPT),
             temperature=_opt_float(temp),
             top_p=_opt_float(top_p),
             max_tokens=_opt_int(max_tokens),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sysprompt import ROLE_GENERATION_SYSTEM_PROMPT
+
 import logging
 
 from PySide6.QtCore import Qt, Signal, QThread
@@ -66,6 +68,7 @@ class _SubNav(QFrame):
         ("session_defaults", "⚙", "TokBee 设置"),
         ("wokbee_settings", "🐝", "WokBee 设置"),
         ("dezibee_settings", "🎨", "DeziBee 设置"),
+        ("memory", "🧩", "记忆系统"),
         ("skills", "📚", "Skills"),
         ("credentials", "🔑", "凭据库"),
         ("mcp", "🔌", "MCP"),
@@ -111,7 +114,6 @@ class _SubNav(QFrame):
 
     def select(self, nav_id: str):
         self._on_click(nav_id)
-
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,18 +223,13 @@ class _RoleGenWorker(QThread):
     done = Signal(str)   # content
     error = Signal(str)
 
-    _DEFAULT_PROMPT = (
-        "你是一个 AI 角色 System Prompt 专家。根据用户给出的角色名称，"
-        "撰写一份专业、详细的 System Prompt，定义该角色的身份、能力范围、"
-        "行为准则和输出风格。直接输出 Prompt 内容，不要加标题或解释。"
-    )
 
     def __init__(self, model: ResolvedModel, role_name: str,
                  system_prompt: str = "", parent=None):
         super().__init__(parent)
         self._model = model
         self._role_name = role_name
-        self._system_prompt = system_prompt or self._DEFAULT_PROMPT
+        self._system_prompt = system_prompt or ROLE_GENERATION_SYSTEM_PROMPT
 
     def run(self):
         try:
@@ -769,6 +766,11 @@ class AutomationView(QWidget):
         dz_page = DeziBeeSettingsWorkspace(self.theme, ab_settings)
         self._pages["dezibee_settings"] = dz_page
         self._stack.addWidget(dz_page)
+
+        from wokbee.ui.memory_workspace import MemoryWorkspace
+        memory_page = MemoryWorkspace(self.theme)
+        self._pages["memory"] = memory_page
+        self._stack.addWidget(memory_page)
 
         from wokbee.ui.skills_workspace import SkillsWorkspace
         from wokbee.core.skills_store import SkillsStore

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -59,10 +60,9 @@ from wokbee.engine.cache_prefix import (
     compose_user_with_context,
     prefix_fingerprint,
     sort_tools_by_name,
-    static_system_prompt,
     tool_name_of,
-    wrap_tools_truncate_results,
 )
+from sysprompt import static_system_prompt
 from wokbee.engine.ask_user import (
     build_ask_user_tool,
     is_ask_user_interrupt,
@@ -130,7 +130,6 @@ _StepBudget = StepBudget  # 私有旧名兼容
 # 【会话上下文】块的固定首行，用作「是否已注入」的稳定哨兵（内容可随项目变更，
 # 但首行字面量恒定）。判定已注入时以此为准，不依赖 project.title/goal 等易变内容。
 _CONTEXT_SENTINEL = "【会话上下文】"
-
 
 
 class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
@@ -313,22 +312,27 @@ class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
     def _wait_approval(self, pending: list[dict]) -> list[dict]:
         self._approval_event.clear()
         self._approval_decisions = None
+        self._approval_timed_out = False
+        try:
+            timeout = float(self.settings.get("approval_timeout_seconds", 43200))
+        except (TypeError, ValueError, OverflowError):
+            timeout = 43200.0
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = 43200.0
+        deadline = time.monotonic() + timeout
         if self.on_approval_needed:
             self.on_approval_needed(pending)
-        # 总超时兜底（真实 deadline，避免窗口关闭/审批无响应时线程永久阻塞）；默认 1 小时
-        deadline = time.monotonic() + (
-            float(getattr(self, "_approval_wait_timeout", 3600.0) or 3600.0)
-        )
-        cancelled = False
-        while not self._approval_event.wait(timeout=0.5):
+        while True:
             if self._cancel.is_set():
-                cancelled = True
-                break
-            if time.monotonic() >= deadline:
+                return [{"type": "reject", "message": "用户取消"} for _ in pending]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._approval_timed_out = True
                 logger.warning("审批等待超时，自动拒绝")
-                cancelled = True
+                return [{"type": "reject", "message": "审批等待超时"} for _ in pending]
+            if self._approval_event.wait(timeout=min(0.5, remaining)):
                 break
-        if cancelled and self._cancel.is_set():
+        if self._cancel.is_set():
             return [{"type": "reject", "message": "用户取消"} for _ in pending]
         decisions = self._approval_decisions or [
             {"type": "reject", "message": "无审批结果"} for _ in pending

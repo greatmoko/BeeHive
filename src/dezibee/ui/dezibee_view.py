@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -23,7 +25,7 @@ from wokbee.core.settings import WokBeeSettings
 
 from dezibee.core.models import Conversation, Requirement
 from dezibee.core.store import DeziBeeStore
-from dezibee.core.services import DeziBeeWorker, build_design_prompt
+from dezibee.core.services import DeziBeeWorker
 from dezibee.ui.sidebar import DeziBeeSidebar
 from dezibee.ui.workspace import DeziBeeWorkspace
 
@@ -313,6 +315,7 @@ class DeziBeeView(QWidget):
         worker.event_emitted.connect(self._on_agent_event)
         worker.finished_result.connect(self._on_agent_finished)
         worker.ask_user_needed.connect(self._on_ask_user_needed)
+        worker.approval_needed.connect(self._on_approval_needed)
         worker.model_error.connect(self._on_model_error)
         self._workers[req.id] = worker
         # 列表项立刻亮起「运行中」标识
@@ -320,8 +323,7 @@ class DeziBeeView(QWidget):
         worker.start()
 
     def _build_user_message(self, req: Requirement, text: str) -> str:
-        prompt = build_design_prompt(req)
-        return f"{prompt}\n\n【本轮指令】\n{text}"
+        return text
 
     # ── Agent 事件回 UI（按需求隔离：落盘归属运行中的需求，渲染跟随当前查看） ──
     def _on_agent_event(self, kind: str, content: str, meta: dict):
@@ -334,6 +336,9 @@ class DeziBeeView(QWidget):
             return
         conv = req.active_conversation()
         meta = meta if isinstance(meta, dict) else {}
+        if meta.get("memory_proposal_id"):
+            from wokbee.ui.memory_workspace import show_memory_proposal
+            show_memory_proposal(meta["memory_proposal_id"], self)
         target = "reasoning" if str(meta.get("target") or "") == "reasoning" else "text"
         if kind == "agent_stream":
             # 流式增量：只驱动网页实时气泡，不落盘（完整 agent 事件到达时前端自动定稿去重）
@@ -341,7 +346,7 @@ class DeziBeeView(QWidget):
                 self.workspace.chat_log.append_stream(target, content)
             return
         # 记录到归属需求的对话（agent/user/error/info/tool），工具事件保留结构化 meta
-        if kind in ("agent", "user", "error", "info", "tool"):
+        if kind in ("agent", "user", "error", "info", "tool", "approval"):
             self._append_conv_event(conv, kind, content, meta)
             # 只有正在查看该需求时才渲染，避免对话串台
             if self.sidebar.current_selected() == req_id:
@@ -357,6 +362,47 @@ class DeziBeeView(QWidget):
             if w is sender:
                 return rid
         return None
+
+    def _on_approval_needed(self, pending: object):
+        from shiboken6 import isValid
+
+        # 捕获发起审批的 worker，弹窗期间切换需求也不能把决定发给别的任务。
+        worker = self._workers.get(self._sender_req_id() or "")
+        if worker is None or not worker.isRunning():
+            return
+        items = pending if isinstance(pending, list) else []
+        if not items:
+            return
+        dlg = QDialog(self.window() or self)
+        dlg.setWindowTitle(f"DeziBee 操作审批 · {worker._req.title}（{worker._req.id}）")
+        dlg.resize(640, 460)
+        dlg.setStyleSheet(f"background: {self.theme.colors['content_bg']}; color: {self.theme.colors['text']};")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("以下工具调用尚未执行，请检查操作及完整参数："))
+        details = QTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText(json.dumps(items, ensure_ascii=False, indent=2, default=str))
+        layout.addWidget(details)
+        row = QHBoxLayout()
+        row.addStretch()
+        reject = QPushButton("全部拒绝")
+        approve = QPushButton("全部批准")
+        approve.setAutoDefault(False)
+        reject.setDefault(True)
+        reject.clicked.connect(dlg.reject)
+        approve.clicked.connect(dlg.accept)
+        row.addWidget(reject)
+        row.addWidget(approve)
+        layout.addLayout(row)
+        # 取消或审批超时导致 worker 退出时，关闭失效弹窗。
+        worker.finished.connect(dlg.reject)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        if isValid(worker):
+            worker.finished.disconnect(dlg.reject)
+        dlg.deleteLater()
+        if isValid(worker) and worker.isRunning():
+            decision = {"type": "approve"} if accepted else {"type": "reject", "message": "用户拒绝"}
+            worker.resolve_approval([dict(decision) for _ in items])
 
     def _on_ask_user_needed(self, payload: object):
         """主线程弹窗收集澄清答案，回传给发出请求的那个 worker。"""

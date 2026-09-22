@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from sysprompt import ASK_USER_TOOL_DESCRIPTION
+
 from typing import Any, Literal
 
 from langchain_core.tools import tool
@@ -35,17 +37,6 @@ class ClarifyQuestion(BaseModel):
 class AskUserPayload(BaseModel):
     type: Literal["ask_user"] = "ask_user"
     questions: list[ClarifyQuestion]
-
-
-ASK_USER_TOOL_DESCRIPTION = """当你不确定用户意图、目标范围、安装位置、风格偏好等时，必须调用本工具向用户提问，而不是猜测。
-
-规则：
-- 一次可问 1～5 个问题；优先选择题，少用开放题。
-- mode=single 单选；mode=multi 多选。
-- options 只写具体候选项；不要写「其他/自定义」（系统会自动加最后一项）。
-- allow_custom=true（默认）时用户可填自定义内容。
-- 收到用户答案后再继续执行。
-"""
 
 
 def is_ask_user_interrupt(value: Any) -> bool:

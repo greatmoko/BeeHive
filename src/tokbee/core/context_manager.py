@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sysprompt import SUMMARY_SYSTEM_PROMPT
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -232,13 +234,6 @@ def mechanical_summary(messages: list[dict], previous_summary: str = "") -> str:
         "以下是对话较早部分的压缩摘要，请在后续回复中沿用其中的关键事实与约定：\n"
         + body
     )
-
-
-SUMMARY_SYSTEM_PROMPT = (
-    "你是对话摘要助手。请将给定的较早对话压缩为简洁中文摘要，"
-    "保留：目标、关键事实、已做决定、未完成事项、用户偏好。"
-    "不要复述寒暄；不要编造未出现的信息；控制在 600 字以内。"
-)
 
 
 def build_summary_prompt_messages(

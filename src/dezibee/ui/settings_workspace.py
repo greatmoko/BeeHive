@@ -29,13 +29,15 @@ from tokbee.ui.combo_style import (
 from tokbee.ui.styles.theme import Theme
 
 from wokbee.core.settings import WokBeeSettings
-from wokbee.ui.dialogs import tip as _tip
+from wokbee.ui.dialogs import (
+    apply_flags_to_checks, build_approval_checkboxes, flags_from_checks, tip as _tip,
+)
 
 from dezibee.core.store import DeziBeeStore
 
 
 class DeziBeeSettingsWorkspace(QWidget):
-    """DeziBee 设置：需求工作文件夹。"""
+    """DeziBee 设置：工作文件夹、审核策略与执行限制。"""
 
     def __init__(
         self,
@@ -65,7 +67,7 @@ class DeziBeeSettingsWorkspace(QWidget):
             "background: transparent; border: none;"
         )
         hl.addWidget(title)
-        intro = QLabel("配置 DeziBee（AI 产品设计）的需求工作文件夹。")
+        intro = QLabel("配置 DeziBee（AI 产品设计）的工作文件夹、审核策略与执行限制。")
         intro.setWordWrap(True)
         intro.setStyleSheet(hint_label_qss(c))
         hl.addWidget(intro)
@@ -120,6 +122,17 @@ class DeziBeeSettingsWorkspace(QWidget):
         terminal_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(terminal_hint)
 
+        bl.addWidget(self._section_label("审核策略（勾选 = 免审）"))
+        approval_box, self._approval_checks = build_approval_checkboxes(self.theme)
+        bl.addWidget(approval_box)
+        approval_hint = QLabel(
+            "未勾选的级别在执行前需要人工审批。高危操作包含本机命令（execute）。"
+            "此配置独立于 WokBee，适用于全部 DeziBee 需求，保存后从下一轮交互生效。"
+        )
+        approval_hint.setWordWrap(True)
+        approval_hint.setStyleSheet(hint_label_qss(c))
+        bl.addWidget(approval_hint)
+
         bl.addWidget(self._section_label("Agent 执行限制"))
         limit_hint = QLabel("修改后对下一轮执行生效；正在运行的 Agent 保持本轮启动时的限制。")
         limit_hint.setWordWrap(True)
@@ -127,7 +140,7 @@ class DeziBeeSettingsWorkspace(QWidget):
         bl.addWidget(limit_hint)
         self._limit_fields = {}
         for key, label, unit, description, minimum, maximum in (
-            ("max_steps", "max_steps", "步", "单轮 Agent 最大逻辑步数，包含工具调用更新。", 1, 500),
+            ("max_steps", "聊天最大步数", "步", "单轮 Agent 最大逻辑步数，包含工具调用更新。", 1, 500),
             ("max_parallel_tools", "max_parallel_tools", "个", "同时运行的工具数量。", 1, 16),
             ("ai_interval_ms", "ai_interval_ms", "毫秒", "模型或工具调用之间的等待时间，0 表示不等待。", 0, 60000),
             ("tool_timeout_seconds", "tool_timeout_seconds", "秒", "单个工具执行超时时间。", 5, 3600),
@@ -203,11 +216,12 @@ class DeziBeeSettingsWorkspace(QWidget):
         self._stat.setText(f"当前文件夹下已有 {count} 个需求。")
 
     def _load(self):
+        apply_flags_to_checks(self._approval_checks, self.settings.dezibee_approval)
         self._path_edit.setText(str(self.settings.dezibee_work_root))
         self._update_stat()
         self._reload_terminals()
         values = {
-            "max_steps": self.settings.max_steps,
+            "max_steps": self.settings.chat_max_steps,
             "max_parallel_tools": self.settings.max_parallel_tools,
             "ai_interval_ms": self.settings.ai_interval_ms,
             "tool_timeout_seconds": self.settings.tool_timeout_seconds,
@@ -263,11 +277,12 @@ class DeziBeeSettingsWorkspace(QWidget):
             return
         self.settings.dezibee_work_root = path
         self.settings.terminal_app = str(self._terminal_combo.currentData() or "cmd")
-        self.settings.max_steps = values["max_steps"]
+        self.settings.chat_max_steps = values["max_steps"]
         self.settings.max_parallel_tools = values["max_parallel_tools"]
         self.settings.ai_interval_ms = values["ai_interval_ms"]
         self.settings.tool_timeout_seconds = values["tool_timeout_seconds"]
         self.settings.model_timeout_seconds = values["model_timeout_seconds"]
+        self.settings.dezibee_approval = flags_from_checks(self._approval_checks)
         self.settings.save()
         self._path_edit.setText(str(path))
         self._update_stat()

@@ -208,7 +208,7 @@ class LessonWorker(QThread):
             user_message=self._user_message,
             resolved=resolved,  # type: ignore[arg-type]
             approval=self._project.approval.copy(),
-            max_steps=self._settings.max_steps,
+            max_steps=self._settings.run_max_steps,
         )
         self.runner.on_event = self._on_event
         try:

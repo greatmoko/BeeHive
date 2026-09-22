@@ -26,6 +26,10 @@ _DENY_MSG = (
     "请仅使用 workspace/、uploads/、deliverables/、memory/（最新经验）、scripts/、runs/。"
 )
 
+EXECUTE_OUTPUT_MAX_BYTES = 30_000
+EXECUTE_OUTPUT_HEAD_CHARS = 10_000
+EXECUTE_OUTPUT_TAIL_CHARS = 10_000
+
 _ARCHIVES_RE = re.compile(r"(^|[/\\])archives([/\\]|$)", re.IGNORECASE)
 # normalize_agent_path 只处理 Windows 盘符绝对路径（语义不变）
 _WIN_ABS_RE = re.compile(r"^[a-zA-Z]:[/\\]")
@@ -167,6 +171,9 @@ class ArchiveDeniedBackend(LocalShellBackend):
     # Serialize read/modify/write across project backend instances.
     # ponytail: process-wide lock; use per-path locks if concurrent writes become a bottleneck.
     _file_lock = RLock()
+
+    def __init__(self, *args, max_output_bytes: int = EXECUTE_OUTPUT_MAX_BYTES, **kwargs):
+        super().__init__(*args, max_output_bytes=max_output_bytes, **kwargs)
 
     def _coerce_path(self, path: str | None) -> str | None:
         if path is None:
@@ -356,7 +363,10 @@ class ArchiveDeniedBackend(LocalShellBackend):
         if effective_timeout <= 0:
             raise ValueError(f"timeout must be positive, got {effective_timeout}")
 
-        max_bytes = int(getattr(self, "_max_output_bytes", 100_000) or 100_000)
+        max_bytes = int(
+            getattr(self, "_max_output_bytes", EXECUTE_OUTPUT_MAX_BYTES)
+            or EXECUTE_OUTPUT_MAX_BYTES
+        )
         env = _shell_env(
             getattr(self, "_env", None),
             project_root=getattr(self, "root_dir", None),
@@ -413,8 +423,16 @@ class ArchiveDeniedBackend(LocalShellBackend):
             output = "\n".join(output_parts) if output_parts else "<no output>"
             truncated = False
             if len(output) > max_bytes:
-                output = output[:max_bytes]
-                output += f"\n\n... Output truncated at {max_bytes} bytes."
+                head = min(EXECUTE_OUTPUT_HEAD_CHARS, max(1, max_bytes // 3))
+                tail = min(EXECUTE_OUTPUT_TAIL_CHARS, max(1, max_bytes // 3))
+                omitted = len(output) - head - tail
+                output = (
+                    output[:head]
+                    + f"\n\n... Output truncated at {max_bytes} bytes; "
+                    f"kept first {head} and last {tail} characters, "
+                    f"omitted {omitted} characters. ...\n\n"
+                    + output[-tail:]
+                )
                 truncated = True
             if result.returncode != 0:
                 output = f"{output.rstrip()}\n\nExit code: {result.returncode}"

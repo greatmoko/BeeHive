@@ -1,5 +1,7 @@
 """AI 角色管理 — AIRole 数据类 + AIRoleManager CRUD。"""
 
+from sysprompt import TOKBEE_SYSTEM_PROMPT
+
 import json
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -23,7 +25,7 @@ class AIRole:
 _DEFAULT_ROLE = AIRole(
     id="default",
     name="通用助手",
-    description="You are a helpful assistant.",
+    description=TOKBEE_SYSTEM_PROMPT,
     is_default=True,
 )
 

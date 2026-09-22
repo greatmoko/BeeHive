@@ -372,7 +372,7 @@ class WokBeeExecutionControlTests(unittest.TestCase):
             store=SimpleNamespace(),
             project_store=project_store,
             provider_store=SimpleNamespace(),
-            settings=SimpleNamespace(),
+            settings=SimpleNamespace(run_max_steps=128),
             event_sink=lambda *args: emitted.append(args),
         )
         executor._resolve_exec_model = lambda *_args: SimpleNamespace()
@@ -390,12 +390,13 @@ class WokBeeExecutionControlTests(unittest.TestCase):
         )
 
         with patch("wokbee.engine.ensure_engine_warm"), \
-             patch("wokbee.engine.runner.RunRequest"), \
+             patch("wokbee.engine.runner.RunRequest") as request_cls, \
              patch("wokbee.engine.runner.AgentRunner") as runner_cls:
             runner_cls.return_value.run.return_value = run_result
             result = executor._run_wokbee(task)
 
         self.assertTrue(result["ok"])
+        self.assertEqual(request_cls.call_args.kwargs["max_steps"], 128)
         self.assertEqual([event.kind for event in project_store.events], ["user", "deliverables", "info"])
         self.assertEqual(project_store.events[1].content, "交付物目录")
         self.assertEqual(project_store.events[1].meta["source"], "autobee")

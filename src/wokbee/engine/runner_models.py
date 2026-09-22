@@ -17,10 +17,11 @@ class RunRequest:
     user_message: str
     resolved: ResolvedModel
     approval: ApprovalFlags
-    max_steps: int = 40
+    max_steps: int = 128
     attachments: list[dict] = field(default_factory=list)
     runner_mode: str = ""
     chat_thread_id: str = ""
+    design_context: str = ""
 
 
 @dataclass

@@ -95,7 +95,7 @@ def apply_ai_pipeline_steps(
         if t == "script":
             path = str(raw.get("path") or "").replace("\\", "/").strip()
             if not path:
-                continue
+                return False
             resolved_path = _resolve_pipeline_script_path(
                 root,
                 sdir,
@@ -210,22 +210,12 @@ def apply_ai_pipeline_steps(
     data["policy"] = policy
     data["order_markdown"] = format_order_markdown(normalized)
 
+    if validate_pipeline_script_paths(root, normalized):
+        return False
     safe_write_text(
         sdir / "pipeline.json",
         json.dumps(data, ensure_ascii=False, indent=2),
     )
-    final_pipeline = load_pipeline(project_root) or {}
-    invalid = validate_pipeline_script_paths(
-        root,
-        final_pipeline.get("steps") if isinstance(final_pipeline, dict) else [],
-    )
-    if invalid:
-        if previous_pipeline is not None:
-            safe_write_text(
-                sdir / "pipeline.json",
-                json.dumps(previous_pipeline, ensure_ascii=False, indent=2),
-            )
-        return False
     return True
 
 

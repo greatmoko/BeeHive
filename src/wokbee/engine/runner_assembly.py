@@ -10,16 +10,17 @@ from wokbee.core.models import Project
 from wokbee.core.paths import ensure_project_layout, workspace_sandbox
 from wokbee.core.settings import WokBeeSettings
 from wokbee.engine.runner_models import RunRequest
+from wokbee.engine.runner_modes import mode_policy
 from wokbee.engine.runner_sessions import ensure_experience_files
 
 
 def prepare_project_root(request: RunRequest, mode: str) -> bool:
     """准备 Agent 的目录边界，返回是否为 DeziBee 设计模式。"""
-    design_mode = mode == "design"
+    design_mode = mode_policy(mode).design_workspace
     if not design_mode:
         ensure_project_layout(request.project_root)
         workspace_sandbox(request.project_root).mkdir(parents=True, exist_ok=True)
-        ensure_experience_files(request.project_root, request.project)
+        ensure_experience_files(request.project_root)
         return False
     request.project_root.mkdir(parents=True, exist_ok=True)
     for name in ("demo", "prd", "uploads"):

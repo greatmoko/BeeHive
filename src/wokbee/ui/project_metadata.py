@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from sysprompt import project_metadata_system_prompt
+
 import json
 import logging
 import re
@@ -217,15 +219,7 @@ class _RefineMetaWorker(QThread):
         self._resolved = resolved
         self._client = client
         client.cancel_check = lambda: self._cancelled
-        system = (
-            "你是项目元信息助手。根据当前名称、目标与最近交互记录，"
-            "生成更贴切的「项目名称」和「项目目标」。\n"
-            f"硬性要求：\n"
-            f"1. 名称尽量短，不超过 {self._max_title_len} 个字，不要整句目标当名称。\n"
-            "2. 目标用自然语言写清要完成的事，可多句，不要空。\n"
-            "3. 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：\n"
-            '{"title":"名称","goal":"目标全文"}'
-        )
+        system = project_metadata_system_prompt(self._max_title_len)
         user = (
             f"当前名称：{self._current_title or '（空）'}\n"
             f"当前目标：{self._current_goal or '（空）'}\n\n"

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from sysprompt import WOKBEE_RUN_SYSTEM_PROMPT
+
 from tokbee.core import context_manager as ctxman
 from tokbee.core.safe_io import safe_write_json
 
@@ -67,13 +69,18 @@ def estimate_project_usage(
     draft_text: str = "",
     max_context_message_count: int = 80,
 ) -> ctxman.ContextUsage:
+    for event in reversed(events or []):
+        if getattr(event, "kind", "") == "context_usage":
+            meta = getattr(event, "meta", {}) or {}
+            limit = int(context_window or meta.get("limit", 0))
+            used = int(meta.get("used", 0)) + ctxman.estimate_text_tokens(draft_text)
+            return ctxman.ContextUsage(used, limit, int(limit * .8), 0, 0, used / limit if limit else 0)
     messages = events_as_messages(events)
     state = load_context_state(project_root)
     return ctxman.estimate_session_usage(
         messages=messages,
         compaction_points=state.get("compaction_points") or [],
-        system_prompt=system_prompt
-        or "你是 WokBee，具备完整本机文件与联网能力的工作助手。",
+        system_prompt=system_prompt or WOKBEE_RUN_SYSTEM_PROMPT,
         max_context_message_count=max_context_message_count,
         context_window=int(context_window or 0),
         draft_text=draft_text or "",

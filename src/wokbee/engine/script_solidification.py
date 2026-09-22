@@ -17,8 +17,9 @@ def solidify_scripts(
     summary: str = "",
     success_path: str = "",
     events: list | None = None,
+    write_pipeline: bool = True,
 ) -> SolidifyResult:
-    """根据轨迹固化脚本引用与有序 pipeline.json（按 steps 顺序，非强制交错）。"""
+    """根据轨迹固化脚本；write_pipeline=False 时留待调用方提交最终管线。"""
 
     from wokbee.engine.script_runner import format_order_markdown
     from wokbee.engine import script_pipeline as legacy
@@ -194,10 +195,11 @@ def solidify_scripts(
             "ai_intervention": "ai_steps_and_error_recovery",
         },
     }
-    safe_write_text(
-        sdir / "pipeline.json",
-        json.dumps(pipeline, ensure_ascii=False, indent=2),
-    )
+    if write_pipeline:
+        safe_write_text(
+            sdir / "pipeline.json",
+            json.dumps(pipeline, ensure_ascii=False, indent=2),
+        )
     if written:
         script_md = "\n".join(
             f"- `{s.rel_path}` — {s.description}" for s in written

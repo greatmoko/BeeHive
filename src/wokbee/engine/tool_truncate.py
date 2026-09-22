@@ -1,4 +1,4 @@
-"""工具结果截断、工具名/排序与工具前缀指纹（DeepSeek 前缀可达性稳定化）。"""
+"""工具运行控制、工具名/排序与工具前缀指纹（DeepSeek 前缀可达性稳定化）。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ import inspect
 import logging
 import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field, create_model
@@ -180,13 +178,6 @@ def _callable_with_timeout(
     return _sw
 
 
-TOOL_RESULT_MAX_CHARS = 12_000
-# 落盘完整结果时的文件名前缀
-TOOL_RESULT_DUMP_PREFIX = "tool_result_"
-# 含密钥的工具结果不得写入 workspace dump
-NEVER_DUMP_TOOLS = frozenset({"get_credential"})
-
-
 def tool_name_of(tool: Any) -> str:
     name = getattr(tool, "name", None)
     if name:
@@ -214,51 +205,13 @@ def prefix_fingerprint(system_prompt: str, tool_names: list[str]) -> str:
     return h.hexdigest()[:12]
 
 
-def truncate_tool_result(
-    text: str,
-    *,
-    max_chars: int = TOOL_RESULT_MAX_CHARS,
-    dump_dir: Path | None = None,
-    tool_name: str = "tool",
-) -> str:
-    """截断进入模型上下文的 tool 结果；完整内容可落盘。"""
-    raw = text if isinstance(text, str) else str(text or "")
-    if tool_name in NEVER_DUMP_TOOLS:
-        dump_dir = None
-    if len(raw) <= max_chars:
-        return raw
-    note = ""
-    if dump_dir is not None:
-        try:
-            dump_dir.mkdir(parents=True, exist_ok=True)
-            safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (tool_name or "tool"))[:40]
-            # 加纳秒级时间戳避免并发/多会话互相覆盖（同名多次调用不再复用同一文件）。
-            path = dump_dir / f"{TOOL_RESULT_DUMP_PREFIX}{safe}_{time.time_ns()}.txt"
-            path.write_text(raw, encoding="utf-8")
-            note = f"\n（完整结果已写入 `{path.as_posix()}`，需要时请再读取）"
-        except OSError as e:
-            logger.warning("落盘超长 tool 结果失败: %s", e)
-            note = "\n（完整结果过长，落盘失败，仅保留摘要）"
-    head_budget = max(64, max_chars - 180)
-    head = raw[:head_budget].rstrip()
-    return (
-        f"{head}\n\n…（已截断，原约 {len(raw)} 字，上限 {max_chars}）"
-        f"{note}"
-    )
-
-
-def wrap_tools_truncate_results(
+def wrap_tools_runtime_controls(
     tools: list,
     *,
-    project_root: Path | None = None,
-    max_chars: int = TOOL_RESULT_MAX_CHARS,
     tool_timeout: float | None = None,
     max_parallel_tools: int | None = None,
 ) -> list:
-    """包装工具运行控制：保留原始结果 + 单工具超时 + 并发上限。"""
-    dump_dir = None
-    if project_root is not None:
-        dump_dir = Path(project_root) / "workspace"
+    """包装工具的超时、节流和并发控制；工具结果保持原样返回。"""
     limiter = (
         ToolConcurrencyLimiter(max_parallel_tools)
         if max_parallel_tools is not None and int(max_parallel_tools) > 0
@@ -271,8 +224,6 @@ def wrap_tools_truncate_results(
             wrapped.append(
                 _wrap_one_tool(
                     tool,
-                    dump_dir=dump_dir,
-                    max_chars=max_chars,
                     tool_timeout=tool_timeout,
                     limiter=limiter,
                 )
@@ -286,8 +237,6 @@ def wrap_tools_truncate_results(
 def _wrap_one_tool(
     tool: Any,
     *,
-    dump_dir: Path | None,
-    max_chars: int,
     tool_timeout: float | None = None,
     limiter: ToolConcurrencyLimiter | None = None,
 ) -> Any:
@@ -299,23 +248,15 @@ def _wrap_one_tool(
         if name in TOOL_TIMEOUT_EXEMPT
         else _inject_timeout_schema(getattr(tool, "args_schema", None))
     )
-
     response_format = getattr(tool, "response_format", "content") or "content"
 
-    def _truncate_payload(result: Any) -> Any:
-        # 工具结果必须原样返回给 Agent；长度管理属于日志持久化层。
-        # 保留此内部函数名以避免改动超时/并发包装的调用结构。
-        return result
-
-    def _truncate(result: Any) -> Any:
-        # MCP 工具 response_format=content_and_artifact，必须保持 (content, artifact)
+    def _normalize_result(result: Any) -> Any:
+        """保持 content_and_artifact 工具的返回形状。"""
         if isinstance(result, tuple) and len(result) == 2:
-            content, artifact = result
-            return (_truncate_payload(content), artifact)
-        truncated = _truncate_payload(result)
+            return result
         if response_format == "content_and_artifact":
-            return (truncated, None)
-        return truncated
+            return (result, None)
+        return result
 
     def _hook(fn: Callable) -> Callable:
         """包装（可能异步的）原函数；异步函数保持异步，否则 ainvoke 会取回裸协程。"""
@@ -327,7 +268,7 @@ def _wrap_one_tool(
                     await limiter.acquire_async()
                 try:
                     ai_throttle.wait()
-                    return _truncate(await fn(*args, **kwargs))
+                    return _normalize_result(await fn(*args, **kwargs))
                 finally:
                     if limiter is not None:
                         limiter.release()
@@ -338,7 +279,7 @@ def _wrap_one_tool(
                 limiter.acquire()
             try:
                 ai_throttle.wait()
-                return _truncate(fn(*args, **kwargs))
+                return _normalize_result(fn(*args, **kwargs))
             finally:
                 if limiter is not None:
                     limiter.release()

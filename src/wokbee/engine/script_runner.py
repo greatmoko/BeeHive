@@ -65,6 +65,7 @@ class PipelineRunResult:
     # 交错执行：当前停在第几个 phase（0-based），后续由 runner 继续。
     # 每个 pipeline step 都是一个 phase，保留原始步骤边界，便于状态追踪。
     next_phase_index: int = 0
+    # 仅保留脚本阶段产出；AI 阶段结果已在 checkpoint 消息历史中。
     context_parts: list[str] = field(default_factory=list)
 
 
@@ -510,6 +511,7 @@ def run_pipeline_until_ai_or_end(
     timeout_sec: int = 120,
     prior_context: list[str] | None = None,
     cancel_event: threading.Event | None = None,
+    step_budget=None,
 ) -> PipelineRunResult:
     """从 start_phase 起执行脚本；遇到 AI 步骤则暂停并 need_ai。
 
@@ -566,6 +568,8 @@ def run_pipeline_until_ai_or_end(
     while i < len(result.phases):
         phase = result.phases[i]
         if phase["type"] == "script":
+            if step_budget is not None:
+                step_budget.consume("pipeline_script")
             pr = run_script_phase(
                 project_root, phase["steps"],
                 timeout_sec=timeout_sec, cancel_event=cancel_event,

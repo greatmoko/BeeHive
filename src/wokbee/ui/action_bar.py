@@ -330,7 +330,7 @@ class _ActionBar(QFrame):
 
         self._ctx_ring = ContextUsageRing(self.theme)
         self._ctx_ring.setToolTip("上下文用量")
-        self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
+        self._ctx_ring.set_ring_enabled(False)
         row.addWidget(self._ctx_ring)
 
         self._run_btn = _EqButton(
@@ -594,7 +594,7 @@ class _ActionBar(QFrame):
 
     def set_context_usage(self, used: int, limit: int, *, enabled: bool = True):
         self._ctx_ring.set_usage(used, limit)
-        self._ctx_ring.set_ring_enabled(enabled)
+        self._ctx_ring.set_ring_enabled(False)
 
     def set_cache_stats(self, text: str = "", *, tooltip: str = ""):
         """缓存命中信息不再单独展示，合并进用量环的悬停提示。"""

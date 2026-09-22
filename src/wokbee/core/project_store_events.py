@@ -115,7 +115,7 @@ class ProjectStoreEventsMixin:
     def clear_events(self, project_id: str) -> None:
         path = events_path(self.path_for(project_id))
         path.parent.mkdir(parents=True, exist_ok=True)
-        safe_write_text(path, "")
+        _legacy_safe_write_text(path, "")
         with _EVENTS_LOCK:
             _event_lines_cache.pop(project_id, None)
 
@@ -202,7 +202,7 @@ class ProjectStoreEventsMixin:
         moved: list[str] = []
         for name in ARCHIVABLE_DIRS:
             # 明确跳过长期保留目录，防止误归档
-            if name in ("archives", "scripts", "memory", "references", "uploads"):
+            if name in ("archives", "scripts", "memory", "references", "uploads", ".wokbee"):
                 continue
             src = root / name
             if not src.exists():
@@ -217,7 +217,7 @@ class ProjectStoreEventsMixin:
             # 清空源目录内容（保留空目录）
             self._empty_dir(src)
 
-        kept = ["project.json", "archives/", "uploads/"]
+        kept = ["project.json", "archives/", "uploads/", ".wokbee/session_memory.md"]
         if include_memory:
             for extra in ("memory", "scripts"):
                 src = root / extra
@@ -251,7 +251,7 @@ class ProjectStoreEventsMixin:
             f"- 保留未归档：{', '.join(f'`{x}`' for x in kept)}\n"
             f"{mode_line}"
         )
-        safe_write_text(dest / "MANIFEST.md", manifest)
+        _legacy_safe_write_text(dest / "MANIFEST.md", manifest)
 
         # 重建空布局
         ensure_project_layout(root)

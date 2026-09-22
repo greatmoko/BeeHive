@@ -129,7 +129,7 @@ class LessonStore:
         return path
 
     def virtual_memory_paths(self, *, recent: int = 8) -> list[str]:
-        paths = ["/memory/AGENTS.md"]
+        paths: list[str] = []
         latest = self.latest_path()
         if latest:
             rel = latest.relative_to(self.memory).as_posix()

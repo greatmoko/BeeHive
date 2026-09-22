@@ -94,6 +94,7 @@ class ProjectStoreFilesystemMixin:
     def path_for(self, project_id: str) -> Path:
         return project_dir(self.workspace_root, project_id)
 
+    @staticmethod
     def _empty_dir(path: Path) -> None:
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)

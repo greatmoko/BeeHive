@@ -80,7 +80,7 @@ def merge_pipeline_steps(
     for raw in ai_steps or []:
         if not isinstance(raw, dict):
             continue
-        merged.append(raw)
+        merged.append(dict(raw))
 
     real_names: dict[str, str] = {}  # 小写文件名 → 规范化 scripts/ 路径
     for st in list(solid_steps or []) + list(ai_written or []):
@@ -114,6 +114,62 @@ def merge_pipeline_steps(
     ]
 
 
+def solidify_lesson_pipeline(
+    project_root: Path,
+    lesson: Lesson,
+    *,
+    success_path: str,
+    events: list | None = None,
+    script_files: list[dict] | None = None,
+    pipeline_steps: list[dict] | None = None,
+) -> tuple[bool, int]:
+    """两条经验写入路径共用；显式提案通过校验前不改写 pipeline。"""
+    from wokbee.engine.script_factory import (
+        apply_ai_authored_scripts,
+        apply_ai_pipeline_steps,
+        solidify_scripts,
+    )
+
+    has_proposal = bool(pipeline_steps)
+    solid = solidify_scripts(
+        project_root,
+        lesson_id=lesson.id,
+        goal=lesson.goal,
+        summary=lesson.summary,
+        success_path=success_path,
+        events=events,
+        write_pipeline=not has_proposal,
+    )
+    ai_written = apply_ai_authored_scripts(
+        project_root,
+        lesson_id=lesson.id,
+        project_id=lesson.project_id,
+        script_files=script_files or [],
+        write_pipeline=not has_proposal,
+    )
+    applied = False
+    if has_proposal:
+        rename_map = {
+            str(step.args["_src"]): Path(step.rel_path).name
+            for step in ai_written
+            if step.args.get("_src")
+        }
+        applied = apply_ai_pipeline_steps(
+            project_root,
+            lesson_id=lesson.id,
+            goal=lesson.goal,
+            pipeline_steps=merge_pipeline_steps(pipeline_steps, solid.script_steps, ai_written),
+            rename_map=rename_map or None,
+        )
+        if not applied:
+            raise ValueError(
+                "pipeline_steps 校验失败，原 pipeline 和经验未更新。"
+                "请确认脚本路径存在，或在 script_files 中提供完整源码后重试。"
+            )
+    sync_lesson_from_pipeline(lesson, project_root)
+    return applied, len(ai_written)
+
+
 def write_ai_lesson(
     project_root: Path,
     *,
@@ -135,16 +191,10 @@ def write_ai_lesson(
     """把 Agent 给出的经验内容直接固化为经验文档 + pipeline + 脚本（不调 LLM）。
 
     复用与结束总结完全相同的固化管线（solidify/AI 手写脚本/pipeline/Skills 快照/
-    参考材料登记），保证后续运行可严格照章执行。任何一步固化失败不影响经验落盘。
+    参考材料登记），保证后续运行可严格照章执行。管线固化失败时不写入经验。
     """
     from wokbee.core.references import snapshot_used_skills as _snap_skills
     from wokbee.core.references import write_reference_manifest as _write_manifest
-    from wokbee.engine.script_factory import (
-        apply_ai_authored_scripts,
-        apply_ai_pipeline_steps,
-        solidify_scripts,
-        drop_missing_pipeline_scripts,
-    )
 
     root = Path(project_root)
     store = LessonStore(root)
@@ -160,58 +210,14 @@ def write_ai_lesson(
         policy=policy,
     )
 
-    trace = lesson.success_path
-    try:
-        solid = solidify_scripts(
-            root,
-            lesson_id=lesson.id,
-            goal=lesson.goal,
-            summary=lesson.summary,
-            success_path=trace,
-            events=list(events or []),
-        )
-        ai_written = apply_ai_authored_scripts(
-            root,
-            lesson_id=lesson.id,
-            project_id=project_id,
-            script_files=script_files or [],
-        )
-        rename_map: dict[str, str] = {}
-        for st in ai_written:
-            src = str((st.args or {}).get("_src") or "").strip()
-            if src:
-                rename_map[src] = Path(st.rel_path).name
-        applied_order = apply_ai_pipeline_steps(
-            root,
-            lesson_id=lesson.id,
-            goal=lesson.goal,
-            pipeline_steps=merge_pipeline_steps(
-                pipeline_steps or [],
-                solid.script_steps,
-                ai_written,
-            ),
-            rename_map=rename_map or None,
-        )
-        lesson.scripts = [s.rel_path for s in solid.script_steps] + [
-            s.rel_path for s in ai_written
-        ]
-        seen: set[str] = set()
-        uniq: list[str] = []
-        for p in lesson.scripts:
-            if p and p not in seen:
-                seen.add(p)
-                uniq.append(p)
-        lesson.scripts = uniq
-        lesson.pipeline = solid.pipeline_rel
-        drop_missing_pipeline_scripts(root)
-        sync_lesson_from_pipeline(lesson, root)
-        _ = applied_order
-    except Exception:
-        import logging
-
-        logging.getLogger("wokbee").exception(
-            "update_project_experience：固化脚本/管线失败（经验仍会写入）"
-        )
+    solidify_lesson_pipeline(
+        root,
+        lesson,
+        success_path=lesson.success_path,
+        events=list(events or []),
+        script_files=script_files,
+        pipeline_steps=pipeline_steps,
+    )
 
     try:
         written = _snap_skills(root, [s for s in (used_skills or []) if str(s).strip()])
@@ -235,4 +241,3 @@ def write_ai_lesson(
 
     store.save(lesson)
     return lesson
-

@@ -12,18 +12,12 @@ from wokbee.engine.lessons import (
     build_lesson_digest,
     collect_scripts_context,
     summarize_lesson_with_ai,
-    sync_lesson_from_pipeline,
 )
 from wokbee.engine.model_factory import build_chat_model
 from wokbee.engine.runner_experience import fallback_notes, fallback_success_path, load_latest_round_events
 from wokbee.engine.runner_models import RunRequest, RunResult
 from wokbee.engine.runtime_env import build_runtime_env_block
-from wokbee.engine.script_factory import (
-    apply_ai_authored_scripts,
-    apply_ai_pipeline_steps,
-    drop_missing_pipeline_scripts,
-    solidify_scripts,
-)
+from wokbee.engine.lesson_summary import solidify_lesson_pipeline
 
 logger = logging.getLogger("wokbee")
 
@@ -279,92 +273,40 @@ class ExperienceWriterMixin:
                 policy=req.approval.summary(),
             )
 
-            # 固化本地脚本：用原始工具轨迹 + 事件，勿只用 AI 改写后的散文路径
-            try:
-                solidify_path = "\n".join(
-                    x for x in (trace_for_scripts, path_f) if x
+            # 固化与工具直写共用；失败交给外层处理，不保存不一致的经验。
+            solidify_path = "\n".join(x for x in (trace_for_scripts, path_f) if x)
+            applied_order, ai_written_count = solidify_lesson_pipeline(
+                req.project_root,
+                lesson,
+                success_path=solidify_path,
+                events=events,
+                script_files=ai_fields.get("script_files") or [],
+                pipeline_steps=ai_fields.get("pipeline_steps") or [],
+            )
+            total_scripts = len(lesson.scripts)
+            if total_scripts or applied_order:
+                order_note = (
+                    "（已采用 AI 给出的 pipeline_steps：script+ai 混合）"
+                    if applied_order
+                    else "（自动固化真实执行顺序：确定性脚本步骤）"
                 )
-                solid = solidify_scripts(
-                    req.project_root,
-                    lesson_id=lesson.id,
-                    goal=lesson.goal,
-                    summary=summary_f,
-                    success_path=solidify_path,
-                    events=events,
+                self._emit(
+                    "info",
+                    f"已按成功路径写入有序步骤到 scripts/pipeline.json"
+                    f"（脚本 {total_scripts} 个{order_note}；"
+                    f"其中 AI 手写脚本 {ai_written_count} 个）；"
+                    f"下次按 steps 一路执行（script 自动跑 0 Token；"
+                    f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
+                    f"scripts/ 不参与归档",
+                    {"scripts": lesson.scripts},
                 )
-                # 总结 AI 手写的 .bat/.json/.py 等一并写入 scripts/ 并并入 pipeline
-                ai_script_files = []
-                if isinstance(ai_fields, dict):
-                    raw_files = ai_fields.get("script_files")
-                    if isinstance(raw_files, list):
-                        ai_script_files = raw_files
-                ai_written = apply_ai_authored_scripts(
-                    req.project_root,
-                    lesson_id=lesson.id,
-                    project_id=req.project.id,
-                    script_files=ai_script_files,
+            elif not total_scripts:
+                self._emit(
+                    "info",
+                    "本轮未识别到可固化脚本，且 AI 未手写 script_files；"
+                    "故 scripts/ 无新脚本。下次若有 execute/.py/.bat 或 AI 手写，"
+                    "总结时会写入。",
                 )
-                # AI 手写脚本已按规范重命名：{原始名 → 新文件名}，供 pipeline 路径对上新文件
-                rename_map: dict[str, str] = {}
-                for _st in ai_written:
-                    _src = str((_st.args or {}).get("_src") or "").strip()
-                    if _src:
-                        rename_map[_src] = Path(_st.rel_path).name
-                ai_pipeline = []
-                if isinstance(ai_fields, dict):
-                    raw_pipe = ai_fields.get("pipeline_steps")
-                    if isinstance(raw_pipe, list):
-                        ai_pipeline = raw_pipe
-                applied_order = apply_ai_pipeline_steps(
-                    req.project_root,
-                    lesson_id=lesson.id,
-                    goal=lesson.goal,
-                    pipeline_steps=ai_pipeline,
-                    rename_map=rename_map or None,
-                )
-                # AI 未给出清单时用固化结果补全；有脚本时以固化章节为准（更准确）
-                # 执行顺序统一由 pipeline.json 的 steps 表达（只含脚本步骤）
-                lesson.scripts = [s.rel_path for s in solid.script_steps] + [
-                    s.rel_path for s in ai_written
-                ]
-                # 去重保序
-                seen_sp: set[str] = set()
-                uniq_scripts: list[str] = []
-                for p in lesson.scripts:
-                    if p not in seen_sp:
-                        seen_sp.add(p)
-                        uniq_scripts.append(p)
-                lesson.scripts = uniq_scripts
-                lesson.pipeline = solid.pipeline_rel
-                # pipeline 是执行事实来源：清理旧/幽灵引用后重新同步经验主线。
-                drop_missing_pipeline_scripts(req.project_root)
-                sync_lesson_from_pipeline(lesson, req.project_root)
-                total_scripts = len(lesson.scripts)
-                if total_scripts or applied_order:
-                    order_note = (
-                        "（已采用 AI 给出的 pipeline_steps：script+ai 混合）"
-                        if applied_order
-                        else "（自动固化真实执行顺序：确定性脚本步骤）"
-                    )
-                    self._emit(
-                        "info",
-                        f"已按成功路径写入有序步骤到 scripts/pipeline.json"
-                        f"（脚本 {total_scripts} 个{order_note}；"
-                        f"其中 AI 手写脚本 {len(ai_written)} 个）；"
-                        f"下次按 steps 一路执行（script 自动跑 0 Token；"
-                        f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
-                        f"scripts/ 不参与归档",
-                        {"scripts": lesson.scripts},
-                    )
-                elif not total_scripts:
-                    self._emit(
-                        "info",
-                        "本轮未识别到可固化脚本，且 AI 未手写 script_files；"
-                        "故 scripts/ 无新脚本。下次若有 execute/.py/.bat 或 AI 手写，"
-                        "总结时会写入。",
-                    )
-            except Exception:
-                logger.exception("固化脚本失败（经验仍会写入）")
 
             # 保存本次用到的 Skills 快照与参考材料到 uploads/references/（归档不清理）
             try:
@@ -423,6 +365,7 @@ class ExperienceWriterMixin:
                 {"lesson_id": lesson.id, "path": str(path)},
             )
             return lesson
-        except Exception:
+        except Exception as exc:
             logger.exception("写入 lesson 失败")
+            self._emit("error", f"写入项目经验失败：{exc}")
             return None

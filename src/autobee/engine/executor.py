@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sysprompt import AUTOBEE_TEXT_SYSTEM_PROMPT
+
 import logging
 import sys
 import threading
@@ -133,7 +135,7 @@ class TaskExecutor:
             prompt = task.content or task.description or "请生成一段文本。"
             resp = client.chat(
                 [
-                    {"role": "system", "content": "你是文本生成助手，根据要求输出正文。不要解释，只输出正文。"},
+                    {"role": "system", "content": AUTOBEE_TEXT_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
@@ -217,7 +219,7 @@ class TaskExecutor:
                     user_message=user_message,
                     resolved=resolved,
                     approval=approval,
-                    max_steps=task.max_steps,
+                    max_steps=self.settings.run_max_steps,
                 )
                 runner = AgentRunner(self.settings, self.provider_store)
                 self._append_project_event(

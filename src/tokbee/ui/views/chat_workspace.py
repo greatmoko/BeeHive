@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sysprompt import CHAT_TITLE_SYSTEM_PROMPT
+
 import re
 from datetime import datetime
 from pathlib import Path
@@ -1987,11 +1989,7 @@ class _ChatWorkspace(QWidget):
             family=primary.family, protocol=primary.api_protocol,
         )
         messages = [
-            {"role": "system", "content": (
-                '根据用户的对话内容，生成一个简短的中文对话标题。\n'
-                '输出 JSON：{"name": "对话标题"}\n'
-                '要求：中文，15字以内，只输出 JSON。'
-            )},
+            {"role": "system", "content": CHAT_TITLE_SYSTEM_PROMPT},
             {"role": "user", "content": raw.strip()[:500]},
         ]
         sid = session.id

@@ -16,11 +16,13 @@ def apply_ai_authored_scripts(
     lesson_id: str,
     project_id: str = "",
     script_files: list[dict[str, Any]] | None,
+    write_pipeline: bool = True,
 ) -> list[ScriptStep]:
     """把总结 AI 手写的脚本写入 scripts/，并合并进 pipeline.json。
 
     命名规范：`项目ID_脚本作用(≤4词)_时间戳.扩展名`；同秒同名冲突时追加序号，
-    绝不覆盖已有脚本。返回成功写入且纳入管线的 ScriptStep 列表。
+    绝不覆盖已有脚本。返回成功写入的 ScriptStep 列表。
+    write_pipeline=False 时只准备脚本，由调用方校验并提交最终管线。
     """
     from wokbee.engine.script_runner import load_pipeline
     from wokbee.engine import script_pipeline as legacy
@@ -114,8 +116,8 @@ def apply_ai_authored_scripts(
                 }
             )
 
-    if not written:
-        return []
+    if not written or not write_pipeline:
+        return written
 
     # 合并 pipeline：AI 脚本插到首个 AI 步骤之前；已有同 path 则跳过
     data = load_pipeline(project_root) or {

@@ -7,7 +7,6 @@ import logging
 from deepagents import FilesystemMiddleware, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
 
-from wokbee.core.models import _now
 from wokbee.core.settings import WokBeeSettings
 from wokbee.core.skills_store import SkillsStore
 from wokbee.core.mcp_store import McpStore
@@ -18,11 +17,23 @@ from wokbee.engine.archive_guard import ArchiveDeniedBackend, attach_execute_wat
 from wokbee.engine.ask_user import build_ask_user_tool
 from wokbee.engine.autobee_tools import build_autobee_tools
 from wokbee.engine.cache_prefix import (
-    CacheHitTracker, PrefixGuard, build_session_context_block, prefix_fingerprint,
-    sort_tools_by_name, static_system_prompt, tool_name_of, wrap_tools_truncate_results,
+    CacheHitTracker,
+    PrefixGuard,
+    build_session_context_block,
+    prefix_fingerprint,
+    sort_tools_by_name,
+    tool_name_of,
+    wrap_tools_runtime_controls,
 )
+from sysprompt import static_system_prompt
 from wokbee.engine.credential_tools import build_credential_tools
-from wokbee.engine.file_tools import FILESYSTEM_TOOL_DESCRIPTIONS, build_file_tools
+from wokbee.engine.file_tools import (
+    DESIGN_READ_FILE_SOFT_LIMIT,
+    FILESYSTEM_TOOL_DESCRIPTIONS,
+    READ_FILE_SOFT_LIMIT,
+    build_file_tools,
+    wrap_read_file_soft_limit,
+)
 from wokbee.engine.lessons import LessonStore, build_experience_tools
 from wokbee.engine.model_factory import build_chat_model
 from wokbee.engine.network_tools import NETWORK_TOOLS
@@ -30,6 +41,7 @@ from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.readonly_backend import ReadOnlyBackend
 from wokbee.engine.runner_assembly import configure_design_write_validator, prepare_project_root
 from wokbee.engine.runner_models import RunRequest
+from wokbee.engine.runner_modes import mode_policy
 from wokbee.engine.runner_sessions import get_checkpointer as _get_checkpointer, remember_agent
 from wokbee.engine.runtime_env import build_runtime_env_block
 from wokbee.engine.script_runner import peek_pipeline
@@ -47,7 +59,8 @@ class AgentAssemblyMixin:
         mode=design：DeziBee 设计模式——同样不跑经验管线，且不注入项目经验，
                    不挂项目经验工具；保留 Skills 与当前会话能力。
         """
-        design_mode = prepare_project_root(req, mode)
+        policy = mode_policy(mode)
+        prepare_project_root(req, policy.name)
 
         # Windows：容忍 resolve() 偶发返回的 \\?\ 扩展路径，避免并发写文件时误判越界
         from wokbee.engine.backend_paths import install_extended_path_tolerance
@@ -58,6 +71,16 @@ class AgentAssemblyMixin:
             req.resolved,
             timeout=self.settings.model_timeout_seconds,
         )
+        from wokbee.core.memory import MemoryStore, SessionMemory
+        from wokbee.engine.memory_runtime import MEMORY_PROMPT, build_memory_tools
+        from wokbee.engine.memory_context import SessionMemoryMiddleware
+
+        self._memory_model = model
+        self._memory_store = MemoryStore()
+        self._memory_global = self._memory_store.global_text(self._memory_store.global_memory())
+        self._memory_reads = getattr(self, "_memory_reads", {})
+        session_memory = SessionMemory(req.project_root)
+        memory_tools = build_memory_tools(session_memory, self._memory_store, self._memory_reads)
         project_inner = ArchiveDeniedBackend(
             root_dir=str(req.project_root),
             virtual_mode=True,
@@ -67,7 +90,7 @@ class AgentAssemblyMixin:
         )
         # 暂停按钮与工具超时共用：execute 轮询此 Event，可在命令执行中途杀进程树
         project_inner.cancel_event = self._cancel
-        configure_design_write_validator(project_inner, req, design_mode)
+        configure_design_write_validator(project_inner, req, policy.design_workspace)
         project_backend = project_inner
         interrupt_on = build_interrupt_on(req.approval)
         # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
@@ -180,12 +203,12 @@ class AgentAssemblyMixin:
         # 项目经验注入策略：
         # - run/chat 模式自动注入项目经验；design 模式跳过经验管线。
         # - 经验只来自当前项目的 memory/experiences/，不读取全局或对话记忆。
-        pipe_probe = peek_pipeline(req.project_root)
-        first_run = mode != "run" or not pipe_probe.ran or not pipe_probe.steps
-        lesson_store = None if design_mode else LessonStore(req.project_root)
+        pipe_probe = peek_pipeline(req.project_root) if policy.pipeline else None
+        first_run = pipe_probe is None or not pipe_probe.ran or not pipe_probe.steps
+        lesson_store = LessonStore(req.project_root) if policy.experience else None
 
-        experience_digest = "" if design_mode else lesson_store.prompt_digest()
-        if not design_mode and not lesson_store.is_empty():
+        experience_digest = lesson_store.prompt_digest() if lesson_store is not None else ""
+        if lesson_store is not None and not lesson_store.is_empty():
             latest = lesson_store.latest_path()
             if first_run:
                 self._emit(
@@ -203,22 +226,20 @@ class AgentAssemblyMixin:
                 )
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
-        system_prompt = static_system_prompt(mode=mode)
+        system_prompt = static_system_prompt(mode=mode) + MEMORY_PROMPT
         runtime_env_block = build_runtime_env_block(
             project_root=str(req.project_root),
             model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
             policy=req.approval.summary(),
             settings=self.settings,
-            design_mode=(mode == "design"),
+            design_mode=policy.design_workspace,
         )
         context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
-        if mode == "run":
-            context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
             approval_summary=req.approval.summary(),
-            max_steps=req.max_steps if mode != "chat" else None,
+            max_steps=req.max_steps if policy.pipeline else None,
             experience_digest=experience_digest,
             mode=mode,
             runtime_env_block=runtime_env_block,
@@ -229,7 +250,7 @@ class AgentAssemblyMixin:
             project_id=req.project.id,
             settings=self.settings,
             emit=self._emit,
-        )
+        ) if policy.project_metadata else []
         # DeepSeek 服务端搜索：包成工具给 Agent 用（开关在设置 enable_deepseek_search；
         # 需官方 DeepSeek Key 才真正注册，主模型可是本地模型）。
         deepseek_search = None
@@ -262,12 +283,13 @@ class AgentAssemblyMixin:
 
         tools = sort_tools_by_name(
             list(NETWORK_TOOLS)
+            + memory_tools
             + list(build_file_tools(backend=backend, emit=self._emit))
             + list(project_tools)
             + list(build_credential_tools())
             + (
                 []
-                if design_mode
+                if not policy.experience
                 else list(build_experience_tools(
                     project_id=req.project.id,
                     project_root=req.project_root,
@@ -292,9 +314,8 @@ class AgentAssemblyMixin:
             ))
             + list(mcp_tools)
         )
-        tools = wrap_tools_truncate_results(
+        tools = wrap_tools_runtime_controls(
             tools,
-            project_root=req.project_root,
             tool_timeout=self.settings.tool_timeout_seconds,
             max_parallel_tools=self.settings.max_parallel_tools,
         )
@@ -345,8 +366,20 @@ class AgentAssemblyMixin:
 
         agent_name = (
             f"wokbee-chat-{req.project.id}"
-            if mode == "chat"
+            if not policy.pipeline
             else f"wokbee-{req.project.id}"
+        )
+        filesystem_middleware = FilesystemMiddleware(
+            backend=backend,
+            custom_tool_descriptions=FILESYSTEM_TOOL_DESCRIPTIONS,
+        )
+        wrap_read_file_soft_limit(
+            filesystem_middleware,
+            max_chars=(
+                DESIGN_READ_FILE_SOFT_LIMIT
+                if policy.design_workspace
+                else READ_FILE_SOFT_LIMIT
+            ),
         )
         agent = create_deep_agent(
             model=model,
@@ -355,12 +388,10 @@ class AgentAssemblyMixin:
             backend=backend,
             # 覆盖 Deep Agents 的通用文件工具说明：项目使用虚拟路径，并提供无需临时脚本的
             # 定位 → 小范围读取 → 按行/锚点编辑流程。与默认中间件同名，create_deep_agent 会原位替换。
-            middleware=[
-                FilesystemMiddleware(
-                    backend=backend,
-                    custom_tool_descriptions=FILESYSTEM_TOOL_DESCRIPTIONS,
-                )
-            ],
+            middleware=[filesystem_middleware, SessionMemoryMiddleware(
+                model, backend=backend, session=session_memory, store=self._memory_store,
+                context_window=getattr(req.resolved, "context_window", 0), emit=self._emit,
+            )],
             interrupt_on=interrupt_on or None,
             # 经验只注入首条 user 的【会话上下文】，不使用外部 MemoryMiddleware，
             # 避免每次请求重新加载经验进 system，保持前缀缓存稳定。
@@ -368,6 +399,6 @@ class AgentAssemblyMixin:
             checkpointer=checkpointer,
             name=agent_name,
         )
-        if mode == "run":
+        if policy.pipeline:
             remember_agent(req.project.id, agent)
         return agent

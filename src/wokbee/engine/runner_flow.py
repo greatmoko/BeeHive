@@ -35,6 +35,10 @@ from wokbee.engine.runner_support import (
     build_success_path_from_messages,
 )
 
+from wokbee.engine.runner_modes import ModePolicy, mode_policy
+from wokbee.engine.memory_runtime import memory_turn
+
+
 logger = logging.getLogger("wokbee")
 
 
@@ -47,6 +51,11 @@ class RunnerFlowMixin:
         """
         if self._cancel.is_set():
             return
+        if isinstance(input_payload, dict) and getattr(self, "_memory_turn_id", None):
+            for message in input_payload.get("messages", []):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    message.setdefault("additional_kwargs", {})["memory_turn_id"] = self._memory_turn_id
+                    message["additional_kwargs"]["memory_global"] = getattr(self, "_memory_global", "")
         if self._step_budget is not None:
             self._step_budget.consume("agent_turn")
 
@@ -248,6 +257,9 @@ class RunnerFlowMixin:
                 {"decisions": decisions},
             )
 
+            if self._approval_timed_out:
+                return RunResult(ok=False, outcome="failed", error="审批等待超时，已拒绝并结束本轮")
+
             self._stream_until_pause(
                 agent,
                 Command(resume={"decisions": decisions}),
@@ -316,10 +328,24 @@ class RunnerFlowMixin:
             )
         return None
 
+    @memory_turn
     def run_chat(self, req: RunRequest) -> RunResult:
-        """非运行期对话：回答提问（可与目标无关），可读写项目名称/目标；不跑经验管线。"""
+        """交互入口；兼容旧调用方通过 runner_mode 选择设计模式。"""
+        policy = mode_policy(getattr(req, "runner_mode", "") or "chat")
+        if policy.pipeline:
+            return self.run(req)
+        return self._run_conversation(req, policy)
+
+    @memory_turn
+    def run_design(self, req: RunRequest) -> RunResult:
+        """设计入口：保留对话历史，不读取项目时间线或运行经验管线。"""
+        return self._run_conversation(req, mode_policy("design"))
+
+    def _run_conversation(self, req: RunRequest, policy: ModePolicy) -> RunResult:
+        """对话共用流程；模式差异由策略提供。"""
         self._event_log.reset()
         self._context_injected = False
+        # 保留设计模式已有的 thread_id，升级后继续使用原 checkpoint。
         thread_id = f"wokbee-chat-{req.project.id}"
         chat_thread_id = str(getattr(req, "chat_thread_id", "") or "").strip()
         if chat_thread_id:
@@ -332,37 +358,39 @@ class RunnerFlowMixin:
         if not question and not req.attachments:
             return RunResult(ok=False, outcome="failed", error="提问内容为空")
 
-        # DeziBee 设计模式经 run_chat 执行：按 runner_mode 选 build_agent 形态。
-        # 否则会按交互模式误建 WokBee 目录（memory/workspace/deliverables 等）。
-        chat_mode = (
-            "design"
-            if (getattr(req, "runner_mode", "") or "") == "design"
-            else "chat"
-        )
         try:
-            agent = self.build_agent(req, mode=chat_mode)
+            agent = self.build_agent(req, mode=policy.name)
         except Exception as e:
             logger.exception("创建交互 Agent 失败")
             return RunResult(ok=False, outcome="failed", error=str(e))
 
         self._emit(
             "agent",
-            (
-                "设计模式（DeziBee：不跑经验管线，不注入项目经验）。"
-                if chat_mode == "design"
-                else "交互模式（完整能力，不跑经验管线）。"
-            )
+            policy.intro
             + f"模型：{req.resolved.provider_name}/{req.resolved.model_id}\n"
-            + (
-                "可用：联网 / 文件 / execute / Skills / MCP。"
-                if chat_mode == "design"
-                else "可用：联网 / 文件 / execute / Skills / MCP / 项目名称与目标工具。"
-            ),
+            + policy.capabilities,
             {"phase": "hint"},
         )
 
-        # 附带近期对话，便于「总结对话后改目标/名称」
-        recent = self._recent_events_digest(req.project_root, limit=40)
+        # 仅空 checkpoint 用时间线补充背景；后续轮次沿用历史消息（含压缩摘要）。
+        values = {}
+        try:
+            state = agent.get_state(config)
+            values = getattr(state, "values", None) or {}
+            has_history = bool(values.get("messages")) if isinstance(values, dict) else False
+        except Exception:
+            logger.exception("读取对话 checkpoint 失败，跳过时间线摘录")
+            has_history = True
+        self._context_injected = has_history
+        recent = (
+            self._recent_events_digest(req.project_root, limit=40)
+            if policy.timeline and not has_history else ""
+        )
+        question, metadata, update = policy.prepare_question(
+            question, getattr(req, "design_context", ""), values, has_history
+        )
+        if update:
+            self._emit("user", update)
         sent_note = f"（发送时间：{_now()}）"
         user_content = f"{question}\n\n{sent_note}"
         if recent:
@@ -372,6 +400,10 @@ class RunnerFlowMixin:
                 f"{recent}"
             )
         user_content = _attachment_content(user_content, req.attachments)
+        user_message = {"role": "user", "content": user_content}
+        if metadata:
+            # 元数据不进入模型文本；每轮保留版本，跟随 checkpoint 的提交与生命周期。
+            user_message["additional_kwargs"] = metadata
 
         try:
             early = self._run_agent_turn(
@@ -379,7 +411,7 @@ class RunnerFlowMixin:
                 config,
                 seen_msg_ids,
                 req,
-                payload={"messages": [{"role": "user", "content": user_content}]},
+                payload={"messages": [user_message]},
                 first=True,
                 allow_auto_lesson=False,
                 start_hint="Agent 处理中…",
@@ -412,16 +444,14 @@ class RunnerFlowMixin:
             err = _format_engine_error(e)
             self._emit("error", f"交互失败：{err}")
             return RunResult(ok=False, outcome="failed", error=err)
-        finally:
-            # 对话结束标记：经验总结时据此只取最新一轮日志
-            try:
-                self._emit("info", "— 本轮对话结束 —", {"session_end": True})
-            except Exception:
-                pass
 
     @staticmethod
     def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:
         try:
+            from wokbee.core.memory import SessionMemory
+            memory = SessionMemory(project_root)
+            if memory.records():
+                return memory.read(recent=1)
             from wokbee.core.context_usage import (
                 events_as_messages,
                 load_context_state,
@@ -471,7 +501,11 @@ class RunnerFlowMixin:
             logger.exception("读取近期时间线失败")
             return ""
 
+    @memory_turn
     def run(self, req: RunRequest, *, resume: bool = False) -> RunResult:
+        policy = mode_policy(req.runner_mode or "run")
+        if not policy.pipeline:
+            return self._run_conversation(req, policy)
         self._event_log.reset()
         self._context_injected = False
         self._experience_updated_by_tool = False
@@ -491,7 +525,7 @@ class RunnerFlowMixin:
             # 非 resume 必须清空 checkpoint，否则会继承上次空 AIMessage / 半截计划而秒退
             if not resume:
                 _reset_run_state(req.project.id)
-            agent = self.build_agent(req, mode=req.runner_mode or "run")
+            agent = self.build_agent(req, mode=policy.name)
         except Exception as e:
             logger.exception("创建 Agent 失败")
             return RunResult(ok=False, outcome="failed", error=str(e))
@@ -512,48 +546,6 @@ class RunnerFlowMixin:
         trajectory_messages: list = []
         current_phase_index: int | None = None
         current_phase_type = ""
-
-        # ── design 模式（DeziBee）：单轮对话式执行，无 pipeline / 经验兜底 ──
-        # DeziBee 需求没有 pipeline.json（不走 ensure memory/experience），
-        # 管线循环对它没有意义；直接一轮 agent turn，结束不写经验。
-        if getattr(req, "runner_mode", "") == "design":
-            try:
-                early = self._run_agent_turn(
-                    agent,
-                    config,
-                    seen_msg_ids,
-                    req,
-                    payload={"messages": [{"role": "user", "content": base_content}]},
-                    first=True,
-                    allow_auto_lesson=False,
-                    start_hint="Agent 处理中…",
-                )
-                if early:
-                    return early
-                try:
-                    state = agent.get_state(config)
-                    values = getattr(state, "values", None) or {}
-                    messages = values.get("messages") if isinstance(values, dict) else None
-                    if messages:
-                        final_text = _extract_text(list(messages))
-                except Exception:
-                    pass
-                self._emit("info", "本轮设计已完成")
-                return RunResult(ok=True, outcome="success", final_text=final_text)
-            except StepLimitExceeded as e:
-                err = str(e)
-                self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
-                return RunResult(ok=False, outcome="incomplete", error=err)
-            except Exception as e:
-                logger.exception("DeziBee 设计执行失败")
-                err = _format_engine_error(e)
-                self._emit("error", f"执行失败：{err}")
-                return RunResult(ok=False, outcome="failed", error=err)
-            finally:
-                try:
-                    self._emit("info", "— 本轮设计结束 —", {"session_end": True})
-                except Exception:
-                    pass
 
         try:
             if resume:
@@ -578,15 +570,22 @@ class RunnerFlowMixin:
             else:
                 # ── 有序管线：按 pipeline.json steps 顺序逐步推进 ──
                 phase_idx = 0
-                context_parts: list[str] = []
+                # 仅携带脚本阶段产出；AI 阶段结果已经写入 checkpoint 消息历史。
+                script_context_parts: list[str] = []
                 ai_turn = 0
-                max_phases = max(1, int(getattr(self.settings, "max_pipeline_phases", 64) or 64))
+                max_phases = max(
+                    1,
+                    int(
+                        getattr(getattr(self, "settings", None), "max_pipeline_phases", 64)
+                        or 64
+                    ),
+                )
 
                 self._emit(
                     "info",
                     "按 scripts/pipeline.json 的 steps 顺序推进"
                     "（script 自动执行不耗 Token；ai 步骤执行固定业务任务；"
-                    f"步骤上限 {max_phases}）…",
+                    f"阶段上限 {max_phases}，与 Agent 共用运行步数上限 {req.max_steps}）…",
                 )
 
                 for _ in range(max_phases):
@@ -595,8 +594,9 @@ class RunnerFlowMixin:
                     pipe = run_pipeline_until_ai_or_end(
                         req.project_root,
                         start_phase=phase_idx,
-                        prior_context=context_parts,
+                        prior_context=script_context_parts,
                         cancel_event=self._cancel,
+                        step_budget=self._step_budget,
                     )
 
                     if not pipe.ran or not pipe.phases:
@@ -651,7 +651,7 @@ class RunnerFlowMixin:
                         "script" if failed_phase is not None else "ai"
                     ) if current_phase_index is not None else ""
 
-                    context_parts = list(pipe.context_parts or [])
+                    script_context_parts = list(pipe.context_parts or [])
 
                     if pipe.ok and not pipe.need_ai:
                         # 全部为 script 步骤且成功：0 Token 完成（无 ai 步骤的纯脚本管线）
@@ -747,17 +747,34 @@ class RunnerFlowMixin:
                     except Exception:
                         pass
 
-                    if segment_text:
-                        context_parts.append(
-                            f"## 阶段 {pipe.next_phase_index + 1}（AI）产出\n"
-                            f"{segment_text[:4000]}"
-                        )
+                    # 不把 AI 产出复制进后续 user 消息；Agent 可从 checkpoint 历史读取它。
+                    # 本轮 user 已经带过脚本上下文，后续 AI 阶段也从 checkpoint 读取。
+                    script_context_parts = []
 
                     phase_idx = pipe.next_phase_index + 1
                     if phase_idx >= len(pipe.phases):
                         break
                 else:
-                    self._emit("info", "有序管线阶段次数达到上限，结束循环")
+                    err = f"有序管线阶段次数达到上限 max_phases={max_phases}，执行未完成"
+                    self._emit(
+                        "error",
+                        err,
+                        {"outcome": "incomplete", "max_phases": max_phases},
+                    )
+                    lesson = self._ensure_lesson_written(
+                        req,
+                        "partial",
+                        "执行未完成：有序管线阶段次数达到上限",
+                        err,
+                        success_path=build_success_path_from_messages(trajectory_messages),
+                    )
+                    return RunResult(
+                        ok=False,
+                        outcome="incomplete",
+                        error=err,
+                        final_text=final_text,
+                        lesson_id=lesson.id if lesson else "",
+                    )
 
             # 收尾：再取一次最终文本（不重复刷时间线）
             try:
@@ -855,11 +872,3 @@ class RunnerFlowMixin:
                 error=err,
                 lesson_id=lesson.id if lesson else "",
             )
-        finally:
-            # 本轮运行/对话结束标记：经验总结时据此只取最新一轮日志
-            try:
-                self._emit("info", "— 本轮运行/对话结束 —", {"session_end": True})
-            except Exception:
-                pass
-
-            return None

@@ -22,12 +22,14 @@ DEFAULT_APPROVAL = {
 DEFAULTS = {
     "workspace_root": str(DEFAULT_WORKSPACE),
     "approval": dict(DEFAULT_APPROVAL),
+    "dezibee_approval": dict(DEFAULT_APPROVAL),
+    # 审批等待上限（秒）；超时拒绝并结束本轮，避免长期占用项目运行槽。
+    "approval_timeout_seconds": 12 * 60 * 60,
     "default_provider": "",
     "default_model_id": "",
-    "max_steps": 40,
+    "run_max_steps": 128,
+    "chat_max_steps": 64,
     "max_parallel_tools": 4,
-    # 有序管线：script/ai 阶段切换次数上限（非强制交错，按 pipeline steps 顺序）
-    "max_pipeline_phases": 64,
     # AI 调用间隔（毫秒）：每次调模型、每次调工具前等待；0 = 不限制
     "ai_interval_ms": 0,
     # 是否把 DeepSeek 官方服务端搜索注册成 deepseek_web_search 工具
@@ -178,6 +180,15 @@ class WokBeeSettings:
             self.set("approval", ApprovalFlags.from_dict(value).to_dict())
 
     @property
+    def dezibee_approval(self) -> ApprovalFlags:
+        raw = self.get("dezibee_approval")
+        return ApprovalFlags.from_dict(raw if isinstance(raw, dict) else DEFAULT_APPROVAL)
+
+    @dezibee_approval.setter
+    def dezibee_approval(self, value: ApprovalFlags) -> None:
+        self.set("dezibee_approval", value.to_dict())
+
+    @property
     def default_provider(self) -> str:
         return str(self.get("default_provider") or "")
 
@@ -194,15 +205,15 @@ class WokBeeSettings:
         self.set("default_model_id", value or "")
 
     @property
-    def max_steps(self) -> int:
+    def run_max_steps(self) -> int:
         try:
-            return max(1, min(500, int(self.get("max_steps", 40))))
+            return max(1, min(500, int(self.get("run_max_steps", 128))))
         except (TypeError, ValueError):
-            return 40
+            return 128
 
-    @max_steps.setter
-    def max_steps(self, value: int) -> None:
-        self.set("max_steps", max(1, min(500, int(value))))
+    @run_max_steps.setter
+    def run_max_steps(self, value: int) -> None:
+        self.set("run_max_steps", max(1, min(500, int(value))))
 
     @property
     def max_parallel_tools(self) -> int:
@@ -216,15 +227,15 @@ class WokBeeSettings:
         self.set("max_parallel_tools", max(1, min(16, int(value))))
 
     @property
-    def max_pipeline_phases(self) -> int:
+    def chat_max_steps(self) -> int:
         try:
-            return max(1, int(self.get("max_pipeline_phases", 64)))
+            return max(1, min(500, int(self.get("chat_max_steps", 64))))
         except (TypeError, ValueError):
             return 64
 
-    @max_pipeline_phases.setter
-    def max_pipeline_phases(self, value: int) -> None:
-        self.set("max_pipeline_phases", max(1, min(500, int(value))))
+    @chat_max_steps.setter
+    def chat_max_steps(self, value: int) -> None:
+        self.set("chat_max_steps", max(1, min(500, int(value))))
 
     @property
     def enable_deepseek_search(self) -> bool:

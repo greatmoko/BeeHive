@@ -59,7 +59,7 @@ class GatewayDispatcher:
                 skip_read=True, skip_write=True,
                 skip_routine=True, skip_high_risk=True,  # 无人值守自动放行
             ),
-            max_steps=self.settings.max_steps,
+            max_steps=self.settings.chat_max_steps,
         )
         return runner.run_chat(req)
 

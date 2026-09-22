@@ -151,7 +151,6 @@ class _ProjectWorkspace(QWidget):
         self._actions.approve_clicked.connect(self._on_approve)
         self._actions.reject_clicked.connect(self._on_reject)
         self._actions.model_changed.connect(self._on_model_changed)
-        self._actions.compress_clicked.connect(self._on_compress_clicked)
         self._actions.draft_changed.connect(self._schedule_usage_refresh)
         layout.addWidget(self._actions)
 
@@ -607,7 +606,7 @@ class _ProjectWorkspace(QWidget):
             self.store.path_for(project.id),
             text,
             project.approval.copy(),
-            self.store.settings.max_steps,
+            self.store.settings.chat_max_steps,
             parent=self,
             mode="chat",
             attachments=attachments,
@@ -691,7 +690,7 @@ class _ProjectWorkspace(QWidget):
             ProjectStatus.RUNNING,
             current_step="Deep Agents 执行中",
             progress_done=0,
-            progress_total=self.store.settings.max_steps,
+            progress_total=self.store.settings.run_max_steps,
         )
         self._schedule_essentials_refresh()
 
@@ -702,7 +701,7 @@ class _ProjectWorkspace(QWidget):
             self.store.path_for(project.id),
             user_message,
             project.approval.copy(),
-            self.store.settings.max_steps,
+            self.store.settings.run_max_steps,
             parent=self,
             mode="run",
             attachments=attachments,
@@ -732,6 +731,9 @@ class _ProjectWorkspace(QWidget):
         if not target:
             return
         meta_d = meta if isinstance(meta, dict) else {}
+        if meta_d.get("memory_proposal_id"):
+            from wokbee.ui.memory_workspace import show_memory_proposal
+            show_memory_proposal(meta_d["memory_proposal_id"], self)
         if kind == "agent_stream":
             # 流式增量：只驱动时间线实时气泡，不落盘（完整 agent 事件到达时再定稿）
             if visible:
@@ -1194,7 +1196,7 @@ class _ProjectWorkspace(QWidget):
             "• 经验文档仅保留**最新一份**，历史经验一并归档\n"
             "• 保留：项目名称、目标、审核策略、uploads/（含参考材料）\n"
             f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n"
-            "• 项目运行经验继续保留，记忆概述、跨项目记忆和对话记忆不再使用\n\n"
+            "• 项目运行经验与 .wokbee/session_memory.md 会话记忆继续保留\n\n"
             "是否继续？",
         )
         if not ok:

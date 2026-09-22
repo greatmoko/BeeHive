@@ -29,6 +29,9 @@ dependencies = [
 [project.scripts]
 tokbee = "tokbee.__main__:main"
 
+[tool.setuptools]
+py-modules = ["sysprompt"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
