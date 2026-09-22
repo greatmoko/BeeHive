@@ -154,6 +154,11 @@ class MemoryWorkspace(QWidget):
             item = self.atomic_results.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    child = item.layout().takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
         query = self.atomic_query.text().replace(",", " ").split()
         rows = self.store.search(query, 10) if query else self.store.recent(10)
         if not rows:
@@ -167,14 +172,17 @@ class MemoryWorkspace(QWidget):
             label = QLabel(text)
             label.setWordWrap(True)
             label.setMinimumWidth(0)
-            label.setMaximumHeight(52)
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            row = QHBoxLayout()
+            row_widget = QWidget()
+            row_widget.setMinimumHeight(34)
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(label, 1)
             remove = QPushButton("删除")
+            remove.setFixedWidth(58)
             remove.clicked.connect(lambda _, key=ident: self.delete_atomic_memory(key))
             row.addWidget(remove)
-            self.atomic_results.addLayout(row)
+            self.atomic_results.addWidget(row_widget)
 
     def delete_atomic_memory(self, ident):
         answer = QMessageBox.question(self, "删除原子记忆", "确定删除这条原子记忆吗？此操作不可恢复。",
