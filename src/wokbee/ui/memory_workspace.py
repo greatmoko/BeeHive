@@ -83,6 +83,7 @@ class MemoryWorkspace(QWidget):
         row.addWidget(save)
         root.addLayout(row)
         global_card = QGroupBox("全局记忆（单份）")
+        self.global_card = global_card
         global_layout = QVBoxLayout(global_card)
         global_layout.addWidget(QLabel("可直接编辑并保存，AI 建议仍需手动确认。"))
         self.content = QTextEdit()
@@ -98,6 +99,7 @@ class MemoryWorkspace(QWidget):
         root.addWidget(global_card, 1)
 
         atomic_card = QGroupBox("原子记忆（关键词组与完整记忆）")
+        self.atomic_card = atomic_card
         atomic_layout = QVBoxLayout(atomic_card)
         atomic_layout.addWidget(QLabel("默认显示最近 10 条；输入关键词后只显示相关记忆。"))
         search_row = QHBoxLayout()
@@ -133,6 +135,7 @@ class MemoryWorkspace(QWidget):
         root.addWidget(scroll)
         self.refresh()
         self.refresh_atomic_memories()
+
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -240,3 +243,18 @@ class MemoryWorkspace(QWidget):
             return
         self.refresh()
         QMessageBox.information(self, "已保存", "全局记忆已保存。" if changed else "内容未变化。")
+
+
+class GlobalMemoryWorkspace(MemoryWorkspace):
+    def __init__(self, theme, parent=None, *, store=None):
+        super().__init__(theme, parent, store=store)
+        self.atomic_card.setVisible(False)
+
+
+class AtomicMemoryWorkspace(MemoryWorkspace):
+    def __init__(self, theme, parent=None, *, store=None):
+        super().__init__(theme, parent, store=store)
+        self.global_card.setVisible(False)
+        self.trigger.setVisible(False)
+        self.target.setVisible(False)
+

@@ -68,7 +68,8 @@ class _SubNav(QFrame):
         ("session_defaults", "⚙", "TokBee 设置"),
         ("wokbee_settings", "🐝", "WokBee 设置"),
         ("dezibee_settings", "🎨", "DeziBee 设置"),
-        ("memory", "🧩", "记忆系统"),
+        ("global_memory", "🧠", "全局记忆"),
+        ("atomic_memory", "🧩", "原子记忆"),
         ("skills", "📚", "Skills"),
         ("credentials", "🔑", "凭据库"),
         ("mcp", "🔌", "MCP"),
@@ -767,10 +768,11 @@ class AutomationView(QWidget):
         self._pages["dezibee_settings"] = dz_page
         self._stack.addWidget(dz_page)
 
-        from wokbee.ui.memory_workspace import MemoryWorkspace
-        memory_page = MemoryWorkspace(self.theme)
-        self._pages["memory"] = memory_page
-        self._stack.addWidget(memory_page)
+        from wokbee.ui.memory_workspace import GlobalMemoryWorkspace, AtomicMemoryWorkspace
+        for key, page_cls in (("global_memory", GlobalMemoryWorkspace), ("atomic_memory", AtomicMemoryWorkspace)):
+            page = page_cls(self.theme)
+            self._pages[key] = page
+            self._stack.addWidget(page)
 
         from wokbee.ui.skills_workspace import SkillsWorkspace
         from wokbee.core.skills_store import SkillsStore
