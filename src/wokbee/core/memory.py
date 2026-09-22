@@ -114,6 +114,22 @@ class MemoryStore:
                     status TEXT NOT NULL DEFAULT 'pending', timestamp TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS memory_settings (key TEXT PRIMARY KEY, value REAL NOT NULL);
             """)
+            columns = {row["name"]: row["type"].upper() for row in db.execute("PRAGMA table_info(atomic_memory)")}
+            if columns.get("id") != "INTEGER":
+                rows = db.execute("SELECT * FROM atomic_memory ORDER BY timestamp, id").fetchall()
+                mapping = {row["id"]: index for index, row in enumerate(rows, 1)}
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("ALTER TABLE atomic_memory RENAME TO atomic_memory_legacy")
+                db.execute("""CREATE TABLE atomic_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, keywords TEXT NOT NULL, kind TEXT NOT NULL,
+                    body TEXT NOT NULL, file_url TEXT NOT NULL, timestamp TEXT NOT NULL,
+                    retrieval_count INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL,
+                    previous_id INTEGER REFERENCES atomic_memory(id))""")
+                for row in rows:
+                    db.execute("INSERT INTO atomic_memory(id,keywords,kind,body,file_url,timestamp,retrieval_count,version,previous_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                               (mapping[row["id"]], row["keywords"], row["kind"], row["body"], row["file_url"], row["timestamp"], row["retrieval_count"], row["version"], mapping.get(row["previous_id"])))
+                db.execute("DROP TABLE atomic_memory_legacy")
+                db.execute("PRAGMA foreign_keys=ON")
             content = {name: MEMORY_RULES if name == "记忆使用规则" else "" for name in MODULES}
             db.execute("INSERT OR IGNORE INTO global_memory(version,content,timestamp) VALUES (1,?,?)", (json.dumps(content, ensure_ascii=False), now()))
             # Migrate older builds that stored one row per global-memory version.
@@ -205,10 +221,9 @@ class MemoryStore:
                 if not old or db.execute("SELECT 1 FROM atomic_memory WHERE previous_id=?", (previous_id,)).fetchone():
                     raise ValueError("上一版本不存在或已被修订，请重新搜索最新版本")
                 version = old["version"] + 1
-            ident = uuid.uuid4().hex
-            db.execute("INSERT INTO atomic_memory VALUES (?,?,?,?,?,?,0,?,?)",
-                       (ident, json.dumps(keywords, ensure_ascii=False), kind, body, str(file_url), now(), version, previous_id or None))
-            return ident
+            cursor = db.execute("INSERT INTO atomic_memory(keywords,kind,body,file_url,timestamp,retrieval_count,version,previous_id) VALUES (?,?,?,?,?,0,?,?)",
+                                (json.dumps(keywords, ensure_ascii=False), kind, body, str(file_url), now(), version, int(previous_id) if previous_id else None))
+            return int(cursor.lastrowid)
 
     def global_memory(self, version=None):
         """Return the single current global memory document.
