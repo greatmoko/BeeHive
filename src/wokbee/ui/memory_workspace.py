@@ -3,7 +3,7 @@ import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QLineEdit, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from wokbee.core.memory import MODULES, MemoryStore
@@ -91,8 +91,14 @@ class MemoryWorkspace(QWidget):
         atomic_search.clicked.connect(self.refresh_atomic_memories)
         search_row.addWidget(atomic_search)
         root.addLayout(search_row)
-        self.atomic_results = QVBoxLayout()
-        root.addLayout(self.atomic_results)
+        atomic_scroll = QScrollArea()
+        atomic_scroll.setWidgetResizable(True)
+        atomic_scroll.setMaximumHeight(190)
+        atomic_container = QWidget()
+        self.atomic_results = QVBoxLayout(atomic_container)
+        self.atomic_results.setContentsMargins(4, 4, 4, 4)
+        atomic_scroll.setWidget(atomic_container)
+        root.addWidget(atomic_scroll)
         root.addWidget(QLabel("全局记忆（单份，可直接编辑保存）"))
         self.content = QTextEdit()
         self.content.setStyleSheet(
@@ -160,6 +166,9 @@ class MemoryWorkspace(QWidget):
             text = f"{item['id']}  ·  {item['type']}  ·  {', '.join(item['keywords'])}"
             label = QLabel(text)
             label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setMaximumHeight(52)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             row = QHBoxLayout()
             row.addWidget(label, 1)
             remove = QPushButton("删除")
