@@ -121,17 +121,18 @@ class MemoryTests(unittest.TestCase):
                 self.store.set_thresholds(*pair)
 
     def test_memory_rules_require_agent_driven_queries(self):
-        from wokbee.core.memory import MEMORY_RULES
+        from wokbee.core.memory import GLOBAL_RULES, MEMORY_RULES, initial_global_memory
 
-        self.assertIn("三级记忆机制", MEMORY_RULES)
+        self.assertTrue(GLOBAL_RULES.startswith("1. "))
+        self.assertTrue(MEMORY_RULES.startswith("1. "))
+        self.assertIn("   4.1 本轮【会话上下文】", MEMORY_RULES)
         self.assertIn("get_project_info", MEMORY_RULES)
         self.assertIn("非首次运行时", MEMORY_RULES)
         self.assertIn("read_session_memory", MEMORY_RULES)
         self.assertIn("search_atomic_memory", MEMORY_RULES)
         self.assertIn("read_atomic_memory", MEMORY_RULES)
         self.assertIn("最多再搜索一次", MEMORY_RULES)
-        self.assertIn("用户画像", MEMORY_RULES)
-        self.assertIn("长期身份、偏好、习惯或约束", MEMORY_RULES)
+        self.assertEqual(initial_global_memory()["记忆使用规则"], MEMORY_RULES)
 
     def middleware(self, window=6000):
         from deepagents.backends import StateBackend
