@@ -98,6 +98,36 @@ class MemoryTests(unittest.TestCase):
         proposal = next(item for item in self.store.proposals() if item["id"] == ident)
         self.assertEqual(proposal["new"], "职业：产品经理")
 
+    def test_invalid_global_proposal_returns_error_without_using_replace_limit(self):
+        from wokbee.engine.memory_runtime import build_memory_tools
+
+        tool = next(t for t in build_memory_tools(self.session, self.store, {})
+                    if t.name == "propose_global_memory")
+        for field, value, expected in (
+            ("module", "未知模块", "module"),
+            ("operation", "update", "operation"),
+            ("new", " ", "new"),
+            ("reason", " ", "reason"),
+        ):
+            args = {"module": "用户画像", "operation": "add", "new": "新规则", "reason": "用户说明"}
+            args[field] = value
+            response = json.loads(tool.invoke(args))
+            self.assertEqual(response["status"], "error")
+            self.assertIn(expected, response["message"])
+        self.assertIn("new", json.loads(tool.invoke({"module": "用户画像", "operation": "add", "new": "【用户画像】", "reason": "用户说明"}))["message"])
+        added = json.loads(tool.invoke({"module": "用户画像", "operation": "add", "new": "有效新增", "reason": "用户说明"}))
+        self.assertEqual(added["status"], "proposed")
+        base = {"module": "用户画像", "operation": "replace", "new": "新版", "reason": "纠正"}
+        missing_target = json.loads(tool.invoke(base))
+        self.assertEqual(missing_target["status"], "error")
+        self.assertIn("完整旧规则", missing_target["message"])
+        self.assertEqual(json.loads(tool.invoke({**base, "target": "不存在"}))["status"], "error")
+        content = self.store.global_memory()["content"]
+        self.store.save_global({**content, "用户画像": "旧一\n旧二"})
+        for old in ("旧一", "旧二"):
+            self.assertEqual(json.loads(tool.invoke({**base, "target": old}))["status"], "proposed")
+        self.assertEqual(json.loads(tool.invoke({**base, "target": "旧一"}))["status"], "error")
+
     def test_concurrent_append_and_version_branch_rejection(self):
         with ThreadPoolExecutor(4) as pool:
             list(pool.map(lambda i: self.session.append(f"turn-{i}", goal="并发", result="完成"), range(20)))

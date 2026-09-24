@@ -115,13 +115,17 @@ def build_memory_tools(session, store, read_records, *, memory_state=None):
 
     @tool
     def propose_global_memory(module: str, operation: str, new: str, reason: str, target: str = "") -> str:
-        """按条新增或精确替换全局规则；replace 必须给出完整 target，整轮最多替换两条。需用户确认后才生效。"""
+        """提出一条全局记忆建议。module 只能是用户画像、环境信息、全局规则、记忆使用规则；operation 只能是 add 或 replace。new 和 reason 必须有内容。add 不传 target；replace 的 target 必须是当前规则的完整原文，整轮最多替换两条。需用户确认后才生效。"""
         nonlocal replacement_count
         if operation == "replace":
             if replacement_count >= 2:
                 return json.dumps({"status": "error", "message": "本轮最多替换两条全局记忆规则"}, ensure_ascii=False)
+        try:
+            ident = store.propose_rule(module, operation, new, reason, target)
+        except ValueError as exc:
+            return json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False)
+        if operation == "replace":
             replacement_count += 1
-        ident = store.propose_rule(module, operation, new, reason, target)
         action = "新增" if operation == "add" else "替换"
         detail = f"- {action}建议（待确认）模块：{module}\n"
         if target:

@@ -326,11 +326,19 @@ class MemoryStore:
         return [line.strip() for line in str(text or "").splitlines() if line.strip()]
 
     def propose_rule(self, module, operation, new, reason, target=""):
-        if module not in MODULES or operation not in ("add", "replace") or not str(new).strip() or not str(reason).strip():
-            raise ValueError("无效的全局记忆更新建议")
+        if module not in MODULES:
+            raise ValueError(f"module 必须是以下之一：{'、'.join(MODULES)}")
+        if operation not in ("add", "replace"):
+            raise ValueError("operation 必须是 add 或 replace")
+        if not str(new).strip():
+            raise ValueError("new 不能为空")
+        if not str(reason).strip():
+            raise ValueError("reason 不能为空")
         snapshot = self.global_memory()
         old, new = str(target or "").strip(), str(new).strip()
         new = re.sub(rf"^(?:【{re.escape(module)}】|{re.escape(module)})\s*[:：]?\s*", "", new, count=1)
+        if not new:
+            raise ValueError("new 不能为空")
         rules = self._rules(snapshot["content"][module])
         if "\n" in new or len(new) > 500:
             raise ValueError("全局记忆建议一次只能新增或替换一条不超过500字的规则")

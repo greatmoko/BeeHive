@@ -687,9 +687,11 @@ class RunnerFlowMixin:
                             seen_msg_ids,
                             req,
                             payload={"messages": [{"role": "user", "content": (
-                                "脚本管线已经执行完成。现在只做结果验收：读取并核对实际产出物，"
-                                "对照用户目标判断是否达标。不要重新执行脚本，不要修改文件；"
-                                "请明确说明已达标项目、未达标项目和需要补救的动作。\n\n"
+                                "脚本管线已完成，请简短验收交付物：先检查 deliverables/ 中与目标相关的文件，"
+                                "读取并确认内容符合目标；符合就立即结束，只用一句话报告文件和结果。"
+                                "若 deliverables/ 中没有合适文件，再检查 workspace/；找到符合目标的材料就移入 deliverables/，"
+                                "然后结束并简短报告。只有两处都没有可用材料，或材料不符合目标时，才接管任务排查并补齐；"
+                                "不要重复描述检查过程，也不要在验收通过后继续分析或提出额外补救。\n\n"
                                 f"用户目标：{base_message}\n脚本结果：{pipe.combined_output or '（无文本输出）'}"
                             )}]},
                             first=True,
