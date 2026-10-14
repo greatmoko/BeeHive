@@ -23,7 +23,7 @@ from deepagents.backends.protocol import (
 
 _DENY_MSG = (
     "禁止访问 archives/：归档文档与归档数据不能作为当前运行的数据来源。"
-    "请仅使用 workspace/、uploads/、deliverables/、memory/（最新经验）、scripts/、runs/。"
+    "请仅使用 workspace/、uploads/、output/、memory/（最新经验）、scripts/、runs/。"
 )
 
 EXECUTE_OUTPUT_MAX_BYTES = 30_000

@@ -112,7 +112,7 @@ EXPERIENCE_TOOL_DESCRIPTION = (
 
 _DELIVERY_RULE = (
     "【交付】\n"
-    "用户目标要求交付文件时，把最终交付文件复制/移动到 deliverables/，"
+    "用户目标要求交付文件时，把最终交付文件复制/移动到 output/，"
     "保留原始文件与文件名，不要用合并文档 final.md 代替产物。\n"
     "不要额外生成总结文档；用户明确要求不校验/不检查内容时，不要校验或检查。\n"
 )
@@ -158,7 +158,7 @@ DEZIBEE_SYSTEM_PROMPT = (
     + "【设计边界】\n"
     "当前是设计模式，不跑经验管线；专注把本次需求变成可交互原型与 PRD。\n"
     "需求目录是唯一可写目录。文件工具只用 demo/、prd/、uploads/ 等虚拟相对路径；"
-    "不存在 workspace/、deliverables/、archives/ 等目录，也不要创建它们。\n"
+    "不存在 workspace/、output/、archives/ 等目录，也不要创建它们。\n"
     "demo/index.html 已预置三栏原型工作台；只修改 WORKBENCH_DATA 数据区，"
     "不修改 css/js 框架代码，按需在 demo/assets/ 添加素材。\n"
     "任何 PRD 修改前必须先读取 demo/index.html 中当前最新的 prd/目标章节；"
@@ -278,7 +278,7 @@ pipeline_steps 是执行顺序的唯一事实来源，success_path 必须与之�
 - script path 只允许 scripts/... 或 uploads/...，必须对应输入材料可确认存在的文件或本次提供完整源码的脚本；你没有文件工具，不要声称已现场检查。
 - 新脚本存到 scripts/，文件名会规范化为 项目ID_脚本作用(≤4词)_时间戳.扩展名；不覆盖或删除已有脚本。
 - 脚本供 AI 使用的输出写到 workspace/script_callback_*.md；AI 据真实输出处理，不编造。
-- 目标要求交付文件时，保留真实执行过的发布步骤，把实际产物复制/移动到 deliverables/，保留原文件与文件名，不用 final.md 代替。
+- 目标要求交付文件时，保留真实执行过的发布步骤，把实际产物复制/移动到 output/，保留原文件与文件名，不用 final.md 代替。
 
 【输出结构】
 使用中文，只返回一个 JSON 对象，不要 Markdown 围栏。没有内容的数组用 []：

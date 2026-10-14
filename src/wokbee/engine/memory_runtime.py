@@ -6,7 +6,7 @@ import logging
 import uuid
 from functools import wraps
 
-from wokbee.core.memory import MEMORY_RULES, MemoryStore, SessionMemory
+from wokbee.core.memory import SessionMemory
 
 log = logging.getLogger("wokbee")
 
@@ -115,7 +115,7 @@ def build_memory_tools(session, store, read_records, *, memory_state=None):
 
     @tool
     def propose_global_memory(module: str, operation: str, new: str, reason: str, target: str = "") -> str:
-        """提出一条全局记忆建议。module 只能是用户画像、环境信息、全局规则、记忆使用规则；operation 只能是 add 或 replace。new 和 reason 必须有内容。add 不传 target；replace 的 target 必须是当前规则的完整原文，整轮最多替换两条。需用户确认后才生效。"""
+        """提出一条全局记忆建议。module 只能是用户画像、环境信息、全局规则；operation 为 add 或 replace。new/reason 必填；add 不传 target，replace 的 target 必须是当前完整旧规则。整轮最多替换两条，用户确认后生效。"""
         nonlocal replacement_count
         if operation == "replace":
             if replacement_count >= 2:

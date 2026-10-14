@@ -301,7 +301,7 @@ class ProjectStoreEventsMixin:
         else:
             notice = (
                 f"已归档到 `archives/{dest.name}`"
-                f"（含 runs / workspace / deliverables）。\n"
+                f"（含 runs / workspace / output）。\n"
                 "对话与工作区、交付物已清空；"
                 "目标、memory/experiences/、scripts/、uploads/ 已保留，可直接再次运行。\n"
                 "注意：后续 Agent 运行禁止访问 archives/。"

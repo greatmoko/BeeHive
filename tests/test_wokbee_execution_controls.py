@@ -84,6 +84,39 @@ class WokBeeExecutionControlTests(unittest.TestCase):
         self.assertIn("1.2. 【运行环境】", text)
         self.assertIn("1.2.1. ", text)
 
+    def test_settings_environment_keeps_only_execution_essentials(self):
+        runtime = RuntimeEnv(
+            os_name="Windows", os_release="11", machine="AMD64",
+            python_exe=r"C:\venv\python.exe", python_version="3.14",
+            pwsh_exe=r"C:\PowerShell\pwsh.exe", pwsh_version="7.6",
+            powershell_exe=r"C:\legacy\powershell.exe", cwd=r"C:\app",
+            probed_at="2026-10-10", path_preview="32 目录",
+            tool_paths={"git": r"C:\git.exe", "docker": r"C:\docker.exe"},
+        )
+        with patch("wokbee.engine.runtime_env_format.get_runtime_env", return_value=runtime):
+            text = build_runtime_env_settings_text()
+        for value in ("Windows 11 (AMD64)", runtime.python_exe, runtime.pwsh_exe, "UTF-8", "git=", "PowerShell"):
+            self.assertIn(value, text)
+        for value in (runtime.cwd, runtime.powershell_exe, "PATH", "docker", "（未知）", "文件工具虚拟路径"):
+            self.assertNotIn(value, text)
+        self.assertEqual(text.count(runtime.probed_at), 1)
+        self.assertLessEqual(len(text.splitlines()), 12)
+
+    def test_settings_environment_shell_fallbacks(self):
+        for runtime, syntax in (
+            (RuntimeEnv(os_name="Windows", powershell_exe=r"C:\powershell.exe"), "命令语法：PowerShell"),
+            (RuntimeEnv(os_name="Windows", comspec=r"C:\cmd.exe"), "命令语法：cmd"),
+            (RuntimeEnv(os_name="Linux"), None),
+        ):
+            with self.subTest(os=runtime.os_name, shell=runtime.powershell_exe):
+                with patch("wokbee.engine.runtime_env_format.get_runtime_env", return_value=runtime):
+                    text = build_runtime_env_settings_text()
+                if syntax:
+                    self.assertIn(syntax, text)
+                else:
+                    self.assertNotIn("PowerShell", text)
+                    self.assertNotIn("cmd", text)
+
     def test_agent_runtime_block_uses_project_root_not_cached_cwd(self):
         runtime = RuntimeEnv(
             os_name="Windows",
@@ -227,7 +260,7 @@ class WokBeeExecutionControlTests(unittest.TestCase):
             solidify_scripts(
                 TEST_TMP_ROOT,
                 lesson_id="lesson",
-                goal="直接运行上传脚本并交付到 deliverables/",
+                goal="直接运行上传脚本并交付到 output/",
                 events=[event],
             )
             pipeline_writes = [

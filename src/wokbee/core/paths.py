@@ -9,13 +9,13 @@ from pathlib import Path
 _APP_SOURCE_ROOT = Path(__file__).resolve().parents[3]
 
 # 每个项目目录下的标准子目录
-# deliverables：项目交付物（归档时一并归档并清空）
+# output：项目交付物（归档时一并归档并清空）
 # uploads：用户上传文件 + 参考材料（uploads/references/，Agent 可读取；归档时保留，不随会话清空）
 # archives：归档快照（自身不再被归档）
 # scripts：可本地复用脚本（不参与归档）
 PROJECT_SUBDIRS = (
     "memory",
-    "deliverables",
+    "output",
     "uploads",
     "runs",
     "workspace",
@@ -27,7 +27,7 @@ PROJECT_META = "project.json"
 EVENTS_REL = "runs/events.jsonl"
 ARCHIVES_DIR = "archives"
 SCRIPTS_DIR = "scripts"
-DELIVERABLES_DIR = "deliverables"
+DELIVERABLES_DIR = "output"
 UPLOADS_DIR = "uploads"
 # 参考材料逻辑已合并进 uploads/（uploads/references/）
 REFERENCES_DIR = "uploads/references"
@@ -36,7 +36,8 @@ REFERENCES_DIR = "uploads/references"
 ARCHIVABLE_DIRS = (
     "runs",
     "workspace",
-    "deliverables",
+    "output",
+    "deliverables",  # 兼容历史项目已有的交付物，不再新建此目录。
 )
 
 
@@ -55,7 +56,7 @@ def ensure_project_layout(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     for name in PROJECT_SUBDIRS:
         (root / name).mkdir(parents=True, exist_ok=True)
-    # 兼容：旧 artifacts 有内容而 deliverables 为空时，提示性 README
+    # 交付物目录说明。
     deliverables = root / DELIVERABLES_DIR
     readme = deliverables / "README.txt"
     if not readme.exists():
@@ -153,7 +154,7 @@ def references_dir(project_root: Path) -> Path:
 def list_deliverable_names(project_root: Path, limit: int = 8) -> list[str]:
     """交付物文件名（忽略 README）。"""
     names: list[str] = []
-    for folder in (deliverables_dir(project_root), artifacts_dir(project_root)):
+    for folder in (deliverables_dir(project_root), project_root / "deliverables", artifacts_dir(project_root)):
         if not folder.exists():
             continue
         for p in folder.iterdir():

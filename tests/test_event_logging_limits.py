@@ -19,7 +19,7 @@ class EventLoggingLimitTests(unittest.TestCase):
         with patch("wokbee.core.project_store.ensure_project_layout"), \
              patch("wokbee.core.project_store.events_path", return_value=path), \
              patch("wokbee.core.project_store.safe_write_text") as write:
-            self.make_store(Path("unused")).append_event("project", event)
+            self.make_store((Path(__file__).resolve().parent / ".tmp" / "unused")).append_event("project", event)
         return json.loads(write.call_args.args[1])
 
     def test_tool_result_is_full_in_memory_but_capped_in_log(self):

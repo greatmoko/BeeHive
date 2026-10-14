@@ -3,10 +3,11 @@ from __future__ import annotations
 import ast
 import json
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
@@ -42,8 +43,9 @@ class SystemPromptTests(unittest.TestCase):
             req.title, req.description = title, ""
             self.assertIn(f"默认设备外壳：{shell}", sysprompt.build_design_prompt(req))
         self.assertEqual(before, sysprompt.static_system_prompt(mode="design"))
-        for mode in ("chat", "design"):
-            self.assertEqual(sysprompt.static_system_prompt(mode=mode).count("请用 ask_user 向用户提问"), 1)
+        for mode in ("chat", "run", "design"):
+            self.assertIn("全局记忆", sysprompt.static_system_prompt(mode=mode))
+            self.assertNotIn("跨项目记忆库或对话记忆", sysprompt.static_system_prompt(mode=mode))
 
     def test_summary_request_uses_central_rules_and_keeps_facts(self):
         captured = []
@@ -85,8 +87,44 @@ class SystemPromptTests(unittest.TestCase):
 
         tool = build_experience_tools(project_id="test", project_root=Path("."))[0]
         self.assertEqual(tool.description, sysprompt.EXPERIENCE_TOOL_DESCRIPTION)
-        for prompt in (tool.description, sysprompt.WOKBEE_RUN_SYSTEM_PROMPT, sysprompt.EXPERIENCE_UPDATE_SYSTEM_PROMPT):
+        for prompt in (tool.description, sysprompt.EXPERIENCE_UPDATE_SYSTEM_PROMPT):
             self.assertIn("偶发网络错误、临时超时、仅结果变化或无实质新信息的取消不更新", prompt)
+        self.assertIn("字段与更新条件见工具说明", sysprompt.WOKBEE_RUN_SYSTEM_PROMPT)
+
+    def test_context_explicitly_labels_all_four_modes(self):
+        from wokbee.engine.prompt import build_session_context_block
+        for mode, first, expected in (
+            ("chat", True, "wokbee/chat"), ("run", True, "wokbee/run/first"),
+            ("run", False, "wokbee/run/repeat"), ("design", True, "dezibee/design"),
+        ):
+            with self.subTest(expected=expected):
+                text = build_session_context_block(title="任务", goal="目标", approval_summary="审批", mode=mode, first_run=first)
+                self.assertIn(f"【当前模式】{expected}", text)
+                self.assertNotIn("记忆阶段", text)
+
+    def test_mode_marker_reaches_text_and_attachment_turns_without_duplicating_context(self):
+        from wokbee.engine.runner_flow import RunnerFlowMixin
+        runner = RunnerFlowMixin()
+        runner._cancel = threading.Event()
+        runner._step_budget = None
+        runner._prefix_guard = None
+        runner._mode_label = "wokbee/run/repeat"
+        marker = "【当前模式】wokbee/run/repeat"
+        context = f"【会话上下文】\n{marker}\n目标"
+        agent = Mock()
+        agent.stream.return_value = iter(())
+        for content in ("继续", context, [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}], [{"type": "text", "text": context}]):
+            with self.subTest(content=content):
+                payload = {"messages": [{"role": "user", "content": content}]}
+                agent.stream.return_value = iter(())
+                runner._stream_until_pause(agent, payload, {}, set())
+                result = payload["messages"][0]["content"]
+                text = result if isinstance(result, str) else result[0]["text"]
+                self.assertEqual(text.count(marker), 1)
+                if "会话上下文" in text:
+                    self.assertTrue(text.startswith("【会话上下文】"))
+                if isinstance(content, list) and content[0]["type"] == "image_url":
+                    self.assertEqual(result[1], content[0])
 
     def test_no_inline_system_prompt_definitions(self):
         """防止新模型调用再次把固定 system 文本散落到业务模块。"""

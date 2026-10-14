@@ -42,7 +42,7 @@ from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.readonly_backend import ReadOnlyBackend
 from wokbee.engine.runner_assembly import configure_design_write_validator, prepare_project_root
 from wokbee.engine.runner_models import RunRequest
-from wokbee.engine.runner_modes import mode_policy
+from wokbee.engine.runner_modes import mode_label, mode_policy
 from wokbee.engine.runner_sessions import get_checkpointer as _get_checkpointer, remember_agent
 from wokbee.engine.runtime_env import build_runtime_env_settings_text, ensure_runtime_env
 from wokbee.engine.script_runner import peek_pipeline
@@ -210,6 +210,7 @@ class AgentAssemblyMixin:
         # - 经验只来自当前项目的 memory/experiences/，不读取全局或对话记忆。
         pipe_probe = peek_pipeline(req.project_root) if policy.pipeline else None
         first_run = pipe_probe is None or not pipe_probe.ran or not pipe_probe.steps
+        self._mode_label = mode_label(mode, first_run=first_run)
         lesson_store = LessonStore(req.project_root) if policy.experience else None
 
         experience_digest = lesson_store.prompt_digest() if lesson_store is not None else ""
@@ -242,12 +243,6 @@ class AgentAssemblyMixin:
             logger.warning("首次环境信息写入全局记忆失败，继续使用当前记忆：%s", exc)
         self._memory_global = self._memory_store.global_text(self._memory_store.global_memory())
         context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
-        if policy.pipeline:
-            context_extra.insert(
-                0,
-                "- 运行阶段：首次运行（先获取项目需求/目标，再按全局记忆规则检索原子记忆）"
-                if first_run else "- 运行阶段：非首次运行（直接按当前阶段提示词处理；非必要不调取记忆）",
-            )
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -255,6 +250,7 @@ class AgentAssemblyMixin:
             max_steps=req.max_steps if policy.pipeline else None,
             experience_digest=experience_digest,
             mode=mode,
+            first_run=first_run,
             extra_lines=context_extra or None,
         )
         project_tools = build_project_meta_tools(

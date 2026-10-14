@@ -6,7 +6,7 @@ Windows 上 `Path.resolve()` 走 `_getfinalpathname`，当目标文件正被并�
 （Agent 并行 write_file）时，Python 会在个别次调用里保留 `\\?\C:\…` 扩展前缀
 （`_getfinalpathname(spath) == path` 的复核失败即不回退）。此时字符串比较：
 
-    \\?\C:\…\deliverables\prd\x.md   ← full
+    \\?\C:\…\output\prd\x.md   ← full
     C:\…                             ← cwd
 
 判定为「不在根目录内」，于是本轮对话直接失败：

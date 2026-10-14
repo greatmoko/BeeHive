@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sysprompt import static_system_prompt
+from wokbee.engine.runner_modes import mode_label
 
 
 def build_session_context_block(
@@ -13,13 +14,14 @@ def build_session_context_block(
     max_steps: int | None = None,
     experience_digest: str = "",
     mode: str = "run",
+    first_run: bool = True,
     runtime_env_block: str = "",
     extra_lines: list[str] | None = None,
 ) -> str:
     """易变内容：拼进首条/当轮 user，不进 system。"""
     lines = [
         "【会话上下文】（本块可能随项目变更；勿写入对 system 稳定性的假设）",
-        f"- 模式：{'交互' if mode == 'chat' else '设计' if mode == 'design' else '运行'}",
+        f"【当前模式】{mode_label(mode, first_run=first_run)}",
         f"- 项目名称：{title or '未命名项目'}",
         f"- 目标：{goal or '（未设置）'}",
         f"- 审核策略：{approval_summary or '（未设置）'}",

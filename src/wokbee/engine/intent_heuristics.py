@@ -29,11 +29,11 @@ _AI_DONE_MARKERS = (
     "已完成", "已经完成", "已成功", "已生成", "任务完成",
     # 注意：不要用裸「已写入/已保存」——工具落盘常说「完整结果已写入文件」，
     # 与「让我继续」同句会出现，会误判为收工并跳过自动续跑。
-    "已写入 deliverables", "已写入交付", "保存到 deliverables",
+    "已写入 output", "已写入交付", "保存到 output",
 )
 _AI_DONE_MARKERS_EN = (
-    "completed", "already done", "successfully written to deliverables",
-    "written to deliverables", "saved to deliverables", "task is done",
+    "completed", "already done", "successfully written to output",
+    "written to output", "saved to output", "task is done",
     "finished the task",
 )
 # 完成措辞出现时，只有带「仍未完成/还需继续」的转折才续跑，否则视为收工。

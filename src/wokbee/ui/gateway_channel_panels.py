@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time as _time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QColor
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QCheckBox, QComboBox, QTextEdit, QPlainTextEdit, QScrollArea, QStackedWidget, QFrame, QProgressBar, QApplication
 

@@ -25,7 +25,7 @@ class ChatTimelineContextTests(unittest.TestCase):
         runner.build_agent = Mock(return_value=agent)
         runner._run_agent_turn = Mock(return_value=RunResult(ok=True, outcome="success"))
         request = SimpleNamespace(
-            project=SimpleNamespace(id="project"), project_root=Path("unused"),
+            project=SimpleNamespace(id="project"), project_root=(Path(__file__).resolve().parent / ".tmp" / "unused"),
             user_message="本轮问题", attachments=[], chat_thread_id=chat_thread_id,
             resolved=SimpleNamespace(provider_name="test", model_id="test"),
             runner_mode="design" if design_context else "", design_context=design_context,
@@ -42,7 +42,7 @@ class ChatTimelineContextTests(unittest.TestCase):
         for values in (None, {}, {"messages": []}):
             with self.subTest(values=values):
                 runner, content, _ = self.run_chat(values)
-                runner._recent_events_digest.assert_called_once_with(Path("unused"), limit=40)
+                runner._recent_events_digest.assert_called_once_with((Path(__file__).resolve().parent / ".tmp" / "unused"), limit=40)
                 self.assertIn("旧时间线", content)
 
     def test_history_including_compacted_summary_skips_timeline(self):
@@ -121,7 +121,7 @@ class ChatTimelineContextTests(unittest.TestCase):
         runner, content, _ = self.run_chat({}, entrypoint="run_design")
         runner._recent_events_digest.assert_not_called()
         self.assertNotIn("近期时间线摘录", content)
-        self.assertIn("【记忆阶段】首次交互", content)
+        self.assertIn("【当前模式】dezibee/design", content)
         self.assertNotIn("获取项目需求/目标", content)
 
 

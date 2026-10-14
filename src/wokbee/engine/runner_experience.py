@@ -43,7 +43,7 @@ def fallback_success_path(outcome: str, errors: str, summary: str) -> str:
     return (
         "1. AI:\"{提示词: 明确目标与约束，制定执行方案}\";[AI 环节：理解任务并规划]\n"
         "2. 工具调用:\"{cmd: 联网获取或读取 uploads/ 获取真实数据}\";[获取真实数据，禁止用 archives/；同名或相近文件以最新修改时间为准]\n"
-        "3. 工具调用:\"{cmd: 在 workspace/ 起草，最终写入 deliverables/}\";[在沙箱起草并交付]\n"
+        "3. 工具调用:\"{cmd: 在 workspace/ 起草，最终写入 output/}\";[在沙箱起草并交付]\n"
         "4. AI:\"{提示词: 用中文说明过程与数据来源}\";[AI 环节：交代过程与数据来源（经验中不记录结果正文）]"
     )
 

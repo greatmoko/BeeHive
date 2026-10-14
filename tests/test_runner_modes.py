@@ -58,7 +58,7 @@ class RunnerModeTests(unittest.TestCase):
         runner._mark_experience_updated = Mock()
         runner._snapshot_run_events = Mock()
         req = SimpleNamespace(
-            project=SimpleNamespace(id="req", title="需求", goal="设计"), project_root=Path("unused"),
+            project=SimpleNamespace(id="req", title="需求", goal="设计"), project_root=(Path(__file__).resolve().parent / ".tmp" / "unused"),
             approval=ApprovalFlags(), resolved=SimpleNamespace(provider_name="test", model_id="test"),
             max_steps=64, user_message="设计",
         )
@@ -69,7 +69,7 @@ class RunnerModeTests(unittest.TestCase):
                 "wokbee.engine.runner_agent_assembly.wrap_tools_runtime_controls", side_effect=lambda tools, **kw: tools
             ):
                 memory_store.return_value.global_memory.return_value = {
-                    "content": {"用户画像": "", "环境信息": "", "全局规则": "", "记忆使用规则": ""}
+                    "content": {"用户画像": "", "环境信息": "", "全局规则": ""}
                 }
                 memory_store.return_value.global_text.return_value = ""
                 memory_store.return_value.thresholds.return_value = (.8, .3)

@@ -243,7 +243,7 @@ class TaskExecutor:
         outcome = getattr(result, "outcome", "failed")
         if getattr(result, "ok", False):
             # 与桌面端 WokBee 运行保持一致：AutoBee 完成后也在项目时间线
-            # 追加可点击的 deliverables/ 气泡；事件先落盘，再由 event_sink 推送到 UI。
+            # 追加可点击的 output/ 气泡；事件先落盘，再由 event_sink 推送到 UI。
             self._append_project_event(
                 project.id,
                 "deliverables",

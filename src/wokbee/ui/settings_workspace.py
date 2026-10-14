@@ -98,8 +98,8 @@ class WokBeeSettingsWorkspace(QWidget):
         ws_row.addWidget(browse)
         bl.addLayout(ws_row)
         hint = QLabel(
-            "新建项目将创建：memory|workspace|deliverables|uploads|runs|archives|scripts…；"
-            "交付物→deliverables/；上传→uploads/（归档时保留）；"
+            "新建项目将创建：memory|workspace|output|uploads|runs|archives|scripts…；"
+            "交付物→output/；上传→uploads/（归档时保留）；"
             "经验→memory/experiences/exp_时间戳.md（只加载最新）；"
             "Agent 禁止访问 archives/；Skills 全局挂载不复制"
         )

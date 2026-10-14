@@ -230,15 +230,15 @@ def _persist_script_callback(project_root: Path, script_rel: str, body: str) -> 
 
 
 def publish_pipeline_outputs(project_root: Path, *, recent_minutes: int = 15) -> list[str]:
-    """Copy actual pipeline outputs to deliverables without converting them to Markdown."""
+    """将管线实际产物复制到 output，保留原始格式。"""
     root = Path(project_root)
     ws = root / "workspace"
-    target = root / "deliverables"
+    target = root / "output"
     target.mkdir(parents=True, exist_ok=True)
     published: list[str] = []
     infra = {
         ".git", ".vscode", "__pycache__", "scripts", "memory", "uploads",
-        "deliverables", "workspace", "archives",
+        "output", "workspace", "archives",
     }
 
     def copy_to(src: Path, rel: Path) -> None:
@@ -671,7 +671,7 @@ def build_user_message_for_ai_phase(
                 parts.append(f"{n}. {step}")
         parts.append(
             "请先读取 workspace/script_callback_*.md 中的脚本 callback（若有）；"
-            "完成后把中间结果写入 workspace/（或最终交付写入 deliverables/）；"
+            "完成后把中间结果写入 workspace/（或最终交付写入 output/）；"
             "用户上传文件在 uploads/；同名或相近文件以最新修改时间为准。"
         )
     else:

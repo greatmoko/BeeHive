@@ -46,7 +46,7 @@ class ModeStepLimitTests(unittest.TestCase):
              patch("wokbee.engine.script_runner.validate_pipeline_script_paths", return_value=[]), \
              patch("wokbee.engine.script_runner.run_script_phase", side_effect=lambda *a, **k: PhaseResult(type="script")) as execute:
             with self.assertRaises(StepLimitExceeded):
-                run_pipeline_until_ai_or_end(Path("unused"), step_budget=budget)
+                run_pipeline_until_ai_or_end((Path(__file__).resolve().parent / ".tmp" / "unused"), step_budget=budget)
         self.assertEqual(execute.call_count, 2)
         self.assertEqual(budget.used, 3)
 
@@ -54,7 +54,7 @@ class ModeStepLimitTests(unittest.TestCase):
         with patch("wokbee.engine.script_runner.peek_pipeline", return_value=self.pipeline(2)), \
              patch("wokbee.engine.script_runner.validate_pipeline_script_paths", return_value=[]), \
              patch("wokbee.engine.script_runner.run_script_phase", side_effect=lambda *a, **k: PhaseResult(type="script")):
-            result = run_pipeline_until_ai_or_end(Path("unused"), step_budget=StepBudget(2))
+            result = run_pipeline_until_ai_or_end((Path(__file__).resolve().parent / ".tmp" / "unused"), step_budget=StepBudget(2))
         self.assertTrue(result.ok)
         self.assertFalse(result.need_ai)
 
@@ -66,7 +66,7 @@ class ModeStepLimitTests(unittest.TestCase):
         runner.build_agent = Mock(return_value=Mock(get_state=Mock(return_value=SimpleNamespace(values={}))))
         runner._ensure_lesson_written = Mock(return_value=None)
         request = RunRequest(
-            project=SimpleNamespace(id="test", goal="任务"), project_root=Path("unused"),
+            project=SimpleNamespace(id="test", goal="任务"), project_root=(Path(__file__).resolve().parent / ".tmp" / "unused"),
             user_message="任务", max_steps=2,
             resolved=SimpleNamespace(provider_name="test", model_id="test"),
             approval=SimpleNamespace(summary=lambda: "test"),
@@ -93,7 +93,7 @@ class ModeStepLimitTests(unittest.TestCase):
         runner._run_agent_turn = Mock(return_value=None)
         runner._ensure_lesson_written = Mock(return_value=None)
         request = RunRequest(
-            project=SimpleNamespace(id="test", goal="任务"), project_root=Path("unused"),
+            project=SimpleNamespace(id="test", goal="任务"), project_root=(Path(__file__).resolve().parent / ".tmp" / "unused"),
             user_message="任务", max_steps=10,
             resolved=SimpleNamespace(provider_name="test", model_id="test"),
             approval=SimpleNamespace(summary=lambda: "test"),

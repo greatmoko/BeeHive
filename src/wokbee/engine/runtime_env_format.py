@@ -110,7 +110,7 @@ def format_runtime_env_block(
     if for_agent:
         lines.extend([
             "- 目录规则：软件运行目录与 Agent 工作目录无关；禁止用软件运行目录搜索项目文件。",
-            "- Get-Location 只能验证 execute 当前目录，不能据此推断 uploads/、scripts/ 或 deliverables/ 的位置。",
+            "- Get-Location 只能验证 execute 当前目录，不能据此推断 uploads/、scripts/ 或 output/ 的位置。",
         ])
     elif rt.cwd:
         lines.append(f"- 应用运行目录（仅系统内部，不是 Agent 工作目录）：{rt.cwd}")
@@ -130,7 +130,7 @@ def format_runtime_env_block(
             "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
             "项目外路径须先 request_access 申请、获批后走 /ext/…）：",
             "  · workspace/…  workspace 沙箱",
-            "  · deliverables/…  交付物",
+            "  · output/…  交付物",
             "  · uploads/…  用户上传",
             "  · memory/…  经验（experiences/）",
             "  · scripts/…  管线脚本",
@@ -231,7 +231,25 @@ def build_runtime_env_settings_text(settings=None) -> str:
             "首次运行 Agent 时将自动探测并保存；也可点击下方「重新探测」。"
             "之后所有 Agent 均加载此缓存，不会重复扫描。"
         )
-    runtime = _numbered_environment_text(format_runtime_env_block(rt), prefix=(1, 2))
+    lines = [
+        "【运行环境】",
+        f"- 系统：{rt.os_name} {rt.os_release} ({rt.machine})",
+        f"- Python：{rt.python_exe} ({rt.python_version})",
+    ]
+    if rt.os_name.lower() == "windows":
+        shell = rt.pwsh_exe or rt.powershell_exe or rt.comspec or "系统默认 Shell"
+        version = rt.pwsh_version if rt.pwsh_exe else rt.powershell_version if rt.powershell_exe else ""
+        lines.append(f"- Shell：{shell}" + (f" ({version})" if version else ""))
+        if rt.pwsh_exe or rt.powershell_exe:
+            lines.append('- 命令语法：PowerShell；调用带空格的程序路径用 & "路径"，勿用 bash 语法。')
+        else:
+            lines.append("- 命令语法：cmd，勿用 PowerShell 或 bash 语法。")
+    lines.append("- 文本编码：UTF-8")
+    for label in ("git", "gh", "node", "npm", "uv"):
+        tool = _format_tool_line(label, rt)
+        if tool:
+            lines.append(f"- {tool}")
+    runtime = _numbered_environment_text("\n".join(lines), prefix=(1, 2))
     return f"1. 系统环境信息\n1.1. 最后探测：{rt.probed_at or '未知'}\n\n{runtime}"
 
 

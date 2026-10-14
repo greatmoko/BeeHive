@@ -74,7 +74,7 @@ _NAV_NOISE_RE = re.compile(
 )
 _URL_RE = re.compile(r"https?://[^\s\]\"'<>]+", re.I)
 _PATH_RE = re.compile(
-    r"(?:scripts|workspace|deliverables|uploads|memory|references)/"
+    r"(?:scripts|workspace|output|uploads|memory|references)/"
     r"[^\s\]\"'<>]+",
     re.I,
 )
@@ -220,7 +220,7 @@ def _collect_success_hints(
         if name in ("write_file", "edit_file") and path:
             if any(
                 path.replace("\\", "/").startswith(p)
-                for p in ("scripts/", "deliverables/", "workspace/", "uploads/", "references/")
+                for p in ("scripts/", "output/", "workspace/", "uploads/", "references/")
             ):
                 hints.append(f"写入 {path}")
         if name == "execute" and cmd:
@@ -239,7 +239,7 @@ def _collect_success_hints(
 
     # callback：从正文抠路径/URL（补充 meta 缺失时）
     for p in _PATH_RE.findall(body or ""):
-        if p.lower().startswith(("scripts/", "deliverables/", "uploads/", "references/")):
+        if p.lower().startswith(("scripts/", "output/", "uploads/", "references/")):
             hints.append(f"产物/脚本 {p}")
     if name in ("http_get", "http_request", "web_search", "deepseek_web_search"):
         for u in _URL_RE.findall(str(args.get("url") or ""))[:1]:

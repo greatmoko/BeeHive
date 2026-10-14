@@ -141,7 +141,7 @@ def solidify_scripts(
     # 注意：本路径（规则/无模型回退）只固化确定性 script 步骤；ai 步骤由总结 AI 通过
     # apply_ai_pipeline_steps 按需并入（明确的业务任务，如分析/整理/撰写）。不生成 final_ai。
 
-    # 发布步骤：仅当目标明确要求产物进 deliverables/，或本次执行确实写过 deliverables/ 时才补
+    # 发布步骤：仅当目标明确要求产物进 output/，或本次执行确实写过 output/ 时才补
     if written and (goal_wants_deliverables(goal) or events_touched_deliverables(events)):
         pub_name = _unique_fname("publish_deliverables")
         pub_path = sdir / pub_name
@@ -153,7 +153,7 @@ def solidify_scripts(
                 "type": "script",
                 "path": f"scripts/{pub_name}",
                 "tool": "publish",
-                "description": "发布：把脚本实际产出文件复制到 deliverables/",
+                "description": "发布：把脚本实际产出文件复制到 output/",
                 "args": {},
             }
         )
@@ -207,7 +207,7 @@ def solidify_scripts(
         script_md += (
             "\n\n约定：每个脚本执行后把 callback 写入 "
             "`workspace/script_callback_<脚本名>.md`；"
-            "需要交付的文件由发布脚本复制到 deliverables/（保留原始文件，不合并成 final.md）。"
+            "需要交付的文件由发布脚本复制到 output/（保留原始文件，不合并成 final.md）。"
             "执行顺序见 `scripts/pipeline.json` 的 steps。"
         )
     else:

@@ -68,3 +68,10 @@ def mode_policy(mode: str) -> ModePolicy:
         return MODES[mode]
     except KeyError:
         raise ValueError(f"未知 Agent 模式：{mode}") from None
+
+
+def mode_label(mode: str, *, first_run: bool = True) -> str:
+    mode_policy(mode)
+    if mode == "run":
+        return "wokbee/run/first" if first_run else "wokbee/run/repeat"
+    return "dezibee/design" if mode == "design" else "wokbee/chat"

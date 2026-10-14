@@ -67,7 +67,7 @@ class MemoryTests(unittest.TestCase):
         found = {row["id"] for row in self.store.search(["湘潭天气", "小红书文章"])}
         self.assertEqual(found, {weather, notes})
 
-    def test_global_proposals_default_no_conflicts_restore_limit(self):
+    def test_global_proposals_default_no_conflicts_reset_limit(self):
         original = self.store.global_memory()
         ident = self.store.propose("用户画像", "默认中文", "本轮明确要求")
         self.assertEqual(self.store.global_memory(), original)
@@ -79,9 +79,9 @@ class MemoryTests(unittest.TestCase):
         self.store.decide(first, accept=True)
         with self.assertRaises(ValueError):
             self.store.decide(stale, accept=True)
-        self.store.restore(1)
+        self.store.reset_global_memory()
         self.assertEqual(self.store.global_memory()["content"], original["content"])
-        self.assertEqual(self.store.global_memory()["version"], 3)
+        self.assertEqual(self.store.proposals(), [])
         with self.assertRaises(ValueError):
             self.store.propose_rule("全局规则", "add", "中" * 50001, "太长")
 
@@ -151,18 +151,41 @@ class MemoryTests(unittest.TestCase):
                 self.store.set_thresholds(*pair)
 
     def test_memory_rules_require_agent_driven_queries(self):
-        from wokbee.core.memory import GLOBAL_RULES, MEMORY_RULES, initial_global_memory
+        from wokbee.core.memory import GLOBAL_RULES, MODULES, initial_global_memory
 
         self.assertTrue(GLOBAL_RULES.startswith("1. "))
-        self.assertTrue(MEMORY_RULES.startswith("1. "))
-        self.assertIn("   4.1 本轮【会话上下文】", MEMORY_RULES)
-        self.assertIn("get_project_info", MEMORY_RULES)
-        self.assertIn("非首次运行时", MEMORY_RULES)
-        self.assertIn("read_session_memory", MEMORY_RULES)
-        self.assertIn("search_atomic_memory", MEMORY_RULES)
-        self.assertIn("read_atomic_memory", MEMORY_RULES)
-        self.assertIn("最多再搜索一次", MEMORY_RULES)
-        self.assertEqual(initial_global_memory()["记忆使用规则"], MEMORY_RULES)
+        self.assertEqual(MODULES, ("用户画像", "环境信息", "全局规则"))
+        self.assertEqual(set(initial_global_memory()), set(MODULES))
+        for text in ("read_session_memory", "search_atomic_memory", "read_atomic_memory",
+                     "最多再搜索一次", "禁止 AI 自行创建", "demo/", "workspace/",
+                     "wokbee/chat", "wokbee/run/first", "wokbee/run/repeat", "dezibee/design"):
+            self.assertIn(text, GLOBAL_RULES)
+        self.assertEqual(initial_global_memory()["全局规则"], GLOBAL_RULES)
+
+    def test_legacy_memory_module_merges_without_losing_user_data(self):
+        legacy = {"用户画像": "用户偏好", "环境信息": "已有环境", "全局规则": "用户规则", "记忆使用规则": "只查相关记忆"}
+        with self.store.connect() as db:
+            db.execute("UPDATE global_memory SET content=?", (json.dumps(legacy, ensure_ascii=False),))
+            db.execute("INSERT INTO memory_proposals(id,module,old,new,reason,base_version,status,timestamp,operation) VALUES (?,?,?,?,?,1,'pending','now','replace')",
+                       ("legacy", "记忆使用规则", "只查相关记忆", "先查历史", "用户要求"))
+        migrated = MemoryStore(self.store.path)
+        content = migrated.global_memory()["content"]
+        self.assertEqual(content, {"用户画像": "用户偏好", "环境信息": "已有环境", "全局规则": "用户规则\n只查相关记忆"})
+        self.assertEqual(MemoryStore(self.store.path).global_memory()["content"], content)
+        self.assertEqual(migrated.proposals()[0]["module"], "全局规则")
+        migrated.decide("legacy", accept=True)
+        self.assertEqual(migrated.global_memory()["content"]["全局规则"], "用户规则\n先查历史")
+        with self.assertRaises(ValueError):
+            migrated.propose_rule("记忆使用规则", "add", "规则", "原因")
+
+    def test_reset_uses_three_modules_preserves_atomic_memory_and_environment(self):
+        from wokbee.core.memory import GLOBAL_RULES, initial_global_memory
+        ident = self.store.write(["偏好"], "偏好", "记忆保留")
+        self.store.save_global({"用户画像": "自定义", "环境信息": "旧环境", "全局规则": "自定义规则"})
+        self.store.reset_global_memory("当前环境")
+        self.assertEqual(self.store.global_memory()["content"], initial_global_memory("当前环境"))
+        self.assertEqual(self.store.read([ident])[0]["body"], "记忆保留")
+        self.assertEqual(self.store.global_memory()["content"]["全局规则"], GLOBAL_RULES)
 
     def middleware(self, window=6000):
         from deepagents.backends import StateBackend
@@ -254,7 +277,7 @@ class MemoryTests(unittest.TestCase):
         from wokbee.engine.memory_runtime import build_memory_tools
         old = self.store.write(["语言"], "偏好", "中文")
         tools = {t.name: t for t in build_memory_tools(self.session, self.store, {})}
-        arguments = {"keywords": ["语言"], "kind": "偏好", "body": "默认英文", "previous_id": old}
+        arguments = {"keywords": ["语言"], "kind": "偏好", "body": "默认英文", "previous_id": str(old)}
         response = json.loads(tools["write_atomic_memory"].invoke(arguments))
         self.assertEqual(response["status"], "completed")
         self.assertEqual(response["saved"], 1)
@@ -273,8 +296,10 @@ class MemoryTests(unittest.TestCase):
         response = json.loads(tool.invoke({"memories": memories}))
         self.assertEqual((response["status"], response["saved"]), ("completed", 2))
         self.assertEqual(json.loads(tool.invoke({"memories": memories}))["status"], "already_completed")
-        self.assertEqual(len(self.store.search(["批量一"])), 1)
-        self.assertEqual(len(self.store.search(["批量二"])), 1)
+        ids = [item["id"] for item in response["results"]]
+        self.assertEqual([item["body"] for item in self.store.read(ids)], ["第一条", "第二条"])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM atomic_memory").fetchone()[0], 2)
 
     def test_atomic_writer_allows_retry_after_validation_error(self):
         from wokbee.engine.memory_runtime import build_memory_tools

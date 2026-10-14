@@ -141,7 +141,7 @@ def apply_ai_pipeline_steps(
     if not normalized:
         return False
 
-    # 目标要求交付到 deliverables/ 但 AI 未给出发布步骤时，补一个确定性发布步骤
+    # 目标要求交付到 output/ 但 AI 未给出发布步骤时，补一个确定性发布步骤
     if goal_wants_deliverables(goal) and not any(
         s.get("type") == "script" and str(s.get("tool") or "").lower() == "publish"
         for s in normalized
@@ -159,7 +159,7 @@ def apply_ai_pipeline_steps(
                 "type": "script",
                 "path": f"scripts/{pub_name}",
                 "tool": "publish",
-                "description": "发布：把脚本实际产出文件复制到 deliverables/",
+                "description": "发布：把脚本实际产出文件复制到 output/",
                 "args": {},
             }
         )

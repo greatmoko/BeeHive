@@ -35,7 +35,7 @@ from wokbee.engine.runner_support import (
     build_success_path_from_messages,
 )
 
-from wokbee.engine.runner_modes import ModePolicy, mode_policy
+from wokbee.engine.runner_modes import ModePolicy, mode_label, mode_policy
 from wokbee.engine.memory_runtime import memory_turn
 
 
@@ -51,11 +51,23 @@ class RunnerFlowMixin:
         """
         if self._cancel.is_set():
             return
-        if isinstance(input_payload, dict) and getattr(self, "_memory_turn_id", None):
+        if isinstance(input_payload, dict):
             for message in input_payload.get("messages", []):
                 if isinstance(message, dict) and message.get("role") == "user":
-                    message.setdefault("additional_kwargs", {})["memory_turn_id"] = self._memory_turn_id
-                    message["additional_kwargs"]["memory_global"] = getattr(self, "_memory_global", "")
+                    label = getattr(self, "_mode_label", "")
+                    content = message.get("content")
+                    if label:
+                        marker = f"【当前模式】{label}"
+                        if isinstance(content, str) and not (content.startswith(marker) or content.startswith("【会话上下文】") and marker in content):
+                            message["content"] = f"{marker}\n\n{content}"
+                        elif isinstance(content, list):
+                            first = content[0] if content else {}
+                            text = first.get("text", "") if isinstance(first, dict) else ""
+                            if not (text.startswith(marker) or text.startswith("【会话上下文】") and marker in text):
+                                message["content"] = [{"type": "text", "text": marker}, *content]
+                    if getattr(self, "_memory_turn_id", None):
+                        message.setdefault("additional_kwargs", {})["memory_turn_id"] = self._memory_turn_id
+                        message["additional_kwargs"]["memory_global"] = getattr(self, "_memory_global", "")
         if self._step_budget is not None:
             self._step_budget.consume("agent_turn")
 
@@ -392,16 +404,10 @@ class RunnerFlowMixin:
         if update:
             self._emit("user", update)
         sent_note = f"（发送时间：{_now()}）"
-        memory_stage = (
-            "【记忆阶段】首次交互：理解当前用户意图后，按全局记忆规则按需检索原子记忆。"
-            if policy.name in ("chat", "design") and not has_history
-            else "【记忆阶段】非首次交互：直接处理当前问题；仅在需要项目历史或跨项目经验时按需读取会话记忆或原子记忆。"
-            if policy.name in ("chat", "design") else ""
-        )
-        user_content = "\n\n".join(part for part in (memory_stage, question, sent_note) if part)
+        user_content = f"【当前模式】{mode_label(policy.name)}\n\n{question}\n\n{sent_note}"
         if recent:
             user_content = (
-                f"{memory_stage}\n\n{question}\n\n{sent_note}\n\n"
+                f"{user_content}\n\n"
                 "——\n【近期时间线摘录（供参考，回答不必复述全文）】\n"
                 f"{recent}"
             )
@@ -674,7 +680,7 @@ class RunnerFlowMixin:
                             "agent",
                             "有序管线均为脚本且已成功，准备由 AI 核对产出物是否达到目标。\n"
                             + (
-                                "脚本原始产物已复制到 deliverables/："
+                                "脚本原始产物已复制到 output/："
                                 + ", ".join(published[:20])
                                 if published
                                 else "保留脚本原始输出格式，未强制转换为 Markdown。"
@@ -687,9 +693,9 @@ class RunnerFlowMixin:
                             seen_msg_ids,
                             req,
                             payload={"messages": [{"role": "user", "content": (
-                                "脚本管线已完成，请简短验收交付物：先检查 deliverables/ 中与目标相关的文件，"
+                                "脚本管线已完成，请简短验收交付物：先检查 output/ 中与目标相关的文件，"
                                 "读取并确认内容符合目标；符合就立即结束，只用一句话报告文件和结果。"
-                                "若 deliverables/ 中没有合适文件，再检查 workspace/；找到符合目标的材料就移入 deliverables/，"
+                                "若 output/ 中没有合适文件，再检查 workspace/；找到符合目标的材料就移入 output/，"
                                 "然后结束并简短报告。只有两处都没有可用材料，或材料不符合目标时，才接管任务排查并补齐；"
                                 "不要重复描述检查过程，也不要在验收通过后继续分析或提出额外补救。\n\n"
                                 f"用户目标：{base_message}\n脚本结果：{pipe.combined_output or '（无文本输出）'}"

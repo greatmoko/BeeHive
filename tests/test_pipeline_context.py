@@ -32,7 +32,7 @@ class PipelineContextTests(unittest.TestCase):
         runner._run_agent_turn = Mock(side_effect=run_turn)
         request = RunRequest(
             project=SimpleNamespace(id="test", goal="任务", title="项目"),
-            project_root=Path("unused"),
+            project_root=(Path(__file__).resolve().parent / ".tmp" / "unused"),
             user_message="任务",
             max_steps=10,
             resolved=SimpleNamespace(provider_name="test", model_id="test"),

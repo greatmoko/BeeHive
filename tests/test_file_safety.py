@@ -34,6 +34,8 @@ class FileSafetyTests(unittest.TestCase):
         ensure_project_layout(root)
 
         self.assertTrue(all((root / name).is_dir() for name in PROJECT_SUBDIRS))
+        self.assertTrue((root / "output").is_dir())
+        self.assertFalse((root / "deliverables").exists())
 
     def test_long_unicode_write_edit_find_read_delete(self):
         content = "中文🙂\n" * 20000 + "unique anchor\n"

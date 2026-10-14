@@ -53,7 +53,7 @@ _TEMP_FILE_HELPER_RE = re.compile(
 
 _GUIDE_MSG = (
     "错误：你传给文件工具的路径「{path}」看起来是真实主机路径，但该目录未授权。"
-    "文件工具只接受虚拟路径：项目内请用 workspace/…、deliverables/…、uploads/… 等；"
+    "文件工具只接受虚拟路径：项目内请用 workspace/…、output/…、uploads/… 等；"
     "项目外请先调用 request_access(path, reason) 申请加入白名单，"
     "获批后用返回的 /ext/<slug>/… 虚拟路径。只有 execute 才接受真实路径。"
 )

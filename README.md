@@ -149,8 +149,10 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 在项目根目录执行：
 
 ```powershell
-python main.py
+.\start.vbs
 ```
+
+也可双击 `start.vbs`，它使用项目 `.venv` 中的 Python 启动，不显示黑色命令行窗口。
 
 启动成功后，窗口标题显示 **BeeHive v0.2.2**。
 
@@ -202,7 +204,7 @@ python main.py
 
 | 能力 | 说明 |
 |------|------|
-| 文件读写 | 在项目沙箱内读、写、搜索文件；产出物写入 `deliverables/` |
+| 文件读写 | 在项目沙箱内读、写、搜索文件；产出物写入 `output/` |
 | 联网检索 | `web_search`、`http_get`、`http_request`；DeepSeek 官方搜索（可开关） |
 | 本机命令 | `execute` 在 Windows 上经 pwsh 执行 |
 | 脚本固化 | 成功的步骤可固化为 `scripts/` 本地脚本，下次免 Token 重跑 |
