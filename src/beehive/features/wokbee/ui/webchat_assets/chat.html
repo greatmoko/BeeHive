@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对话</title>
+<link rel="stylesheet" href="chat.css">
+</head>
+<body>
+<div id="chat">
+  <div id="messages">
+    <button id="olderBtn" class="older-btn hidden">加载更早记录 ↑</button>
+  </div>
+  <div id="statusbar" class="hidden">
+    <span class="dot"></span>
+    <span id="statusText"></span>
+  </div>
+</div>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="markdown.js"></script>
+<script src="cards.js"></script>
+<script src="streaming.js"></script>
+<script src="events.js"></script>
+</body>
+</html>

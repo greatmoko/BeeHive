@@ -3,27 +3,10 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from tokbee.utils.logger import setup_crash_reporting, setup_logger
-
-
-def main():
-    logger = setup_logger()
-    setup_crash_reporting(logger)
-    logger.info("BeeHive 启动中...")
-
-    try:
-        from tokbee.app import Application
-
-        app = Application()
-        exit_code = app.run()
-    except Exception:
-        logger.exception("BeeHive 启动或运行失败")
-        return 1
-
-    logger.info("BeeHive 已退出")
-    return exit_code
+from beehive.__main__ import main
 
 
 if __name__ == "__main__":

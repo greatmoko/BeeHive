@@ -1,0 +1,123 @@
+"""通道面板连接状态卡。"""
+from __future__ import annotations
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QFrame, QProgressBar
+from beehive.common.ui.styles.buttons import apply_primary_btn, apply_secondary_btn
+from beehive.system.gateway.ui.styles import _progressbar
+def build_connection_card(self) -> QWidget:
+    c = self.theme.colors
+    frame = QFrame()
+    frame.setObjectName("gwCard")
+    frame.setStyleSheet(
+        f"QFrame#gwCard {{ background: {c['card_bg']}; border: 1px solid {c['border_light']}; "
+            f"border-radius: 10px; }}"
+    )
+    root = QVBoxLayout(frame)
+    root.setContentsMargins(24, 22, 24, 22)
+
+    stack = QStackedWidget()
+    stack.setStyleSheet("background: transparent;")
+
+    # page 0 : idle（尚无凭据 → 扫码引导）
+    idle = QWidget()
+    idle.setStyleSheet("background: transparent;")
+    il = QVBoxLayout(idle)
+    il.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+    il.setSpacing(12)
+    icon = QLabel(self.header_icon())
+    icon.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    icon.setStyleSheet(f"font-size: 46px; background: transparent; border: none;")
+    il.addWidget(icon)
+    h1 = QLabel(self.idle_headline())
+    h1.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    h1.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {c['text']}; background: transparent; border: none;")
+    il.addWidget(h1)
+    h2 = QLabel("WokBee")
+    h2.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    h2.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {c['text']}; background: transparent; border: none;")
+    il.addWidget(h2)
+    d1 = QLabel(self.idle_desc())
+    d1.setWordWrap(True)
+    d1.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    d1.setStyleSheet(f"color: {c['text_secondary']}; background: transparent; border: none; font-size: 13px;")
+    il.addWidget(d1)
+    scan_btn = QPushButton(self.idle_btn_text())
+    apply_primary_btn(scan_btn, c)
+    scan_btn.setMinimumWidth(220)
+    scan_btn.clicked.connect(self.provision._on_scan)
+    il.addWidget(scan_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+    stack.addWidget(idle)
+
+    # page 1 : connect / qr
+    qr = QWidget()
+    qr.setStyleSheet("background: transparent;")
+    ql = QVBoxLayout(qr)
+    ql.setSpacing(8)
+    holder = QVBoxLayout()
+    holder.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    holder.setSpacing(10)
+    ql.addLayout(holder)
+    self._qr_label = QLabel("")
+    self._qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    self._qr_label.setStyleSheet("background: transparent; border: none;")
+    self._qr_label.setMinimumSize(210, 210)
+    holder.addWidget(self._qr_label)
+    self._timebar = QProgressBar()
+    self._timebar.setMaximumHeight(8)
+    self._timebar.setTextVisible(False)
+    self._timebar.setVisible(self.uses_countdown())
+    self._timebar.setStyleSheet(_progressbar(self.theme))
+    holder.addWidget(self._timebar)
+    self._qr_status = QLabel(self.qr_connecting_text())
+    self._qr_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    self._qr_status.setWordWrap(True)
+    self._qr_status.setStyleSheet(f"color: {c['text']}; background: transparent; border: none; font-size: 13px;")
+    holder.addWidget(self._qr_status)
+    self._qr_steps = QLabel("")
+    self._qr_steps.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    self._qr_steps.setWordWrap(True)
+    self._qr_steps.setStyleSheet(f"color: {c['text_secondary']}; background: transparent; border: none; font-size: 13px;")
+    holder.addWidget(self._qr_steps)
+    ql.addStretch(1)
+    stack.addWidget(qr)
+
+    # page 2 : connected（有凭据 → 运行状态，不再要求重新扫码）
+    conn = QWidget()
+    conn.setStyleSheet("background: transparent;")
+    cl = QVBoxLayout(conn)
+    cl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+    cl.setSpacing(12)
+    ck = QLabel("✅ 已接入")
+    ck.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    ck.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {c['success']}; background: transparent; border: none;")
+    cl.addWidget(ck)
+    self._conn_status = QLabel("未启动")
+    self._conn_status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    self._conn_status.setStyleSheet(f"color: {c['accent']}; background: transparent; border: none; font-size: 15px; font-weight: bold;")
+    cl.addWidget(self._conn_status)
+    self._conn_app = QLabel("")
+    self._conn_app.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    self._conn_app.setWordWrap(True)
+    self._conn_app.setStyleSheet(f"color: {c['text_secondary']}; background: transparent; border: none; font-size: 13px;")
+    cl.addWidget(self._conn_app)
+    dnote = QLabel("凭据已保存在本机。启动后即使退出应用，下次进来会自动重连，无需再次扫码。")
+    dnote.setWordWrap(True)
+    dnote.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    dnote.setStyleSheet(f"color: {c['text_hint']}; background: transparent; border: none; font-size: 12px;")
+    cl.addWidget(dnote)
+    # 已接入页只保留「重新扫码」；启停由上面运行设置的「启用网关」勾选统一承担（issue 2：合并重复控制）
+    brow = QHBoxLayout()
+    brow.setSpacing(10)
+    rescan = QPushButton("重新扫码")
+    apply_secondary_btn(rescan, c)
+    rescan.clicked.connect(self.provision._on_scan)
+    brow.addStretch()
+    brow.addWidget(rescan)
+    brow.addStretch()
+    cl.addLayout(brow)
+    stack.addWidget(conn)
+
+    root.addWidget(stack)
+    self._states = stack
+    self._idle_page, self._qr_page, self._connected_page = idle, qr, conn
+    return frame

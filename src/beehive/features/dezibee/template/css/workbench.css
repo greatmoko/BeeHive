@@ -1,0 +1,217 @@
+@import url("prd.css");
+/* ═══════════════ DeziBee Prototype Workspace 三栏骨架 ═══════════════
+   DeziBee Workbench Framework v2 — 框架文件由 DeziBee 维护，请勿修改 */
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --border: #e3e6ea;
+  --text: #1f2329;
+  --text2: #646a73;
+  --hint: #8f959e;
+  --accent: #3370ff;
+  --accent-soft: #e8f0ff;
+  --warn: #d83931;
+  --nav-w: 220px;
+  --prd-w: 380px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg); color: var(--text); overflow: hidden;
+}
+
+/* 工作台面板细滚动条（iframe 内容的浮动滚动条由 workbench.js 注入） */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,.14); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,.26); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+#app { display: flex; height: 100vh; }
+body.flow-fullscreen #nav,
+body.flow-fullscreen #prdResizer,
+body.flow-fullscreen #prd { display: none; }
+body.flow-fullscreen #canvasWrap { width: 100vw; }
+
+/* ── 左栏：导航 ── */
+#nav {
+  width: var(--nav-w); flex: none; display: flex; flex-direction: column;
+  background: var(--panel); border-right: 1px solid var(--border);
+}
+.nav-head {
+  padding: 12px 14px 8px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 6px;
+}
+.nav-title { font-size: 13px; font-weight: 700; }
+.nav-count { font-size: 11px; color: var(--hint); }
+.nav-tree { flex: 1; overflow: auto; padding: 6px 0; }
+.nav-group-label {
+  padding: 8px 14px 4px; font-size: 11px; color: var(--hint);
+  font-weight: 600; letter-spacing: .04em; user-select: none;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 14px; font-size: 13px; cursor: pointer; user-select: none;
+  border-left: 3px solid transparent; color: var(--text2);
+}
+.nav-item:hover { background: #f2f3f5; }
+.nav-item.active {
+  background: var(--accent-soft); border-left-color: var(--accent);
+  color: var(--accent); font-weight: 600;
+}
+.nav-item .dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: #c9cdd4;
+}
+.nav-item.active .dot, .nav-item.has-active .dot { background: var(--accent); }
+.nav-item .status-tag {
+  margin-left: auto; font-size: 10px; padding: 0 6px; border-radius: 8px;
+  background: #f2f3f5; color: var(--hint); flex: none;
+}
+.status-tag.confirmed { background: #e8f7ee; color: #23a55a; }
+.status-tag.deprecated { background: #feecea; color: var(--warn); }
+.nav-foot {
+  border-top: 1px solid var(--border); padding: 8px; display: flex; gap: 6px;
+}
+.nav-foot button, .canvas-toolbar button, .prd-head button {
+  border: 1px solid var(--border); background: #fff; color: var(--text2);
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.nav-foot button:hover, .canvas-toolbar button:hover, .prd-head button:hover {
+  border-color: var(--accent); color: var(--accent);
+}
+
+/* ── 中栏：画布 ── */
+#canvasWrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.canvas-toolbar {
+  height: 40px; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.canvas-page-name { font-size: 13px; font-weight: 600; }
+.flex-sp { flex: 1; }
+.zoom-label { font-size: 12px; color: var(--text2); min-width: 42px; text-align: center; }
+#viewport {
+  flex: 1; position: relative; overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(0,0,0,.035) 1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(rgba(0,0,0,.035) 1px, transparent 1px) 0 0 / 24px 24px,
+    #eef0f3;
+  cursor: grab;
+}
+#viewport.panning { cursor: grabbing; }
+/* 平移层（transform 只负责位移）+ 缩放层（zoom 重排渲染，缩放后文字/内容保持清晰不发糊） */
+#panner { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+#world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#links {
+  /* 放在 #world 内、卡片下层：坐标即画布坐标，随世界一起平移缩放。
+     left/top 为 0，内部直接用画布坐标；负坐标内容靠 overflow:visible 承载。 */
+  position: absolute; left: 0; top: 0;
+  width: 40000px; height: 40000px;
+  overflow: visible; pointer-events: none; z-index: 1;
+}
+#links path { pointer-events: auto; cursor: pointer; }
+
+/* 原型卡片 */
+.proto-card {
+  position: absolute; background: #fff; border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  display: flex; flex-direction: column; overflow: visible;
+  z-index: 2;
+}
+.proto-card .card-head {
+  display: flex; align-items: center; gap: 6px;
+  flex: none; height: 28px; box-sizing: border-box;
+  padding: 0 10px; border-bottom: 1px solid var(--border);
+  background: #fafbfc; border-radius: 8px 8px 0 0; user-select: none;
+}
+.proto-card .card-name { font-size: 12px; font-weight: 600; }
+.proto-card .card-type {
+  font-size: 10px; color: var(--hint); background: #f2f3f5;
+  border-radius: 8px; padding: 0 6px;
+}
+.proto-card .card-status { margin-left: auto; font-size: 10px; color: var(--hint); }
+.proto-card .card-body {
+  flex: 1; overflow: auto; border-radius: 0 0 8px 8px;
+}
+.proto-card .card-body > iframe {
+  width: 100%; height: 100%; border: 0; display: block; background: #fff;
+}
+.proto-card.selected { outline: 2px solid var(--accent); }
+.proto-card.link-highlight { outline: 2px dashed #ff9f0a; }
+.proto-card.flash { animation: flashBorder 1.2s ease 2; }
+@keyframes flashBorder {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(51,112,255,0); }
+  50% { box-shadow: 0 0 0 6px rgba(51,112,255,.25); }
+}
+
+/* ── 设备外壳（卡片可选 shell 字段；卡片 w/h 始终指屏幕内容区尺寸） ── */
+.proto-card .shell {
+  flex: 1; display: flex; flex-direction: column;
+  position: relative; min-height: 0; min-width: 0;
+}
+.shell .card-body.screen { border-radius: 0; }
+
+/* 手机壳：黑色圆角边框 + 顶部刘海 */
+.shell-phone {
+  background: linear-gradient(#2a2a2e, #17171a);
+  border-radius: 46px; padding: 12px;
+  box-shadow: inset 0 0 0 2px #43434a, 0 10px 28px rgba(0,0,0,.22);
+}
+.shell-phone::before {
+  content: ""; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  width: 88px; height: 24px; background: #17171a; border-radius: 14px;
+  box-shadow: inset 0 0 0 2px #34343a; z-index: 3;
+}
+.shell-phone .card-body.screen {
+  flex: 1; border-radius: 34px; overflow: hidden; background: #fff;
+}
+
+/* 平板壳：黑色窄边框 */
+.shell-tablet {
+  background: linear-gradient(#2a2a2e, #17171a);
+  border-radius: 30px; padding: 14px;
+  box-shadow: inset 0 0 0 2px #43434a, 0 10px 28px rgba(0,0,0,.2);
+}
+.shell-tablet .card-body.screen {
+  flex: 1; border-radius: 16px; overflow: hidden; background: #fff;
+}
+
+/* 浏览器壳：macOS 风格窗口 + 顶栏 + 地址栏 */
+.shell-browser {
+  background: #fff; border: 1px solid #d3d7dd; border-radius: 12px;
+  box-shadow: 0 10px 26px rgba(0,0,0,.14); overflow: hidden;
+}
+.shell-browser::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 34px;
+  background: linear-gradient(#f6f7f9, #ecedf0); border-bottom: 1px solid #dfe3e8;
+  z-index: 1;
+}
+.shell-browser::after {
+  content: ""; position: absolute; top: 8px; left: 60px; right: 14px; height: 19px;
+  background: #fff; border: 1px solid #dde1e6; border-radius: 10px; z-index: 1;
+}
+.shell-browser .dots {
+  position: absolute; top: 0; left: 0; height: 34px;
+  display: flex; align-items: center; gap: 6px; padding-left: 14px; z-index: 2;
+}
+.shell-browser .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+.shell-browser .dots .d-r { background: #ff5f57; }
+.shell-browser .dots .d-y { background: #febc2e; }
+.shell-browser .dots .d-g { background: #28c840; }
+.shell-browser .card-body.screen { flex: 1; margin-top: 34px; background: #fff; }
+
+/* 连线 */
+.link-line { fill: none; stroke: #9aa3af; stroke-width: 1.6; }
+.link-line:hover, .link-line.hl { stroke: #ff9f0a; stroke-width: 2.2; }
+.link-arrow { fill: #9aa3af; }
+.link-arrow.hl { fill: #ff9f0a; }
+.link-label { font-size: 11px; fill: var(--text2); paint-order: stroke; stroke: #eef0f3; stroke-width: 4px; }
+.link-label.hl { fill: #ff9f0a; font-weight: 600; }
+
+/* 空画布提示 */
+.card-hint {
+  position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%);
+  color: var(--hint); font-size: 13px; background: rgba(255,255,255,.9);
+  border: 1px dashed var(--border); border-radius: 10px; padding: 14px 22px;
+  pointer-events: none; text-align: center; line-height: 1.7;
+}
+.card-hint.hidden { display: none; }

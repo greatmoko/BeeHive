@@ -36,7 +36,9 @@ Desktop.ini
 .DS_Store
 *.lnk
 
-# 本地文档（不入库）
+# 本地文档和测试代码（不入库）
+docs/
+tests/
 reviews/
 
 # Reasonix 工具本地文件（不入库）

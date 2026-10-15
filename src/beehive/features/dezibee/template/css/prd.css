@@ -1,0 +1,150 @@
+/* ── 右栏：PRD ── */
+#prd {
+  width: var(--prd-w); flex: none; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--border);
+}
+.prd-head {
+  height: 40px; flex: none; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.prd-toc-toggle {
+  width: 34px; height: 28px; padding: 0 !important;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 16px !important; line-height: 1;
+}
+.prd-toc-toggle.is-open {
+  background: #6b7280 !important; color: #fff !important;
+  border-color: #6b7280 !important;
+}
+.prd-toc-toggle.is-closed {
+  background: #fff !important; color: #111827 !important;
+}
+.prd-toc-toggle.is-open:hover { background: #4b5563 !important; color: #fff !important; }
+.prd-toc-toggle.is-closed:hover { background: #fff !important; color: #111827 !important; border-color: var(--accent) !important; }
+.prd-title { font-size: 13px; font-weight: 700; }
+.prd-toc {
+  max-height: 32vh; overflow: auto; padding: 8px 0;
+  border-bottom: 1px solid var(--border); background: #fafbfc;
+}
+.prd-toc.hidden { display: none; }
+.toc-item {
+  padding: 4px 14px; font-size: 12px; color: var(--text2);
+  cursor: pointer; border-left: 3px solid transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.toc-item.lvl2 { padding-left: 14px; font-weight: 600; }
+.toc-item.lvl3 { padding-left: 28px; }
+.toc-item.lvl4 { padding-left: 42px; }
+.toc-item:hover { color: var(--accent); }
+.toc-item.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+.prd-body { flex: 1; overflow: auto; padding: 16px 18px 40px; }
+.prd-section { scroll-margin-top: 12px; }
+.prd-section h2, .prd-section h3, .prd-section h4 { margin: 18px 0 8px; line-height: 1.4; }
+.prd-section h2 { font-size: 16px; }
+.prd-section h3 { font-size: 14px; }
+.prd-section h4 { font-size: 13px; }
+.prd-section p, .prd-section li { font-size: 13px; line-height: 1.75; color: var(--text); }
+.prd-section code {
+  font-family: Consolas, monospace; font-size: 12px; background: #f2f3f5;
+  color: #d4380d; padding: 1px 5px; border-radius: 4px;
+}
+.prd-section pre {
+  background: #1f2329; color: #e5e7eb; border-radius: 8px;
+  padding: 10px 12px; overflow: auto;
+}
+.prd-section pre code { background: transparent; color: inherit; padding: 0; }
+.prd-section table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.prd-section th, .prd-section td {
+  border: 1px solid var(--border); font-size: 12px; padding: 5px 8px; text-align: left;
+}
+.prd-section th { background: #fafbfc; }
+
+/* PRD 内原型引用链接（点击 → 画布聚焦） */
+.prd-ref {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--accent); background: var(--accent-soft);
+  border-radius: 6px; padding: 1px 8px; font-size: 12px;
+  cursor: pointer; text-decoration: none; border: none;
+}
+.prd-ref:hover { text-decoration: underline; }
+
+/* PRD 章节高亮（卡片 → PRD 定位） */
+.prd-section.section-flash { animation: sectionFlash 1.6s ease 2; }
+@keyframes sectionFlash {
+  0%, 100% { background: transparent; }
+  50% { background: var(--accent-soft); }
+}
+
+/* 双栏联动浮层提示 */
+#hlOverlay {
+  position: fixed; inset: 0; z-index: 99; pointer-events: none;
+}
+#hlOverlay.hidden { display: none; }
+
+/* 窄屏兜底：PRD 可收起 */
+@media (max-width: 1100px) { :root { --prd-w: 300px; --nav-w: 190px; } }
+
+/* ── PRD 直接编辑 ── */
+.hidden { display: none !important; }
+.prd-actions { display: flex; align-items: center; gap: 6px; }
+.prd-status {
+  flex: none; padding: 6px 12px; font-size: 12px; line-height: 1.5;
+  border-bottom: 1px solid var(--border);
+}
+.prd-status.info { background: #f2f3f5; color: var(--text2); }
+.prd-status.ok { background: #e8f7ee; color: #23a55a; }
+.prd-status.err { background: #feecea; color: var(--warn); }
+.prd-edit-sec {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 10px; background: #fafbfc;
+}
+.prd-edit-head { display: flex; gap: 6px; margin-bottom: 6px; }
+.prd-edit-title {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text);
+  padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: #fff; font-family: inherit;
+}
+.prd-edit-level {
+  width: 58px; flex: none; font-size: 12px; color: var(--text2);
+  padding: 4px; border: 1px solid var(--border); border-radius: 6px; background: #fff;
+}
+.prd-edit-title:focus, .prd-edit-level:focus { outline: none; border-color: var(--accent); }
+.prd-edit-content {
+  height: 46vh; min-height: 64px; overflow: auto;
+  border: 1px dashed var(--border); border-radius: 6px;
+  padding: 8px 10px; background: #fff;
+  font-size: 13px; line-height: 1.75; color: var(--text);
+}
+/* 编辑区高度拖拽手柄（向下拖 = 加高） */
+.prd-edit-grip {
+  height: 12px; margin-top: 2px; cursor: row-resize;
+  display: flex; align-items: center; justify-content: center;
+}
+.prd-edit-grip::before {
+  content: ""; width: 46px; height: 4px; border-radius: 2px; background: #d5d9e0;
+}
+.prd-edit-grip:hover::before { background: var(--accent); }
+body.resizing-col { cursor: col-resize; user-select: none; }
+body.resizing-row { cursor: row-resize; user-select: none; }
+
+/* PRD 宽度拖拽条（中栏与右栏之间；分隔线由拖拽条自身绘制） */
+.prd-resizer {
+  flex: none; width: 6px; position: relative;
+  cursor: col-resize; background: transparent; z-index: 3;
+}
+.prd-resizer::after {
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+  width: 1px; margin-left: -0.5px; background: var(--border);
+}
+.prd-resizer:hover, .prd-resizer.dragging { background: var(--accent-soft); }
+.prd-resizer:hover::after, .prd-resizer.dragging::after {
+  background: var(--accent); width: 2px; margin-left: -1px;
+}
+.prd-edit-content:focus { outline: none; border-style: solid; border-color: var(--accent); }
+.prd-edit-content p, .prd-edit-content li { font-size: 13px; line-height: 1.75; }
+.prd-edit-content h2, .prd-edit-content h3, .prd-edit-content h4 { margin: 10px 0 6px; }
+.prd-edit-content table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.prd-edit-content th, .prd-edit-content td {
+  border: 1px solid var(--border); font-size: 12px; padding: 5px 8px; text-align: left;
+}
