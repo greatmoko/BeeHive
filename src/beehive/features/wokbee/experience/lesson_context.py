@@ -22,21 +22,11 @@ def build_environment_block(
     )
 
 def collect_scripts_context(project_root: Path, *, max_chars: int = 12000) -> str:
-    """收集 memory/pipeline.json 与 memory/、uploads/ 下脚本源码摘要，供 AI 总结。"""
+    """收集 memory/、uploads/ 下脚本源码摘要，供 AI 总结。"""
     root = Path(project_root)
     mdir = memory_dir(root)
     udir = uploads_dir(root)
     parts: list[str] = []
-    pipe = mdir / "pipeline.json"
-    if pipe.exists():
-        try:
-            parts.append(
-                "### memory/pipeline.json\n```json\n"
-                + pipe.read_text(encoding="utf-8")[:4000]
-                + "\n```"
-            )
-        except OSError:
-            pass
     for label, sdir in (("memory", mdir), ("uploads", udir)):
         if not sdir.exists():
             continue
@@ -48,7 +38,7 @@ def collect_scripts_context(project_root: Path, *, max_chars: int = 12000) -> st
             if len(body) > 2500:
                 body = body[:2500] + "\n# …(截断)"
             parts.append(f"### {label}/{p.name}\n```python\n{body}\n```")
-    text = "\n\n".join(parts) if parts else "（尚无 memory/ 脚本与管线）"
+    text = "\n\n".join(parts) if parts else "（尚无 memory/ 可复用脚本）"
     if len(text) > max_chars:
         text = text[:max_chars] + "\n…(脚本上下文截断)"
     return text

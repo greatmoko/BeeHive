@@ -7,7 +7,7 @@ AI_SCRIPT_EXTENSIONS = frozenset(
     {".py", ".bat", ".cmd", ".ps1", ".json", ".sh", ".js", ".vbs"}
 )
 
-_RESERVED_SCRIPT_NAMES = frozenset({"pipeline.json"})
+_RESERVED_SCRIPT_NAMES = frozenset({"events.jsonl"})
 
 def make_script_name(project_id: str, purpose: str, ext: str = ".py", ts: str | None = None) -> str:
     """规范脚本命名：项目ID_脚本作用(≤4个词)_时间戳(年月日时分秒)。

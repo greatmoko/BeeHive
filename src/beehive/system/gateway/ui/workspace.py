@@ -1,5 +1,6 @@
 """消息频道导航与接入面板装配。"""
 from __future__ import annotations
+from functools import partial
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QStackedWidget
 from beehive.common.ui.theme import Theme
 from beehive.system.gateway.connection import ConnectionRuntime
@@ -28,7 +29,8 @@ class GatewayWorkspace(QWidget):
             "feishu": _FeishuPanel(self.theme, self.manager, binding=self.binding_factory("feishu") if self.binding_factory else None),
             "wechat": _WeChatPanel(self.theme, self.manager, binding=self.binding_factory("wechat") if self.binding_factory else None),
         }
-        for panel in self._panels.values():
+        for key, panel in self._panels.items():
+            panel.provisioned_changed.connect(partial(self._rail.set_provisioned, key))
             self._stack.addWidget(panel)
         lay.addWidget(self._stack, stretch=1)
 
@@ -40,6 +42,8 @@ class GatewayWorkspace(QWidget):
 
     def refresh(self):
         cfg = self.store.get_config()
+        for key, panel in self._panels.items():
+            self._rail.set_provisioned(key, panel.has_creds(cfg))
         chan = cfg.channel if cfg.channel in self._panels else "feishu"
         self._rail.select(chan)
         self._show_channel(chan)

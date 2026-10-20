@@ -38,12 +38,13 @@ def build_session_context_block(
                 "  - uploads/：用户上传文件——可读写引用，长期保留；",
                 "  - output/：项目交付物——最终成果必须写在这里；",
                 "  - memory/：应用维护的记忆（events.jsonl 事件日志、exp_时间戳.md 经验、"
-                "pipeline.json 管线、可复用脚本、技能快照）——可读写；"
+                "可复用脚本、技能快照）——可读写；"
                 "events.jsonl 与已有经验由系统维护，不要主动改写；",
                 "  - .project/：系统维护（project.json 项目配置 + Agent.md 用户自定义项目规则）"
                 "——Agent 默认不可改写；",
                 "  - 项目根目录：临时脚本、参考文件、中间材料、执行反馈 script_callback_*.md "
-                "放这里；可复用脚本经确认后固化到 memory/。",
+                "以及运行产生的文档都放这里，无需主动整理归档（归档时统一清理）；"
+                "可复用脚本经确认后固化到 memory/。",
             ]
         )
         lines.extend(

@@ -47,7 +47,6 @@ class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
         self._experience_updated_by_tool: bool = False
         self._step_budget: _StepBudget | None = None
         self._seen_tool_update_ids: set[str] = set()
-        self._phase_states: list[dict[str, Any]] = []
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
         self.on_ask_user_needed: Callable[[dict], None] | None = None
@@ -64,7 +63,6 @@ class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
     def _configure_step_budget(self, req: RunRequest) -> None:
         self._step_budget = _StepBudget(req.max_steps)
         self._seen_tool_update_ids = set()
-        self._phase_states = []
 
     def _graph_config(self, thread_id: str, req: RunRequest) -> dict:
         # 图递归上限作为硬停止边界，逻辑预算另计工具更新。
@@ -101,33 +99,6 @@ class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
         if new_count:
             self._step_budget.consume("tool_update", new_count)
 
-    def _record_phase_state(
-        self,
-        *,
-        phase_index: int,
-        phase_type: str,
-        status: str,
-        detail: str = "",
-    ) -> None:
-        state = {
-            "step": phase_index + 1,
-            "type": phase_type,
-            "status": status,
-            "detail": detail[:500],
-        }
-        self._phase_states.append(state)
-        self._emit(
-            "info",
-            f"管线第 {phase_index + 1} 步已结束：{status}"
-            + (f"（{detail[:300]}）" if detail else ""),
-            {
-                "pipeline_step": phase_index,
-                "pipeline_type": phase_type,
-                "pipeline_status": status,
-                "phase_end": True,
-            },
-        )
-
     def _cancelled_result(
         self, req: RunRequest, allow_auto_lesson: bool
     ) -> RunResult:
@@ -140,7 +111,7 @@ class AgentRunner(AgentAssemblyMixin, ExperienceWriterMixin, RunnerFlowMixin):
     def _finalize_early_failure(
         self, req: RunRequest, result: RunResult, agent: Any, config: dict
     ) -> None:
-        """管线 AI 轮次提前结束时仍执行经验修复。"""
+        """AI 轮次提前结束时仍执行经验修复。"""
         if result.outcome not in ("failed", "incomplete"):
             return
         err = result.error or f"AI 阶段未完成（{result.outcome}）"

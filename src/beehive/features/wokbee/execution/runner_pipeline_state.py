@@ -1,4 +1,4 @@
-"""单次项目管线执行的显式状态。"""
+"""单次项目运行执行的显式状态。"""
 from dataclasses import dataclass, field
 from typing import Any
 @dataclass
@@ -10,5 +10,3 @@ class PipelineState:
     base_content: Any = ""
     final_text: str = ""
     trajectory_messages: list = field(default_factory=list)
-    current_phase_index: int | None = None
-    current_phase_type: str = ""

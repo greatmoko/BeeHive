@@ -1,9 +1,11 @@
 """网关 UI 频道选择栏."""
 from __future__ import annotations
+from pathlib import Path
 
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QVBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QWidget
 
 from beehive.common.ui.theme import Theme
 class _ChannelButton(QPushButton):
@@ -19,13 +21,31 @@ class _ChannelButton(QPushButton):
         self._key = key
         self._theme = theme
         self._available = enabled
+        self._label = label
         self.setText(f"{icon}  {label}" + ("" if enabled else "  ·即将上线"))
+        self._provisioned_icon = QLabel(self)
+        resource = Path(__file__).resolve().parents[3] / "common/ui/resources/gateway-provisioned.svg"
+        self._provisioned_icon.setPixmap(QIcon(str(resource)).pixmap(16, 16))
+        self._provisioned_icon.setStyleSheet("background: transparent; border: none;")
+        self._provisioned_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 14, 0)
+        layout.addStretch()
+        layout.addWidget(self._provisioned_icon)
+        self.set_provisioned(False)
         self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setCheckable(True)
         self.toggled.connect(self._apply)  # setChecked(active) 之后也要重绘高亮
         self.setChecked(active)
         self.clicked.connect(lambda: self.activated.emit(self._key))
+
+    def set_provisioned(self, provisioned: bool):
+        """凭据齐全时显示接入标记，与右侧接入卡保持一致。"""
+        self._provisioned_icon.setVisible(provisioned)
+        status = "已接入（凭据已保存）" if provisioned else "未接入"
+        self.setToolTip(f"{self._label} · {status}")
+        self.setAccessibleName(f"{self._label}，{status}")
 
     def _apply(self):
         c = self._theme.colors
@@ -99,6 +119,9 @@ class _ChannelRail(QWidget):
         """程序化选中某个已启用频道（供 refresh() 按配置记忆）。"""
         if key in self._buttons and self._buttons[key]._available:
             self._on_activated(key)
+
+    def set_provisioned(self, key: str, provisioned: bool):
+        self._buttons[key].set_provisioned(provisioned)
 
 
 # ── 接入面板基类（飞书 / 微信共用，两面板近乎一致故收敛为一份） ────────────

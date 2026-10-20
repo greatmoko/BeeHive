@@ -1,4 +1,4 @@
-"""经验上下文收集、结果合并、管线固化和持久化协调。"""
+"""经验上下文收集、结果合并、脚本固化和持久化协调。"""
 from __future__ import annotations
 import logging
 from beehive.features.wokbee.experience.lesson_models import Lesson
@@ -8,7 +8,7 @@ from beehive.features.wokbee.experience.lesson_context import collect_scripts_co
 from beehive.features.wokbee.execution.runner_experience import fallback_notes, fallback_success_path, load_latest_round_events
 from beehive.features.wokbee.execution.runner_models import RunRequest
 from beehive.system.runtime.runtime_env_format import build_runtime_env_block
-from beehive.features.wokbee.experience.lesson_summary import solidify_lesson_pipeline
+from beehive.features.wokbee.experience.lesson_summary import solidify_lesson_scripts
 from beehive.features.wokbee.execution.runner_lesson_model import summarize_run
 from beehive.features.wokbee.execution.runner_lesson_references import snapshot_references
 
@@ -67,8 +67,7 @@ def _write_lesson(
             f"- 上一份经验：{len(previous_text or '')} 字\n"
             f"- 运行日志：{len(run_log or '')} 字"
             f"（事件约 {len(events or [])} 条）\n"
-            f"- 脚本/pipeline：{len(scripts_ctx or '')} 字\n"
-            f"- 阶段状态：{len(self._phase_states)} 条",
+            f"- 脚本：{len(scripts_ctx or '')} 字",
         )
 
         ai_fields = summarize_run(self, req, outcome, previous_text, run_log, summary, scripts_ctx, env, use_ai)
@@ -101,32 +100,23 @@ def _write_lesson(
 
         # 固化与工具直写共用；失败交给外层处理，不保存不一致的经验。
         solidify_path = "\n".join(x for x in (trace_for_scripts, path_f) if x)
-        applied_order, ai_written_count = solidify_lesson_pipeline(
+        ai_written_count = solidify_lesson_scripts(
             req.project_root,
             lesson,
             success_path=solidify_path,
             events=events,
             script_files=ai_fields.get("script_files") or [],
-            pipeline_steps=ai_fields.get("pipeline_steps") or [],
         )
         total_scripts = len(lesson.scripts)
-        if total_scripts or applied_order:
-            order_note = (
-                "（已采用 AI 给出的 pipeline_steps：script+ai 混合）"
-                if applied_order
-                else "（自动固化真实执行顺序：确定性脚本步骤）"
-            )
+        if total_scripts:
             self._emit(
                 "info",
-                f"已按成功路径写入有序步骤到 memory/pipeline.json"
-                f"（脚本 {total_scripts} 个{order_note}；"
-                f"其中 AI 手写脚本 {ai_written_count} 个）；"
-                f"下次按 steps 一路执行（script 自动执行；"
-                f"ai 步骤执行固定业务任务按需耗 Token；仅脚本报错/数据异常时才异常接管）；"
-                f"memory/ 不参与归档",
+                f"已固化可复用脚本 {total_scripts} 个到 memory/"
+                f"（其中 AI 手写 {ai_written_count} 个，均通过存在性校验）；"
+                f"下次运行由 AI 读取最新经验后按成功路径调取执行。",
                 {"scripts": lesson.scripts},
             )
-        elif not total_scripts:
+        else:
             self._emit(
                 "info",
                 "本轮未识别到可固化脚本，且 AI 未手写 script_files；"

@@ -26,7 +26,7 @@ from beehive.system.prompts.automation import (
     AUTOBEE_CONFIG_SYSTEM_PROMPT,
 )
 
-from beehive.system.prompts.pipeline import PIPELINE_RESUME_PROMPT, script_acceptance_prompt
+from beehive.system.prompts.pipeline import PIPELINE_RESUME_PROMPT
 
 from beehive.system.prompts.experience import (
     EXPERIENCE_SUMMARY_SYSTEM_PROMPT,

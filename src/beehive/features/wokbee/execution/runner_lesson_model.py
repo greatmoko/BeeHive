@@ -1,6 +1,5 @@
 """经验模型输入调用、结果预览和规则回退。"""
 from __future__ import annotations
-import json
 import logging
 from beehive.features.wokbee.experience.lesson_ai import summarize_lesson_with_ai
 from beehive.system.agent.model_factory import build_chat_model
@@ -36,10 +35,6 @@ def summarize_run(self, req, outcome, previous_text, run_log, summary, scripts_c
                     run_log=run_log or summary,
                     scripts_context=scripts_ctx,
                     environment_hint=env,
-                    phase_states=json.dumps(
-                        self._phase_states,
-                        ensure_ascii=False,
-                    ),
                 )
                 # 结束后再展示完整结果（生成过程不刷进度气泡）
                 preview_parts = []

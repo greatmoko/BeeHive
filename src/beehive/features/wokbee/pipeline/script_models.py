@@ -12,6 +12,4 @@ class ScriptStep:
 @dataclass
 class SolidifyResult:
     script_steps: list[ScriptStep] = field(default_factory=list)
-    pipeline_rel: str = "memory/pipeline.json"
     script_section_md: str = ""
-    order_section_md: str = ""

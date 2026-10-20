@@ -1,5 +1,6 @@
 """通道状态与配置界面；业务绑定卡由应用传入。"""
 from __future__ import annotations
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QApplication
 from beehive.common.ui.theme import Theme
 from beehive.system.gateway.connection import ConnectionRuntime
@@ -10,6 +11,8 @@ from beehive.system.gateway.ui.layout import build_panel
 from beehive.system.gateway.ui.connection_card import build_connection_card
 
 class _ChannelPanelBase(QWidget):
+    provisioned_changed = Signal(bool)
+
     def __init__(self, theme: Theme, manager: ConnectionRuntime, parent=None, *, binding=None):
         super().__init__(parent)
         self.theme = theme
@@ -133,6 +136,7 @@ class _ChannelPanelBase(QWidget):
         st = self.manager.status_text(self.channel_key())
         self._status_lbl.setText(st)
         self._conn_status.setText(st)
+        self.provisioned_changed.emit(self.has_creds(self.store.get_config()))
 
     def refresh(self):
         cfg = self.store.get_config()

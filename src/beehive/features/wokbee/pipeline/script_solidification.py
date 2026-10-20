@@ -1,7 +1,8 @@
-"""根据运行轨迹固化脚本与初始 Pipeline。"""
+"""根据运行轨迹固化可复用脚本到 memory/。"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,13 +10,10 @@ from beehive.common.io.safe_io import safe_write_text
 from beehive.features.wokbee.pipeline.script_models import ScriptStep, SolidifyResult
 
 
-from beehive.features.wokbee.pipeline.validation import format_order_markdown
 from beehive.features.wokbee.projects.paths import ensure_project_layout, scripts_dir
 from beehive.features.wokbee.pipeline.script_events import extract_scriptable_from_events, extract_scriptable_from_path_text
 from beehive.features.wokbee.pipeline.script_commands import _project_script_path_from_command, _script_tokens
 from beehive.features.wokbee.pipeline.script_render import _render_script
-from beehive.features.wokbee.pipeline.script_publish import _render_publish_script
-from beehive.features.wokbee.pipeline.script_policy import goal_wants_deliverables, events_touched_deliverables, goal_no_check
 from beehive.features.wokbee.pipeline.script_names import make_script_name
 
 def solidify_scripts(
@@ -26,11 +24,9 @@ def solidify_scripts(
     summary: str = "",
     success_path: str = "",
     events: list | None = None,
-    write_pipeline: bool = True,
 ) -> SolidifyResult:
-    """根据轨迹固化脚本；write_pipeline=False 时留待调用方提交最终管线。"""
-
-
+    """根据轨迹固化脚本：从执行事件与成功路径中提取真实跑过的命令，
+    渲染成脚本写入 memory/；不再生成 pipeline.json。"""
 
     ensure_project_layout(project_root)
     sdir = scripts_dir(project_root)
@@ -50,8 +46,18 @@ def solidify_scripts(
             scriptable.append(s)
 
     written: list[ScriptStep] = []
-    ordered_steps: list[dict] = []
     project_id = Path(project_root).name
+
+    # 内容指纹 → 已有脚本：同参数重复固化（同轮修正/后续轮重跑）时直接复用，不再写重复脚本。
+    # 指纹按换行符/BOM 归一化，避免 CRLF/LF 差异导致误判不重复。
+    content_index: dict[str, str] = {}
+    for p in sorted(sdir.glob("*")):
+        if p.is_file() and p.suffix.lower() in {".py", ".bat", ".cmd", ".ps1", ".sh", ".js"}:
+            try:
+                text = p.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+            except (OSError, UnicodeDecodeError):
+                continue
+            content_index.setdefault(hashlib.sha256(text.encode("utf-8")).hexdigest(), f"memory/{p.name}")
 
     def _unique_fname(purpose: str, ext: str = ".py") -> str:
         """规范命名 + 同秒同名冲突时追加序号，绝不覆盖已有脚本。"""
@@ -75,7 +81,7 @@ def solidify_scripts(
             if direct:
                 direct_upload_paths.add(direct.lower())
 
-    for i, step in enumerate(scriptable, 1):
+    for step in scriptable:
         if step.tool == "execute":
             command = str((step.args or {}).get("command") or "")
             direct = _project_script_path_from_command(project_root, command, "uploads")
@@ -86,19 +92,15 @@ def solidify_scripts(
                 step.args = {"source": "uploaded_script", "path": direct}
                 step.description = f"直接运行上传脚本：{direct}"
                 written.append(step)
-                ordered_steps.append(
-                    {
-                        "id": f"script_{i}",
-                        "type": "script",
-                        "path": direct,
-                        "tool": "script",
-                        "description": step.description,
-                        "args": {},
-                    }
-                )
                 continue
 
             generated = _project_script_path_from_command(project_root, command, "memory")
+            if generated:
+                # 命令引用的 memory/ 脚本已存在（如收尾自测/后续轮复用）：直接引用，不套娃新脚本。
+                step.rel_path = generated
+                step.description = f"直接执行既有脚本：{generated}"
+                written.append(step)
+                continue
             has_memory_ref = any(
                 "/memory/" in token.replace("\\", "/").lower()
                 or token.replace("\\", "/").lower().startswith("memory/")
@@ -111,6 +113,12 @@ def solidify_scripts(
         src = _render_script(step)
         if not src:
             continue
+        digest = hashlib.sha256(src.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        if digest in content_index:
+            # 同参数脚本已存在（同轮重考/后续轮重跑）：复用既有地址，不写重复文件。
+            step.rel_path = content_index[digest]
+            written.append(step)
+            continue
         if step.tool == "execute":
             label = str((step.args or {}).get("label") or "execute")
         else:
@@ -119,81 +127,9 @@ def solidify_scripts(
         path = sdir / fname
         safe_write_text(path, src)
         step.rel_path = f"memory/{fname}"
+        content_index[digest] = step.rel_path
         written.append(step)
-        ordered_steps.append(
-            {
-                "id": f"script_{i}",
-                "type": "script",
-                "path": step.rel_path,
-                "tool": step.tool,
-                "description": f"获取数据：{step.description}"[:200],
-                "args": step.args,
-            }
-        )
 
-    # 默认顺序：全部数据脚本（真实执行序）→ 可选确定性发布步骤
-    # 注意：本路径（规则/无模型回退）只固化确定性 script 步骤；ai 步骤由总结 AI 通过
-    # apply_ai_pipeline_steps 按需并入（明确的业务任务，如分析/整理/撰写）。不生成 final_ai。
-
-    # 发布步骤：仅当目标明确要求产物进 output/，或本次执行确实写过 output/ 时才补
-    if written and (goal_wants_deliverables(goal) or events_touched_deliverables(events)):
-        pub_name = _unique_fname("publish_deliverables")
-        pub_path = sdir / pub_name
-        pub_src = _render_publish_script()
-        safe_write_text(pub_path, pub_src)
-        ordered_steps.append(
-            {
-                "id": f"script_publish",
-                "type": "script",
-                "path": f"memory/{pub_name}",
-                "tool": "publish",
-                "description": "发布：把脚本实际产出文件复制到 output/",
-                "args": {},
-            }
-        )
-        written.append(
-            ScriptStep(
-                tool="publish",
-                args={},
-                description="publish deliverables",
-                rel_path=f"memory/{pub_name}",
-            )
-        )
-
-    order_md = format_order_markdown(ordered_steps)
-    pipeline = {
-        "version": 3,
-        "lesson_id": lesson_id,
-        "goal": goal,
-        "steps": ordered_steps,
-        "order_markdown": order_md,
-        # 兼容旧字段（新策略：script 步骤来自固化，ai 步骤由总结 AI 并入）
-        "scripts": [
-            {
-                "path": s.rel_path,
-                "tool": s.tool,
-                "description": s.description,
-                "args": s.args,
-            }
-            for s in written
-        ],
-        "ai_steps": [],
-        "policy": {
-            "ordered_execution": True,
-            "invoke_ai_on_script_error": True,
-            # 目标明确「不校验/不检查/不验证」时不允许因数据/内容异常唤醒 AI
-            "invoke_ai_on_bad_data": not goal_no_check(goal),
-            "scripts_not_archived": True,
-            # 策略：script 步骤自动执行；ai 步骤为已确定的业务任务（由总结 AI 并入时生效）
-            "ai_steps_in_pipeline": True,
-            "ai_intervention": "ai_steps_and_error_recovery",
-        },
-    }
-    if write_pipeline:
-        safe_write_text(
-            sdir / "pipeline.json",
-            json.dumps(pipeline, ensure_ascii=False, indent=2),
-        )
     if written:
         script_md = "\n".join(
             f"- `{s.rel_path}` — {s.description}" for s in written
@@ -201,15 +137,12 @@ def solidify_scripts(
         script_md += (
             "\n\n约定：每个脚本执行后把 callback 写入 "
             "`script_callback_<脚本名>.md`（项目根目录）；"
-            "需要交付的文件由发布脚本复制到 output/（保留原始文件，不合并成 final.md）。"
-            "执行顺序见 `memory/pipeline.json` 的 steps。"
+            "需要交付的文件复制到 output/（保留原始文件，不合并成 final.md）。"
         )
     else:
         script_md = "（本轮无可固化脚本。）"
 
     return SolidifyResult(
         script_steps=written,
-        pipeline_rel="memory/pipeline.json",
         script_section_md=script_md,
-        order_section_md=order_md,
     )

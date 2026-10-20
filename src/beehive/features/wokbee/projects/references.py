@@ -161,7 +161,7 @@ def quarantine_obsolete_skill_snapshots(
 ) -> tuple[list[str], Path]:
     """把 memory/ 下不在 used_skills 里的技能快照目录移入 archives/discard_<ts>/。
 
-    只动 memory/ 下的子目录（技能快照）；exp_*.md、pipeline.json、脚本与
+    只动 memory/ 下的子目录（技能快照）；exp_*.md、脚本与
     events.jsonl 等文件一律不动。
     返回 (已移走目录名列表, 目标目录)。可逆：不删除，只是搬到归档下。
     """

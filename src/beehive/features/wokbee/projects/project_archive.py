@@ -5,7 +5,7 @@ v2 项目根目录契约（见 paths.py）：archives/、uploads/、output/、me
   （output/ 保留 README.txt）；uploads/、memory/（含 events.jsonl）、.project/、
   archives/ 自身、旧版目录（runs/、workspace/、scripts/ 等，如存在）一律不动。
 - include_memory=True（清空经验归档）：在普通归档基础上，把 memory/ 下的
-  经验（exp_*.md，含 memory/experiences/ 旧布局）、pipeline.json、复用脚本、
+  经验（exp_*.md，含 memory/experiences/ 旧布局）、复用脚本、
   技能快照目录、skills_manifest.md 一并归档并清除；events.jsonl 永久保留、
   绝不清空，旧项目的 memory/session_memory.md 保留不清不归档。
 - 事件日志永久保留：归档不再调用 clear_events。
@@ -200,7 +200,7 @@ def _archive_memory_experience(root: Path, dest: Path, archived: list[str], fail
     """清空经验归档：复制并清除 memory/ 下的经验内容（events.jsonl、session_memory.md 除外）。
 
     - 子目录（如 memory/experiences/ 旧布局、技能快照目录）整目录复制后清除；
-    - 顶层文件除 events.jsonl / session_memory.md 外（exp_*.md、pipeline.json、
+    - 顶层文件除 events.jsonl / session_memory.md 外（exp_*.md、
       复用脚本、skills_manifest.md 等）逐个复制后删除；
     - 复制失败的源文件原地保留。
     """
@@ -273,7 +273,7 @@ def _write_manifest(
         lines.append("- `memory/session_memory.md`（旧版会话记忆，如存在，保留不清不归档）")
         lines.append("- `memory/` 中其余未归档内容（如旧版 memory/experiences/ 复制失败时原地保留）")
     else:
-        lines.append("- `memory/` 全部内容（含经验 exp_*.md、pipeline.json、复用脚本、技能快照）")
+        lines.append("- `memory/` 全部内容（含经验 exp_*.md、复用脚本、技能快照）")
     lines.extend([
         "- `.project/`（project.json 与 Agent.md）",
         "- `archives/` 自身（Agent 禁止访问）",
@@ -303,7 +303,7 @@ def archive_session(
         永远保留：uploads/、memory/（全部内容，含 events.jsonl）、.project/、
         archives/ 自身；旧版目录（runs/、workspace/、scripts/ 等）不动。
         include_memory=True（清空经验）：另把 memory/ 下经验（exp_*.md）、
-        pipeline.json、复用脚本、技能快照目录、skills_manifest.md 归档并清除，
+        复用脚本、技能快照目录、skills_manifest.md 归档并清除，
         events.jsonl 永久保留；不再调用 clear_events。
         复制失败的源文件保留不删，并记录在快照 MANIFEST.md 中。
         存档超过 MAX_ARCHIVES 份时自动删除最旧（仅 arch_*，不动 discard_*）。

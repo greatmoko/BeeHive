@@ -5,7 +5,7 @@ from beehive.system.prompts import (
     EXPERIENCE_UPDATE_SYSTEM_PROMPT as _AI_SUMMARY_JUDGE_SYSTEM,
 )
 from typing import Any
-from beehive.features.wokbee.experience.lesson_ai_parse import _parse_ai_summary_json, _normalize_ai_script_files, _normalize_ai_pipeline_steps, _normalize_ai_used_skills, _normalize_ai_reference_materials
+from beehive.features.wokbee.experience.lesson_ai_parse import _parse_ai_summary_json, _normalize_ai_script_files, _normalize_ai_used_skills, _normalize_ai_reference_materials
 
 def summarize_lesson_with_ai(
     *,
@@ -16,13 +16,11 @@ def summarize_lesson_with_ai(
     run_log: str,
     scripts_context: str,
     environment_hint: str = "",
-    phase_states: str = "",
 ) -> dict[str, Any]:
     """调用模型总结经验；失败时抛出异常由调用方回退。
 
     返回字段均为 str，另含：
     - script_files: list[dict]（AI 手写脚本，可为空）
-    - pipeline_steps: list[dict]（有序管线步骤）
     - used_skills: list[str]（本次用到的 Skill 目录名）
     - reference_materials: list[dict]（需保存进 memory/ 的参考材料）
     生成过程在内部收齐，结束后一次性返回，避免向时间线刷进度气泡。
@@ -32,9 +30,7 @@ def summarize_lesson_with_ai(
         f"本轮 outcome：{outcome}\n\n"
         f"## 上一份经验（可能为空）\n{previous_experience or '（无）'}\n\n"
         f"## 本次运行日志\n{run_log}\n\n"
-        f"## 本轮阶段状态（按时间顺序；失败时必须据此修正管线）\n"
-        f"{phase_states or '（没有预定义 pipeline 阶段；请从运行日志还原真实步骤）'}\n\n"
-        f"## 现有脚本与 pipeline\n{scripts_context}\n\n"
+        f"## 现有脚本\n{scripts_context}\n\n"
         f"## 环境提示\n{environment_hint or '（无）'}\n\n"
 
     )
@@ -81,7 +77,6 @@ def summarize_lesson_with_ai(
         val = data.get(key)
         out[key] = str(val).strip() if val is not None else ""
     out["script_files"] = _normalize_ai_script_files(data.get("script_files"))
-    out["pipeline_steps"] = _normalize_ai_pipeline_steps(data.get("pipeline_steps"))
     out["used_skills"] = _normalize_ai_used_skills(data.get("used_skills"))
     out["reference_materials"] = _normalize_ai_reference_materials(
         data.get("reference_materials")

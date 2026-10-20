@@ -18,7 +18,7 @@ class ExperienceWriterMixin:
         """本轮是否出现脚本失败 / 工具报错 / 数据异常等。
 
         只有出现异常（并由 AI 接管处理）的运行，才在结束前做「是否需要更新
-        Pipeline / 经验」的判断；稳定复跑的干净执行不做判断（省一次 LLM 调用）。
+        经验」的判断；稳定复跑的干净执行不做判断（省一次 LLM 调用）。
         """
         for ev in self._snapshot_run_events():
             kind = (getattr(ev, "kind", "") or "").strip()
@@ -52,7 +52,7 @@ class ExperienceWriterMixin:
         仅两种情况由系统补写（走 AI 总结管线）：
         1. 首次运行（经验库为空）且 Agent 未写过——保底固化管线；
         2. 本轮出现异常——经验总结阶段必须复核每个阶段状态；即使 Agent 已经用工具
-           更新过，也要让总结 AI 判断并直接修正 pipeline/经验。
+           更新过，也要让总结 AI 判断并直接修正经验。
         其余情况（非首次成功、Agent 已更新、取消）不写。
         """
         store = LessonStore(req.project_root)
@@ -72,7 +72,7 @@ class ExperienceWriterMixin:
             self._emit(
                 "info",
                 "本轮出现异常；经验总结 AI 将复核每个阶段状态并直接修正经验"
-                "（含 pipeline/脚本）。",
+                "（含脚本）。",
             )
         return self._write_lesson(
             req,

@@ -5,7 +5,7 @@
 - uploads/     用户上传文件（同名加时间后缀不覆盖；长期保留，归档不清空）
 - output/      项目交付物（最终成果必须写在这里；归档时复制后清空）
 - memory/      记忆与事件：events.jsonl（事件日志）、exp_时间戳.md（经验）、
-               pipeline.json（管线）、复用脚本与技能快照直接存放
+               复用脚本与技能快照直接存放
 - .project/    系统维护：project.json（项目配置）+ Agent.md（用户自定义项目规则）
 """
 

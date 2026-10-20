@@ -40,9 +40,7 @@ class Lesson:
     policy: str = ""
     script_section: str = ""
     ai_section: str = ""
-    order_section: str = ""
     scripts: list[str] = field(default_factory=list)
-    pipeline: str = "memory/pipeline.json"
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     filename: str = ""  # memory/ 下文件名，如 exp_20260101_120000.md
@@ -69,7 +67,6 @@ def render_lesson_md(lesson: Lesson) -> str:
         f"updated_at: {lesson.updated_at}",
         f"project_id: {lesson.project_id}",
         "automation: hybrid",
-        f"pipeline: {lesson.pipeline or 'memory/pipeline.json'}",
         f"file: {display_name}",
     ]
     if scripts_yaml:
@@ -90,7 +87,7 @@ def render_lesson_md(lesson: Lesson) -> str:
             "",
             "## 成功实现路径",
             "",
-            "> 只保留**成功且必要**的有序步骤，后续运行将**严格照此执行**；"
+            "> 只保留**成功且必要**的有序步骤，供后续运行参考（AI 阅读后自行决定是否执行）；"
             "每步按固定格式：`序号. 执行角色: \"{执行内容}\"; 【步骤说明】`——"
             "执行角色为 AI / 工具调用 / 脚本执行 / 系统执行；`{}` 内写明详细命令/脚本地址/提示词，"
             "`【】` 内为解释性说明；一律用虚拟路径，禁止 Windows 绝对路径。失败/试错/被弃用的尝试不写入。",
@@ -98,6 +95,13 @@ def render_lesson_md(lesson: Lesson) -> str:
             (
                 lesson.success_path.strip()
                 or "（未记录具体步骤。）"
+            ),
+            "",
+            "## 可复用脚本",
+            "",
+            (
+                lesson.script_section.strip()
+                or "（本轮无可固化脚本。）"
             ),
             "",
             "## 注意事项",

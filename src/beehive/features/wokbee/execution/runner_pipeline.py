@@ -1,7 +1,7 @@
 """运行入口、恢复与成功/失败收尾；单轮状态显式归属。"""
 from __future__ import annotations
 from beehive.system.prompts import PIPELINE_RESUME_PROMPT
-from beehive.features.wokbee.execution.runner_models import RunRequest, RunResult, StepLimitExceeded
+from beehive.features.wokbee.execution.runner_models import RunResult, StepLimitExceeded
 from beehive.features.wokbee.execution.runner_sessions import reset_run_state as _reset_run_state
 from beehive.system.agent.message_content import _attachment_content
 from beehive.system.agent.message_content import _extract_text
@@ -9,7 +9,6 @@ from beehive.features.wokbee.execution.runner_support import _format_engine_erro
 from beehive.features.wokbee.execution.runner_support import build_success_path_from_messages
 from beehive.features.wokbee.execution.runner_modes import mode_policy
 from beehive.features.wokbee.execution.runner_pipeline_state import PipelineState
-from beehive.features.wokbee.execution.runner_pipeline_phases import advance_pipeline
 import logging
 
 logger = logging.getLogger("wokbee")
@@ -53,16 +52,14 @@ def run_pipeline(self, req: RunRequest, *, resume: bool = False) -> RunResult:
         "目录约定：文件工具虚拟路径 / 即项目根；execute 用真实路径（工作目录为项目根）。"
         "uploads/ 读写；output/ 交付物；memory/ 记忆（events.jsonl 由系统维护）；"
         "archives/ 禁止访问；临时脚本与中间材料放项目根目录。\n"
-        "执行策略：已有 memory/pipeline.json 时按 steps 顺序一路执行——"
-        "script 步骤自动执行（不耗 Token）；ai 步骤执行已确定的业务任务（按需调 LLM，"
-        "不重新规划）；仅当脚本报错 / 数据异常 / 输出不符预期时才异常接管。",
+        "执行策略：AI 主导——第一时间查看 memory/ 是否有最新经验文件："
+        "非首次运行则按经验记载的成功路径调取并运行 memory/ 下的可复用脚本，再推进剩余任务；"
+        "首次运行则直接推进目标；收尾固化已验证的流程与脚本供下次复用。",
         {"phase": "hint"},
     )
 
     run_state.final_text = ""
     run_state.trajectory_messages: list = []
-    run_state.current_phase_index: int | None = None
-    run_state.current_phase_type = ""
 
     try:
         if resume:
@@ -81,14 +78,23 @@ def run_pipeline(self, req: RunRequest, *, resume: bool = False) -> RunResult:
                 },
                 first=True,
             )
-            if early:
-                self._finalize_early_failure(req, early, run_state.agent, run_state.config)
-                return early
         else:
-            # ── 有序管线：按 pipeline.json steps 顺序逐步推进 ──
-            early = advance_pipeline(self, req, run_state)
-            if early is not None:
-                return early
+            # ── AI 主导：读取经验与管线参考，由 AI 决定脚本执行 ──
+            early = self._run_agent_turn(
+                run_state.agent,
+                run_state.config,
+                run_state.seen_msg_ids,
+                req,
+                payload={
+                    "messages": [
+                        {"role": "user", "content": run_state.base_content}
+                    ]
+                },
+                first=True,
+            )
+        if early:
+            self._finalize_early_failure(req, early, run_state.agent, run_state.config)
+            return early
 
         # 收尾：再取一次最终文本（不重复刷时间线）
         try:
@@ -124,13 +130,6 @@ def run_pipeline(self, req: RunRequest, *, resume: bool = False) -> RunResult:
         logger.warning("Agent 达到 max_steps 硬上限：%s", e)
         err = str(e)
         self._emit("error", err, {"outcome": "incomplete", "max_steps": e.limit})
-        if run_state.current_phase_index is not None:
-            self._record_phase_state(
-                phase_index=run_state.current_phase_index,
-                phase_type=run_state.current_phase_type or "ai",
-                status="失败-AI接管后失败",
-                detail=err,
-            )
         fail_path = ""
         try:
             state = run_state.agent.get_state(run_state.config)
@@ -157,13 +156,6 @@ def run_pipeline(self, req: RunRequest, *, resume: bool = False) -> RunResult:
         logger.exception("Agent 运行失败")
         err = _format_engine_error(e)
         self._emit("error", f"执行失败：{err}")
-        if run_state.current_phase_index is not None:
-            self._record_phase_state(
-                phase_index=run_state.current_phase_index,
-                phase_type=run_state.current_phase_type or "ai",
-                status="失败-AI接管后失败",
-                detail=err,
-            )
         fail_path = ""
         try:
             state = run_state.agent.get_state(run_state.config)

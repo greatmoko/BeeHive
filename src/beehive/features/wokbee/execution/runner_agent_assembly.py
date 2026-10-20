@@ -39,7 +39,6 @@ from beehive.features.wokbee.projects.paths import agent_rules_path
 from beehive.features.wokbee.execution.runner_sessions import get_checkpointer as _get_checkpointer, remember_agent
 from beehive.system.runtime.runtime_env_format import build_runtime_env_settings_text
 from beehive.system.runtime.runtime_env_cache import ensure_runtime_env
-from beehive.features.wokbee.pipeline.script_runner import peek_pipeline
 
 logger = logging.getLogger("wokbee")
 
@@ -114,29 +113,27 @@ class AgentAssemblyMixin:
         ) = mount_capabilities(self, req, project_backend, interrupt_on)
 
         # 项目经验注入策略：
-        # - run/chat 模式自动注入项目经验；design 模式跳过经验管线。
+        # - run/chat 模式自动注入项目经验；design 模式跳过经验流程。
         # - 经验只来自当前项目的 memory/，不读取全局或对话记忆。
-        pipe_probe = peek_pipeline(req.project_root) if policy.pipeline else None
-        first_run = pipe_probe is None or not pipe_probe.ran or not pipe_probe.steps
-        self._mode_label = mode_label(mode, first_run=first_run)
+        # 首次判定：memory/ 下存在最新经验文件（exp_*.md）即为非首次运行，与管线无关。
         lesson_store = LessonStore(req.project_root) if policy.experience else None
+        first_run = lesson_store is None or lesson_store.is_empty()
+        self._mode_label = mode_label(mode, first_run=first_run)
 
         experience_digest = lesson_store.prompt_digest() if lesson_store is not None else ""
-        if lesson_store is not None and not lesson_store.is_empty():
+        if lesson_store is not None:
             latest = lesson_store.latest_path()
             if first_run:
                 self._emit(
                     "info",
-                    f"首次运行（执行管线为空），已注入最新项目经验："
-                    f"{latest.name if latest else 'memory/'}"
-                    f"（历史经验不注入；禁止使用 archives/）",
+                    "首次运行（memory/ 下尚无经验文件），将从零开始执行目标；"
+                    "收尾请固化本次验证过的流程与可复用脚本。",
                 )
             else:
                 self._emit(
                     "info",
-                    f"非首次运行（已有执行管线），仍自动注入项目经验："
-                    f"{latest.name if latest else 'memory/'}"
-                    ".",
+                    f"非首次运行：已检测到最新经验 {latest.name if latest else 'memory/exp_*.md'}"
+                    "，请按经验记载的成功路径调取并运行 memory/ 下的脚本，再推进剩余任务。",
                 )
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块

@@ -59,113 +59,178 @@ def build_success_path_from_timeline_events(
 
 from pathlib import Path
 from typing import Any
+import re
 
 from beehive.features.wokbee.experience.lesson_models import Lesson
-from beehive.features.wokbee.experience.lesson_pipeline import sync_lesson_from_pipeline
 from beehive.features.wokbee.experience.lesson_storage import LessonStore
 
-def merge_pipeline_steps(
-    ai_steps: list[dict[str, Any]],
-    solid_steps: list[Any],
-    ai_written: list[Any],
-) -> list[dict[str, Any]]:
-    """合并「轨迹固化脚本」「AI 手写脚本」与 AI 给出的 pipeline_steps。
+_SCRIPT_EXT = r"(?:py|bat|cmd|ps1|sh|js|json)"
+# 注：扩展名后必须跟非单词字符（\W 或行尾），避免把 memory/events.jsonl 误匹配成 memory/events.js
+_MEMORY_SCRIPT_REF = re.compile(rf"memory/[\w\-.\u4e00-\u9fff]+\.{_SCRIPT_EXT}(?![\w.])", re.IGNORECASE)
+_SCRIPT_PATH_LINE = re.compile(r"^\s*(\d+)[.、．]\s*(.*)$")
+_SCRIPT_NOTE = re.compile(r"【([^】]*)】")
 
-    AI 引用的 script 路径若在磁盘上不存在，尝试按文件名匹配轨迹固化或
-    AI 手写产生的真实脚本；仍匹配不上时由 pipeline 固化层拒绝整条提案。
-    AI 明确给出 pipeline_steps 时完全尊重其顺序，不再把未覆盖脚本前插，避免
-    改变无 pipeline 探索出的真实脚本/AI 交错路径。AI 未给清单时才使用轨迹顺序。
+
+def _step_match_tokens(step) -> list[str]:
+    """从固化步骤的参数中提取可与成功路径文本匹配的 token（小写）。"""
+    args = getattr(step, "args", None) or {}
+    tokens: set[str] = set()
+    url = str(args.get("url") or "")
+    if url:
+        m = re.match(r"https?://([^/?#]+)", url)
+        if m:
+            for part in m.group(1).lower().split("."):
+                if len(part) >= 2 and part not in {"com", "cn", "net", "org", "gov", "edu", "www"}:
+                    tokens.add(part)
+        tail = url.split("?", 1)
+        if len(tail) == 2:
+            for kv in tail[1].split("&"):
+                key = kv.split("=", 1)[0]
+                if len(key) >= 4:
+                    tokens.add(key.lower())
+    for field in ("query", "keyword", "q"):
+        val = str(args.get(field) or "")
+        for w in re.findall(r"[\w\u4e00-\u9fff]{2,}", val):
+            tokens.add(w.lower())
+    for w in re.findall(r"[\w.\-/\\]{3,}", str(args.get("command") or "")):
+        tokens.add(w.lower())
+    src = str(args.get("_src") or "")
+    if src:
+        tokens.add(src.lower())
+    return sorted(t for t in tokens if len(t) >= 2)
+
+
+def _map_scripts_into_success_path(lesson: Lesson, steps: list) -> None:
+    """把成功路径中对应工具调用的步骤改写为“脚本执行: {固化脚本地址}”。
+
+    匹配：用步骤参数中的 URL 域名/query/命令 token 找最佳命中行（每行只占用一次）；
+    改写保留原序号与【备注】，仅替换执行角色与执行内容，保证下次运行可直接调取脚本。
     """
-    merged: list[dict[str, Any]] = []
-    for raw in ai_steps or []:
-        if not isinstance(raw, dict):
-            continue
-        merged.append(dict(raw))
-
-    real_names: dict[str, str] = {}  # 小写文件名 → 规范化 memory/ 路径
-    for st in list(solid_steps or []) + list(ai_written or []):
+    lines = (lesson.success_path or "").splitlines()
+    used: set[int] = set()
+    for st in steps:
         rel = str(getattr(st, "rel_path", "") or "")
-        if rel:
-            real_names[Path(rel).name.lower()] = rel
-
-    covered: set[str] = set()
-    for step in merged:
-        if str(step.get("type") or "").lower() != "script":
+        if not rel:
             continue
-        path = str(step.get("path") or "").replace("\\", "/").strip()
-        base = Path(path).name.lower() if path else ""
-        if base and base in real_names:
-            step["path"] = real_names[base]  # AI 引用名对齐真实脚本
-        covered.add(base)
-        covered.add(str(step.get("path") or "").replace("\\", "/").strip().lower())
+        tokens = _step_match_tokens(st)
+        if not tokens:
+            continue
+        best_i, best_score = -1, 0
+        for i, line in enumerate(lines):
+            if i in used or rel in line or "脚本执行" in line:
+                continue
+            low = line.lower()
+            score = sum(1 for t in tokens if t in low)
+            if score > best_score:
+                best_i, best_score = i, score
+        if best_i < 0:
+            continue
+        m = _SCRIPT_PATH_LINE.match(lines[best_i])
+        num = m.group(1) if m else str(best_i + 1)
+        note_m = _SCRIPT_NOTE.search(lines[best_i])
+        note = note_m.group(1) if note_m else ""
+        lines[best_i] = f'{num}. 脚本执行: "{rel}"' + (f"【{note}】" if note else "")
+        used.add(best_i)
+    lesson.success_path = "\n".join(lines)
 
-    if merged:
-        return merged
-    return [
-        {
-            "type": "script",
-            "path": getattr(st, "rel_path", "") or "",
-            "tool": getattr(st, "tool", "") or "script",
-            "description": (getattr(st, "description", "") or "轨迹固化脚本")[:200],
-            "args": getattr(st, "args", {}) or {},
-        }
-        for st in list(solid_steps or [])
-        if getattr(st, "rel_path", "")
-    ]
-
-
-def solidify_lesson_pipeline(
+def solidify_lesson_scripts(
     project_root: Path,
     lesson: Lesson,
     *,
     success_path: str,
     events: list | None = None,
     script_files: list[dict] | None = None,
-    pipeline_steps: list[dict] | None = None,
-) -> tuple[bool, int]:
-    """两条经验写入路径共用；显式提案通过校验前不改写 pipeline。"""
+) -> int:
+    """两条经验写入路径共用：固化脚本到 memory/ 并校验脚本真实存在。
+
+    - 轨迹固化：从执行事件与成功路径提取真实跑过的命令，渲染成脚本写入 memory/。
+    - AI 手写脚本：把 script_files 提供的完整源码写入 memory/。
+    - 校验：lesson.scripts 中每个脚本必须真实存在于磁盘，否则抛错、经验不落盘。
+
+    返回 AI 手写脚本数量；固化结果同步回填 lesson.scripts（相对虚拟路径）。
+    """
     from beehive.features.wokbee.pipeline.script_ai import apply_ai_authored_scripts
-    from beehive.features.wokbee.pipeline.script_pipeline_writer import apply_ai_pipeline_steps
     from beehive.features.wokbee.pipeline.script_solidification import solidify_scripts
 
-    has_proposal = bool(pipeline_steps)
+    root = Path(project_root)
+
+    # 先拒绝幽灵引用：success_path 引用的 memory/ 脚本必须真实存在，
+    # 或由本轮 script_files 提供（随后会重写为固化后的真实路径）。
+    ai_names = {
+        str(item.get("filename") or "").strip().lower()
+        for item in (script_files or [])
+        if isinstance(item, dict)
+    }
+    ghosts = [
+        ref for ref in _MEMORY_SCRIPT_REF.findall(success_path or "")
+        if not (root / ref).is_file()
+        and Path(ref).name.lower() not in ai_names
+    ]
+    if ghosts:
+        raise ValueError(
+            "脚本固化校验失败，以下脚本未成功写入磁盘，经验未保存："
+            + "、".join(sorted(set(ghosts)))
+            + "。请修正 script_files 的源码后重试。"
+        )
+
     solid = solidify_scripts(
-        project_root,
+        root,
         lesson_id=lesson.id,
         goal=lesson.goal,
         summary=lesson.summary,
         success_path=success_path,
         events=events,
-        write_pipeline=not has_proposal,
     )
     ai_written = apply_ai_authored_scripts(
-        project_root,
+        root,
         lesson_id=lesson.id,
         project_id=lesson.project_id,
         script_files=script_files or [],
-        write_pipeline=not has_proposal,
     )
-    applied = False
-    if has_proposal:
-        rename_map = {
-            str(step.args["_src"]): Path(step.rel_path).name
-            for step in ai_written
-            if step.args.get("_src")
-        }
-        applied = apply_ai_pipeline_steps(
-            project_root,
-            lesson_id=lesson.id,
-            goal=lesson.goal,
-            pipeline_steps=merge_pipeline_steps(pipeline_steps, solid.script_steps, ai_written),
-            rename_map=rename_map or None,
+
+    scripts: list[str] = []
+    for st in list(solid.script_steps) + list(ai_written):
+        rel = str(getattr(st, "rel_path", "") or "")
+        if rel and rel not in scripts:
+            scripts.append(rel)
+
+    # 系统校验：脚本必须真实存在于 memory/ 或 uploads/，拒绝幽灵脚本
+    missing = [
+        rel for rel in scripts
+        if not (root / rel).is_file()
+    ]
+    if missing:
+        lesson.scripts = []
+        raise ValueError(
+            "脚本固化校验失败，以下脚本未成功写入磁盘，经验未保存："
+            + "、".join(missing)
+            + "。请修正 script_files 的源码后重试。"
         )
-        if not applied:
-            raise ValueError(
-                "pipeline_steps 校验失败，原 pipeline 和经验未更新。"
-                "请确认脚本路径存在，或在 script_files 中提供完整源码后重试。"
-            )
-    sync_lesson_from_pipeline(lesson, project_root)
-    return applied, len(ai_written)
+    lesson.scripts = scripts
+
+    # 正文“可复用脚本”章节：列出固化脚本与用途，供下次运行直接调取。
+    entries = [
+        f"- `{st.rel_path}` — {getattr(st, 'description', '') or ''}".rstrip(" —")
+        for st in list(solid.script_steps) + list(ai_written)
+        if getattr(st, "rel_path", "")
+    ]
+    if entries:
+        lesson.script_section = (
+            "\n".join(entries)
+            + "\n\n约定：每个脚本执行后把 callback 写入 `script_callback_<脚本名>.md`（项目根目录）；"
+            "需要交付的文件复制到 output/（保留原始文件，不合并成 final.md）。"
+        )
+    else:
+        lesson.script_section = "（本轮无可固化脚本。）"
+
+    # 把 success_path 中对应工具调用的步骤改写为固化脚本地址（AI 手写脚本用 _src 精确替换）。
+    for st in list(solid.script_steps) + list(ai_written):
+        rel = str(getattr(st, "rel_path", "") or "")
+        src = str((getattr(st, "args", None) or {}).get("_src") or "")
+        if rel and src:
+            lesson.success_path = lesson.success_path.replace(src, rel)
+    _map_scripts_into_success_path(lesson, list(solid.script_steps) + list(ai_written))
+    return len(ai_written)
 
 
 def write_ai_lesson(
@@ -179,17 +244,15 @@ def write_ai_lesson(
     notes: str = "",
     errors: str = "",
     script_files: list[dict[str, Any]] | None = None,
-    pipeline_steps: list[dict[str, Any]] | None = None,
     used_skills: list[str] | None = None,
     reference_materials: list[dict[str, Any]] | None = None,
     model_label: str = "",
     policy: str = "",
     events: list[Any] | None = None,
 ) -> Lesson:
-    """把 Agent 给出的经验内容直接固化为经验文档 + pipeline + 脚本（不调 LLM）。
+    """把 Agent 给出的经验内容直接固化为经验文档 + memory/ 脚本（不调 LLM）。
 
-    复用与结束总结完全相同的固化管线（solidify/AI 手写脚本/pipeline/Skills 快照/
-    参考材料登记），保证后续运行可严格照章执行。管线固化失败时不写入经验。
+    脚本固化失败（如源码为空、写盘失败、脚本不存在）时不写入经验。
     """
     from beehive.features.wokbee.projects.references import snapshot_used_skills as _snap_skills
     from beehive.features.wokbee.projects.references import write_reference_manifest as _write_manifest
@@ -208,13 +271,12 @@ def write_ai_lesson(
         policy=policy,
     )
 
-    solidify_lesson_pipeline(
+    solidify_lesson_scripts(
         root,
         lesson,
         success_path=lesson.success_path,
         events=list(events or []),
         script_files=script_files,
-        pipeline_steps=pipeline_steps,
     )
 
     try:

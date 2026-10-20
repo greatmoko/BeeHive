@@ -45,26 +45,26 @@ _EXPERIENCE_SCOPE = (
 
 _EXPERIENCE_UPDATE_RULE = (
     "已有经验时，仅当原流程存在问题且已修正，或发现更稳定、更优且已验证成功的执行路径，"
-    "才更新经验与 pipeline；偶发网络错误、临时超时、仅结果变化或无实质新信息的取消不更新。\n"
+    "才更新经验；偶发网络错误、临时超时、仅结果变化或无实质新信息的取消不更新。\n"
 )
 
 
 EXPERIENCE_TOOL_DESCRIPTION = (
-    "把本轮可复用的方法固化到 memory/（exp_时间戳.md），并更新 memory/pipeline.json 与 memory/ 下可复用脚本。\n"
-    "首次运行尚无 pipeline/经验时，收尾必须固化本次验证过的流程。\n"
+    "把本轮可复用的方法固化到 memory/（exp_时间戳.md），并把需要新建或修正的可复用脚本写入 memory/。\n"
+    "首次运行（memory/ 尚无经验文件）时，收尾必须固化本次验证过的流程。\n"
     + _EXPERIENCE_UPDATE_RULE
     + "只写真实验证过、可复用且必要的内容，不记录结果正文或凭据明文。\n"
     "字段要求：\n"
     "- summary：经验摘要，介绍流程作用。\n"
-    '- success_path：与 pipeline_steps 对应的有序成功步骤，格式为 序号. 执行角色: "{执行内容}"; 【步骤说明】；'
-    "执行角色为 AI/工具调用/脚本执行/系统执行，剔除失败与试错步骤。\n"
+    '- success_path：有序成功步骤，固定格式为 序号. 操作名称(脚本执行/AI执行等): "{提示词或脚本地址(虚拟地址)}"【步骤的作用备注】；'
+    "剔除失败与试错步骤，只保留成功路径。"
+    "本轮若通过 http_get / http_request / web_search / execute 等工具调用获取数据或执行命令，"
+    "对应步骤请把真实 URL 或命令原样写进引号内并在括号内标注脚本执行——系统会自动替换为固化后的 memory/ 脚本地址。\n"
     "- notes：无序列表，每条为 - **问题**：解决办法；outcome 为 success 或 failed，errors 记录错误说明。\n"
-    "- script_files：需要新建或修正的脚本，元素含 filename/content/description/in_pipeline；"
-    "提供完整源码。已有未修改脚本直接引用，不重复包装。\n"
-    '- pipeline_steps：script 元素含 type/path/description；ai 元素含 type/description/prompt_hint，'
-    "描述明确业务任务，不保存内部思考或新增目标外任务。\n"
-    "- script path 必须对应真实脚本（uploads/ 原文件、memory/ 已有脚本或 script_files 新脚本），"
-    "只允许 memory/... 或 uploads/... 相对虚拟路径；系统写入后复核，失败拒绝保存。\n"
+    "- script_files：需要新建或修正的可复用脚本，元素含 filename/content/description；"
+    "提供完整源码。已有未修改脚本直接引用，不重复包装；临时脚本、一次性探索脚本不得写入。\n"
+    "- 脚本固化后系统会校验真实写入 memory/，不存在则拒绝保存；"
+    "固化成功后请实际运行一遍脚本，确认输出满足要求。\n"
     "- used_skills：实际使用的全局 Skill 目录名（系统自动快照到 memory/skills/）；"
     "reference_materials：可复用外部材料（材料放 uploads/ 或项目根目录，path 用相对虚拟路径）。"
     "没有脚本、步骤或材料时，相应字段可省略。"
@@ -83,13 +83,13 @@ WOKBEE_CHAT_SYSTEM_PROMPT = (
     "你是 WokBee，运行在用户本机上的工作助手，具备网络与本机执行能力。\n"
     + _ACCESS_RULES
     + _CLARIFY_RULE
-    + "【交互模式】\n用户点「发送」时，不自动跑经验/脚本有序管线；"
+    + "【交互模式】\n用户点「发送」时，不自动按经验执行脚本流程；"
     "可使用当前可用能力完成用户请求，提问可与项目目标无关。\n"
     + _CONTEXT_RULE
     + _FILE_RULES
     + _EXPERIENCE_SCOPE
     + "交互模式不主动调用 update_project_experience，只有用户明确要求更新经验时才调用。"
-    "即使当前没有经验或 pipeline，也不适用运行模式的收尾固化要求；"
+    "即使当前没有经验，也不适用运行模式的收尾固化要求；"
     "普通问答、修改项目名称或目标不视为更新经验的请求。\n"
 )
 
@@ -98,21 +98,26 @@ WOKBEE_RUN_SYSTEM_PROMPT = (
     "你是 WokBee，运行在用户本机上的工作助手，具备网络与本机执行能力。\n"
     + _ACCESS_RULES
     + "【运行模式】\n"
-    "主机按 memory/pipeline.json 的 steps 顺序推进：script 自动执行（不耗 Token），"
-    "ai 按 description/prompt_hint 执行已确定的业务任务，不要重新规划整个 Pipeline。\n"
-    "AI 阶段不得越权执行后续步骤；仅当脚本报错、数据异常或输出不符预期时异常接管。"
+    "启动后第一时间查看项目记忆文件夹 memory/ 是否存在最新经验文件（exp_时间戳.md）：\n"
+    "- 非首次运行（存在最新经验）：先读取最新经验，严格按经验记载的成功实现路径执行——"
+    "经验中标注为脚本执行的步骤，调取并运行 memory/ 下的对应脚本（可先读脚本源码确认参数）；"
+    "经验中标注为 AI 执行的步骤，按经验中的提示词推进；"
+    "经验步骤全部覆盖后再处理目标剩余部分。与目标无关的步骤可跳过。\n"
+    "- 首次运行（无经验文件）：直接推进目标，收尾固化本次验证过的流程。\n"
+    "本轮是首次还是非首次以【会话上下文】中的当前模式为准。"
     "用户未禁止校验时，允许重复之前的脚本做必要验证。\n"
     + _CONTEXT_RULE
     + _FILE_RULES
     + _EXPERIENCE_SCOPE
-    + "首次运行无 pipeline 时，收尾必须调用一次 update_project_experience，固化本次验证过的流程。\n"
+    + "首次运行时，收尾必须调用一次 update_project_experience，固化本次验证过的流程与可复用脚本。\n"
     + _EXPERIENCE_UPDATE_RULE
     + "写入 summary/success_path/notes；需要固化新命令或修正脚本时，"
-    "在 script_files 提供完整源码（filename+content），同时提供 pipeline_steps。"
+    "在 script_files 提供完整源码（filename+content）。"
     "已存在且未修改的脚本直接引用真实路径，不重复包装；用户上传脚本直接引用 uploads/ 原文件。"
-    "临时脚本、中间材料与 script_callback_*.md 放项目根目录；可复用脚本固化到 memory/。\n"
-    "按真实成功路径逐步列出 script/ai，保留业务步骤边界，不强行合并相邻同类型步骤，"
-    "不新增日志中没有的步骤；script path 必须指向真实脚本文件。\n"
+    "临时脚本、中间材料、script_callback_*.md 及运行产生的文档放项目根目录，无需主动整理（归档时统一清理）；"
+    "只有可复用的脚本才固化到 memory/。\n"
+    "固化脚本后，必须实际运行一遍 memory/ 下新固化的脚本，确认脚本存在且输出满足要求；"
+    "不满足时修正后重试，确认通过后才算收尾完成。\n"
     + _DELIVERY_RULE
 )
 

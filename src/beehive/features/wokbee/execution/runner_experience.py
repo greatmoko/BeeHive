@@ -42,7 +42,7 @@ def fallback_notes(errors: str) -> str:
     if errors:
         notes.append(
             f"- **本次运行报错**：复跑前先核对环境与脚本——{errors[:300]}；"
-            "可固化步骤已固化到 memory/ 与 memory/pipeline.json，脚本报错时 AI 介入补救。"
+            "可固化步骤已固化到 memory/（仅供参考），下次由 AI 判断是否执行。"
         )
     notes.extend((
         "- **需要实时数据**：必须联网获取，禁止凭记忆编造；禁止访问 archives/ 归档数据。",

@@ -102,11 +102,10 @@ class ProjectSettingsForm(QWidget):
         limits.addStretch()
         bl.addLayout(limits)
         phase_hint = QLabel(
-            "运行默认 128 步，聊天默认 64 步；管线脚本、Agent 调用和工具调用共用运行预算，不再单独限制管线阶段数。"
-            "管线按 memory/pipeline.json 的 steps 顺序一路执行："
-            "script 步骤自动跑（不耗 Token）；ai 步骤执行已确定的 AI 业务任务（按需调 LLM，"
-            "不重新规划整个 Pipeline）；仅当脚本报错/数据异常/输出不符预期时才异常接管；"
-            "运行结束后由 AI 判断是否需要更新 Pipeline。"
+            "运行默认 128 步，聊天默认 64 步。"
+            "运行时由 AI 主导：启动后先查看 memory/ 是否有最新经验文件，"
+            "非首次运行按经验记载的成功路径调取并运行 memory/ 下的可复用脚本；"
+            "运行结束后按需更新经验文档。"
         )
         phase_hint.setWordWrap(True)
         phase_hint.setStyleSheet(hint_label_qss(c))
